@@ -434,7 +434,11 @@ export type Source = {
   prefix: string;
   cdxPattern: string;
   url: string;
+  postFilter: string;
 };
+
+/** The registry's "not applicable to this kind" marker. */
+const NOT_APPLICABLE = "-";
 
 const SOURCE_KINDS: SourceKind[] = ["archived", "spotlight", "live"];
 
@@ -456,21 +460,33 @@ export function parseSourceRegistry(contents: string): Source[] {
     if (raw.trim() === "" || raw.trim().startsWith("#")) continue;
 
     const fields = raw.split("\t").map((field) => field.trim());
-    if (fields.length !== 5) {
-      throw new Error(`line ${line}: expected 5 tab-separated fields, found ${fields.length}`);
+    if (fields.length !== 6) {
+      throw new Error(`line ${line}: expected 6 tab-separated fields, found ${fields.length}`);
     }
 
-    const [key, kind, prefix, cdxPattern, url] = fields;
+    const [key, kind, prefix, cdxPattern, url, postFilter] = fields;
     if (!key || !prefix) throw new Error(`line ${line}: a source needs a key and a cache prefix`);
+    if (!cdxPattern || !url || !postFilter) {
+      throw new Error(`line ${line}: every column needs a value; write "${NOT_APPLICABLE}" where a kind does not use one`);
+    }
     if (!SOURCE_KINDS.includes(kind as SourceKind)) {
       throw new Error(`line ${line}: unknown kind "${kind}", expected one of ${SOURCE_KINDS.join(", ")}`);
+    }
+    // The sweep matches its posts by this substring and reads the slug that
+    // follows it, so it goes in the registry rather than in the fetcher: a
+    // second sweep for a different series is otherwise a row that fetches
+    // nothing while looking perfectly well formed.
+    if (kind === "spotlight" && !/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(postFilter)) {
+      throw new Error(
+        `line ${line}: a spotlight source needs a post filter of letters, digits and dashes, not "${postFilter}"`,
+      );
     }
     if (keys.has(key)) throw new Error(`line ${line}: duplicate source key "${key}"`);
     if (prefixes.has(prefix)) throw new Error(`line ${line}: duplicate cache prefix "${prefix}"`);
 
     keys.add(key);
     prefixes.add(prefix);
-    sources.push({ key, kind: kind as SourceKind, prefix, cdxPattern, url });
+    sources.push({ key, kind: kind as SourceKind, prefix, cdxPattern, url, postFilter });
   }
 
   if (!sources.length) throw new Error("no sources declared");
@@ -666,6 +682,139 @@ export function toCsv(rows: RosterRow[]): string {
     );
   }
   return lines.join("\n") + "\n";
+}
+
+const CSV_COLUMNS = ["name", "role", "years_active", "source_url", "captured_at", "confidence"];
+
+function splitCsv(body: string): string[][] {
+  const records: string[][] = [];
+  let record: string[] = [];
+  let field = "";
+  let quoted = false;
+
+  for (let i = 0; i < body.length; i += 1) {
+    const char = body[i];
+    if (quoted) {
+      if (char !== '"') field += char;
+      else if (body[i + 1] === '"') (field += '"'), (i += 1);
+      else quoted = false;
+    } else if (char === '"') quoted = true;
+    else if (char === ",") (record.push(field), (field = ""));
+    else if (char === "\n") (record.push(field), records.push(record), (record = []), (field = ""));
+    else field += char;
+  }
+  if (field !== "" || record.length) (record.push(field), records.push(record));
+
+  return records;
+}
+
+/**
+ * Read back what toCsv wrote, preamble and all. The committed roster is the
+ * only input the file's own coverage report needs, which is what lets that
+ * report be refreshed with no snapshot cache and no network.
+ */
+export function parseRosterCsv(contents: string): RosterRow[] {
+  const lines = contents.split("\n");
+  const headerAt = lines.findIndex((line) => !line.startsWith("#"));
+  if (headerAt < 0) throw new Error("no header row: every line is a comment");
+
+  const records = splitCsv(lines.slice(headerAt).join("\n"));
+  const header = records.shift();
+  if (!header || header.join(",") !== CSV_COLUMNS.join(",")) {
+    throw new Error(`unexpected header row: ${header?.join(",")}`);
+  }
+
+  const rows: RosterRow[] = [];
+  for (const [index, record] of records.entries()) {
+    if (record.length !== CSV_COLUMNS.length) {
+      throw new Error(`row ${index + 1}: expected ${CSV_COLUMNS.length} fields, found ${record.length}`);
+    }
+    const [name, role, yearsActive, sourceUrl, capturedAt, confidence] = record;
+    if (!(confidence in CONFIDENCE_RANK)) {
+      throw new Error(`row ${index + 1}: "${confidence}" is not a confidence level`);
+    }
+    rows.push({ name, role, yearsActive, sourceUrl, capturedAt, confidence: confidence as Confidence });
+  }
+  return rows;
+}
+
+// --- the README's derived numbers ------------------------------------------
+
+const COUNT_IN_WORDS = [
+  "No", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
+];
+
+const COVERAGE_TABLE = /(## Gaps in the record[\s\S]*?```\n)([\s\S]*?)(```)/;
+const HEADLINE = /([\d,]+) people,(\s+)across (\d+) of the (\d+) years/;
+const UNDATED = /(\w+) more (?:people carry|person carries) no year at all/;
+
+/** "2024-25  12  ← coaches only" -> the note beside the count, if there is one. */
+function notesInTable(table: string): Map<string, string> {
+  const notes = new Map<string, string>();
+  for (const line of table.split("\n")) {
+    const cells = [...line.matchAll(/(\d{4}(?:-\d{2})?)\s+\d+/g)];
+    for (const [index, cell] of cells.entries()) {
+      const from = cell.index + cell[0].length;
+      const to = index + 1 < cells.length ? cells[index + 1].index : line.length;
+      const note = line.slice(from, to).trim();
+      if (note) notes.set(cell[1], note);
+    }
+  }
+  return notes;
+}
+
+function renderCoverageTable(years: Array<[string, number]>, notes: Map<string, string>): string {
+  const columns = 4;
+  const rows = Math.ceil(years.length / columns);
+  const lines: string[] = [];
+
+  for (let row = 0; row < rows; row += 1) {
+    const cells: string[] = [];
+    for (let column = 0; column < columns; column += 1) {
+      const entry = years[column * rows + row];
+      if (!entry) continue;
+      const [year, people] = entry;
+      const note = notes.get(year);
+      cells.push(year.padEnd(7) + String(people).padStart(4) + (note ? `  ${note}` : ""));
+    }
+    lines.push(cells.join("    ").trimEnd());
+  }
+
+  return lines.join("\n") + "\n";
+}
+
+/**
+ * Rewrite the three numbers config/alumni/README.md derives from the roster:
+ * the coverage table, the headline above it, and the undated-people sentence.
+ * Everything else in the file — including the note beside a year — is carried
+ * over untouched. A section that has moved throws rather than being silently
+ * left stale, because a stale number here is the file misreporting its own gaps.
+ */
+export function refreshCoverageClaims(
+  readme: string,
+  people: number,
+  coverage: { years: Array<[string, number]>; undated: number },
+): string {
+  const table = COVERAGE_TABLE.exec(readme);
+  if (!table) throw new Error('no fenced coverage table under "## Gaps in the record"');
+  if (!HEADLINE.test(readme)) throw new Error('no "N people, across M of the K years" headline');
+  if (!UNDATED.test(readme)) throw new Error('no "N more people carry no year at all" sentence');
+
+  const spelled = COUNT_IN_WORDS[coverage.undated] ?? String(coverage.undated);
+  const carry = coverage.undated === 1 ? "person carries" : "people carry";
+
+  return readme
+    .replace(
+      COVERAGE_TABLE,
+      (_match, open: string, body: string, close: string) =>
+        open + renderCoverageTable(coverage.years, notesInTable(body)) + close,
+    )
+    .replace(
+      HEADLINE,
+      (_match, _people: string, gap: string, _years: string, total: string) =>
+        `${people} people,${gap}across ${coverage.years.length} of the ${total} years`,
+    )
+    .replace(UNDATED, `${spelled} more ${carry} no year at all`);
 }
 
 /**

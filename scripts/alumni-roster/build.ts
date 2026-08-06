@@ -4,6 +4,11 @@
  *   scripts/alumni-roster/fetch-snapshots.sh
  *   node --experimental-strip-types scripts/alumni-roster/build.ts
  *
+ * Or, with no cache and no network, bring the README's coverage report back in
+ * line with the committed roster — which is all honouring a removal needs:
+ *
+ *   node --experimental-strip-types scripts/alumni-roster/build.ts --refresh-readme
+ *
  * Every row comes from a page in the cache, and every source_url is the URL the
  * fetcher recorded in manifest.tsv when it retrieved that page — not a URL this
  * script reconstructs from a filename. Nothing is added by hand, so re-running
@@ -22,6 +27,8 @@ import {
   findNearDuplicates,
   mergeSightings,
   parseRemovalList,
+  parseRosterCsv,
+  refreshCoverageClaims,
   parseSourceList,
   parseSourceRegistry,
   sourceOfCacheFile,
@@ -38,6 +45,42 @@ import {
   type Sighting,
   type Source,
 } from "./parse.ts";
+
+/**
+ * Recompute what config/alumni/README.md says about the roster from the roster
+ * itself, and nothing else: no cache, no registry, no network. A removal has to
+ * be honourable the same day on a fresh clone with no snapshots, which is why
+ * deleting the row by hand is allowed at all — so the report that describes the
+ * file has to be fixable the same way.
+ */
+if (process.argv[2] === "--refresh-readme") {
+  const csvFile = process.argv[3] ?? "config/alumni/past-executives.csv";
+  const readmeFile = process.argv[4] ?? "config/alumni/README.md";
+
+  let refreshed: string;
+  let people: number;
+  let coverage: ReturnType<typeof coverageByYear>;
+  try {
+    const rows = parseRosterCsv(readFileSync(csvFile, "utf8"));
+    people = rows.length;
+    coverage = coverageByYear(rows);
+    refreshed = refreshCoverageClaims(readFileSync(readmeFile, "utf8"), people, coverage);
+  } catch (error) {
+    console.error(
+      `cannot refresh ${readmeFile} from ${csvFile}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    process.exit(1);
+  }
+
+  writeFileSync(readmeFile, refreshed);
+  console.log(`people:    ${people}`);
+  console.log(
+    `coverage:  ${coverage.years.map(([year, n]) => `${year}=${n}`).join(", ")}` +
+      (coverage.undated ? `, no year=${coverage.undated}` : ""),
+  );
+  console.log(`refreshed: ${readmeFile}  (${csvFile} was not touched)`);
+  process.exit(0);
+}
 
 const cacheDir = process.argv[2] ?? ".cache/alumni-roster";
 const outFile = process.argv[3] ?? "config/alumni/past-executives.csv";
@@ -346,10 +389,11 @@ for (const source of expectedEmpty) {
 if (unexpectedlyEmpty.length) {
   console.error(
     `\nsource(s) that produced no names: ${unexpectedlyEmpty.join(", ")}\n` +
-      `Either nothing was fetched for them or the pages no longer parse — a layout the\n` +
-      `club changed takes its whole cohort with it, and the smaller roster that produces\n` +
-      `looks perfectly plausible. ${outFile} was left untouched. Re-run the fetcher, fix\n` +
-      `the parser — or, if the club has retired the page for good,\n` +
+      `Nothing was fetched for them, or their row in ${registryPath} no longer\n` +
+      `describes the pages, or the pages no longer parse — a layout the club changed\n` +
+      `takes its whole cohort with it, and the smaller roster that produces looks\n` +
+      `perfectly plausible. ${outFile} was left untouched. Re-run the fetcher, check the\n` +
+      `registry row, fix the parser — or, if the club has retired the page for good,\n` +
       `name the source on ${expectedEmptyPath} and re-run.`,
   );
   process.exit(1);

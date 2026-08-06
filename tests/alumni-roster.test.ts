@@ -26,6 +26,7 @@ import {
   parseEmployeeCards,
   parseNextTeam,
   parseRemovalList,
+  parseRosterCsv,
   parseSourceRegistry,
   parseSpotlightName,
   parseSquarespaceTeam,
@@ -33,6 +34,7 @@ import {
   parseWixTeam,
   parseWixTeamYear,
   parseWordpressRoster,
+  refreshCoverageClaims,
   sourceOfCacheFile,
   toCsv,
   type Sighting,
@@ -63,10 +65,11 @@ const REDESIGNED_URL =
 const REDESIGNED_HTML = `<h5 class="text-primary-yellow"> 2026 </h5><h1> Regionals </h1>`;
 
 const STRAY_PAGE = "faculty-advisors-20130205151700.html";
-const STRAY_ROW = "faculty\tarchived\tfaculty-advisors\tenactussfu.com/faculty-advisors/\thttp://enactussfu.com/faculty-advisors/";
-const TEAM_ROW = "team\tarchived\tteam\twww.enactussfu.ca/team\thttps://www.enactussfu.ca/team";
+const STRAY_ROW =
+  "faculty\tarchived\tfaculty-advisors\tenactussfu.com/faculty-advisors/\thttp://enactussfu.com/faculty-advisors/\t-";
+const TEAM_ROW = "team\tarchived\tteam\twww.enactussfu.ca/team\thttps://www.enactussfu.ca/team\t-";
 const COMPETITION_ROW =
-  "competition\tarchived\tcompetition\twww.enactussfu.ca/competition\thttps://www.enactussfu.ca/competition";
+  "competition\tarchived\tcompetition\twww.enactussfu.ca/competition\thttps://www.enactussfu.ca/competition\t-";
 
 function runBuild({
   removals = "# nobody yet\n",
@@ -912,50 +915,8 @@ describe("the committed roster and the README that describes it", () => {
    */
   const repoFile = (name: string) => fileURLToPath(new URL(`../${name}`, import.meta.url));
 
-  const committedRows = () => {
-    const text = readFileSync(repoFile("config/alumni/past-executives.csv"), "utf8");
-    const body = text
-      .split("\n")
-      .filter((line) => !line.startsWith("#"))
-      .join("\n");
-
-    const records: string[][] = [];
-    let field = "";
-    let record: string[] = [];
-    let quoted = false;
-    for (let i = 0; i < body.length; i += 1) {
-      const char = body[i];
-      if (quoted) {
-        if (char !== '"') field += char;
-        else if (body[i + 1] === '"') (field += '"'), (i += 1);
-        else quoted = false;
-      } else if (char === '"') quoted = true;
-      else if (char === ",") (record.push(field), (field = ""));
-      else if (char === "\n") (record.push(field), records.push(record), (record = []), (field = ""));
-      else field += char;
-    }
-    if (field || record.length) (record.push(field), records.push(record));
-
-    const [header, ...rest] = records;
-    expect(header).toEqual([
-      "name",
-      "role",
-      "years_active",
-      "source_url",
-      "captured_at",
-      "confidence",
-    ]);
-    return rest
-      .filter((r) => r.length === 6)
-      .map(([name, role, yearsActive, sourceUrl, capturedAt, confidence]) => ({
-        name,
-        role,
-        yearsActive,
-        sourceUrl,
-        capturedAt,
-        confidence: confidence as "high" | "medium" | "low",
-      }));
-  };
+  const committedRows = () =>
+    parseRosterCsv(readFileSync(repoFile("config/alumni/past-executives.csv"), "utf8"));
 
   const readmeCoverage = () => {
     const readme = readFileSync(repoFile("config/alumni/README.md"), "utf8");
@@ -984,8 +945,8 @@ describe("the committed roster and the README that describes it", () => {
   /** The sentences around the table make the same claim in prose. */
   const readmeClaims = () => {
     const readme = readFileSync(repoFile("config/alumni/README.md"), "utf8");
-    const headline = /([\d,]+) people,\s*\nacross (\d+) of the \d+ years/.exec(readme);
-    const undated = /\n(\w+) more people carry no year at all/.exec(readme);
+    const headline = /([\d,]+) people,\s+across (\d+) of the \d+ years/.exec(readme);
+    const undated = /(\w+) more (?:people carry|person carries) no year at all/.exec(readme);
     expect(headline).not.toBeNull();
     expect(undated).not.toBeNull();
 
@@ -1035,8 +996,8 @@ describe("the real snapshot cache, when there is one", () => {
 
 describe("the source registry", () => {
   const rows = [
-    "executives\tarchived\texec\tenactussfu.com/executives/\thttp://enactussfu.com/executives/",
-    "team (live)\tlive\tlive-team\t-\thttps://www.enactussfu.ca/team",
+    "executives\tarchived\texec\tenactussfu.com/executives/\thttp://enactussfu.com/executives/\t-",
+    "team (live)\tlive\tlive-team\t-\thttps://www.enactussfu.ca/team\t-",
   ].join("\n");
 
   test("reads a row per source and skips comments and blank lines", () => {
@@ -1047,6 +1008,7 @@ describe("the source registry", () => {
         prefix: "exec",
         cdxPattern: "enactussfu.com/executives/",
         url: "http://enactussfu.com/executives/",
+        postFilter: "-",
       },
       {
         key: "team (live)",
@@ -1054,15 +1016,18 @@ describe("the source registry", () => {
         prefix: "live-team",
         cdxPattern: "-",
         url: "https://www.enactussfu.ca/team",
+        postFilter: "-",
       },
     ]);
   });
 
   test.each([
-    ["executives\tarchived\texec\tpattern", "a row missing a column"],
-    ["executives\tsomehow\texec\tpattern\turl", "a kind neither script can act on"],
-    ["a\tarchived\tx\tp\tu\nb\tarchived\tx\tp\tu", "two sources claiming one cache prefix"],
-    ["a\tarchived\tx\tp\tu\na\tlive\ty\tp\tu", "the same key twice"],
+    ["executives\tarchived\texec\tpattern\turl", "a row missing a column"],
+    ["executives\tsomehow\texec\tpattern\turl\t-", "a kind neither script can act on"],
+    ["executives\tarchived\texec\tpattern\turl\t", "a column left empty rather than dashed"],
+    ["posts\tspotlight\tposts\tpattern\t-\t-", "a sweep with no post filter to match on"],
+    ["a\tarchived\tx\tp\tu\t-\nb\tarchived\tx\tp\tu\t-", "two sources claiming one cache prefix"],
+    ["a\tarchived\tx\tp\tu\t-\na\tlive\ty\tp\tu\t-", "the same key twice"],
     ["# only comments\n", "a registry declaring nothing"],
   ])("throws on %s", (contents) => {
     expect(() => parseSourceRegistry(contents)).toThrow();
@@ -1159,5 +1124,176 @@ describe("every source the registry declares", () => {
 
     expect(run.status).not.toBe(0);
     expect(readFileSync(run.outFile, "utf8")).toBe("the roster from the last good build\n");
+  });
+});
+
+describe("refreshing what the README says about the roster", () => {
+  const repoFile = (name: string) => fileURLToPath(new URL(`../${name}`, import.meta.url));
+  const CSV = repoFile("config/alumni/past-executives.csv");
+  const README = repoFile("config/alumni/README.md");
+
+  /**
+   * A copy of the committed pair in a directory with no cache, no registry and
+   * no network — the position a student is in when an alum emails and the only
+   * thing they have is a fresh clone.
+   */
+  function runRefresh({ dropRowsFor = null as string | null } = {}) {
+    const root = mkdtempSync(path.join(tmpdir(), "alumni-refresh-"));
+    const csv = path.join(root, "past-executives.csv");
+    const readme = path.join(root, "README.md");
+
+    const committed = readFileSync(CSV, "utf8");
+    writeFileSync(
+      csv,
+      dropRowsFor === null
+        ? committed
+        : committed
+            .split("\n")
+            .filter((line) => !line.startsWith(`${dropRowsFor},`))
+            .join("\n"),
+    );
+    writeFileSync(readme, readFileSync(README, "utf8"));
+
+    const before = { csv: readFileSync(csv, "utf8"), readme: readFileSync(readme, "utf8") };
+    const run = spawnSync(
+      process.execPath,
+      ["--experimental-strip-types", BUILD_SCRIPT, "--refresh-readme", csv, readme],
+      { encoding: "utf8", env: { ...process.env } },
+    );
+
+    return { ...run, csv, readme, before };
+  }
+
+  const claimsIn = (readme: string) => {
+    const table = /## Gaps in the record[\s\S]*?```\n([\s\S]*?)```/.exec(readme)?.[1] ?? "";
+    const years: Array<[string, number]> = [];
+    for (const [, year, people] of table.matchAll(/(\d{4}(?:-\d{2})?)\s+(\d+)/g)) {
+      years.push([year, Number(people)]);
+    }
+    const headline = /([\d,]+) people,\s+across (\d+) of the \d+ years/.exec(readme);
+    const undated = /(\w+) more (?:people carry|person carries) no year at all/.exec(readme);
+    return {
+      years: years.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+      people: Number(headline?.[1].replace(/,/g, "")),
+      spelled: undated?.[1],
+    };
+  };
+
+  test("the committed README already matches the committed roster, so a refresh changes nothing", () => {
+    const run = runRefresh();
+
+    expect(run.status).toBe(0);
+    expect(readFileSync(run.readme, "utf8")).toBe(run.before.readme);
+  });
+
+  test("it never edits the roster it reads", () => {
+    const run = runRefresh({ dropRowsFor: "Naia Wong" });
+
+    expect(run.status).toBe(0);
+    expect(readFileSync(run.csv, "utf8")).toBe(run.before.csv);
+  });
+
+  test("honouring a removal by hand leaves the README stale, and the refresh fixes it", () => {
+    const run = runRefresh({ dropRowsFor: "Naia Wong" });
+    const rows = parseRosterCsv(readFileSync(run.csv, "utf8"));
+    const coverage = coverageByYear(rows);
+
+    // The state a student is in the moment they delete the row.
+    expect(claimsIn(run.before.readme).people).not.toBe(rows.length);
+
+    expect(run.status).toBe(0);
+    const after = claimsIn(readFileSync(run.readme, "utf8"));
+    expect(after.people).toBe(rows.length);
+    expect(after.years).toEqual(coverage.years);
+  });
+
+  test("a roster it cannot read stops it rather than half-rewriting the README", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "alumni-refresh-bad-"));
+    const csv = path.join(root, "past-executives.csv");
+    const readme = path.join(root, "README.md");
+    writeFileSync(csv, "# a preamble and nothing else\n");
+    writeFileSync(readme, readFileSync(README, "utf8"));
+
+    const run = spawnSync(
+      process.execPath,
+      ["--experimental-strip-types", BUILD_SCRIPT, "--refresh-readme", csv, readme],
+      { encoding: "utf8" },
+    );
+
+    expect(run.status).not.toBe(0);
+    expect(readFileSync(readme, "utf8")).toBe(readFileSync(README, "utf8"));
+  });
+});
+
+describe("the coverage claims, as text", () => {
+  const readme = [
+    "## Gaps in the record",
+    "",
+    "A gap is a gap — 3 people,",
+    "across 2 of the 36 years since the chapter was founded:",
+    "",
+    "```",
+    "2015-16   2    2024-25   1  ← coaches only",
+    "```",
+    "",
+    "Six more people carry no year at all — the Community Spotlight names.",
+    "",
+  ].join("\n");
+
+  test("a note beside a year survives a refresh that changes its count", () => {
+    const refreshed = refreshCoverageClaims(readme, 9, {
+      years: [
+        ["2015-16", 4],
+        ["2024-25", 5],
+      ],
+      undated: 2,
+    });
+
+    expect(refreshed).toContain("2015-16   4    2024-25   5  ← coaches only");
+    expect(refreshed).toContain("9 people,\nacross 2 of the 36 years");
+    expect(refreshed).toContain("Two more people carry no year at all");
+  });
+
+  test("one undated person reads as one person, not as one people", () => {
+    const refreshed = refreshCoverageClaims(readme, 9, { years: [["2015-16", 9]], undated: 1 });
+    expect(refreshed).toContain("One more person carries no year at all");
+  });
+
+  test("a year with no note is written without one", () => {
+    const refreshed = refreshCoverageClaims(readme, 2, { years: [["1991", 2]], undated: 0 });
+    expect(refreshed).toContain("```\n1991      2\n```");
+  });
+
+  test.each([
+    ["the coverage table", readme.replace("## Gaps in the record", "## Gaps")],
+    ["the headline", readme.replace("3 people,", "some people,")],
+    ["the undated sentence", readme.replace("Six more people carry", "Six more people held")],
+  ])("a README missing %s throws rather than silently leaving a number stale", (_case, text) => {
+    expect(() => refreshCoverageClaims(text, 3, { years: [["2015-16", 3]], undated: 0 })).toThrow();
+  });
+});
+
+describe("the roster CSV, read back", () => {
+  test("what toCsv writes is what parseRosterCsv reads, quoting and all", () => {
+    const rows = mergeSightings([
+      sighting({ name: "Guransh Gill", role: "VP Finance, External" }),
+      sighting({ name: 'Ivy "So"', role: "", year: "", confidence: "low" }),
+    ]);
+
+    expect(parseRosterCsv(toCsv(rows))).toEqual(rows);
+  });
+
+  test("the committed preamble is skipped, not read as a row", () => {
+    const withPreamble = `# private\n#\n# generated\n${toCsv(mergeSightings([sighting()]))}`;
+    expect(parseRosterCsv(withPreamble)).toEqual(mergeSightings([sighting()]));
+  });
+
+  test.each([
+    ["a row short a column", "name,role,years_active,source_url,captured_at,confidence\na,b,c,d,e\n"],
+    ["a confidence level that is not one", "name,role,years_active,source_url,captured_at,confidence\na,b,c,d,e,f\n"],
+    ["a header that is not the roster's", "name,role\na,b\n"],
+    ["nothing but comments", "# all comment\n"],
+  ])("throws on %s", (_case, contents) => {
+    expect(() => parseRosterCsv(contents)).toThrow();
   });
 });

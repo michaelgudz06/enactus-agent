@@ -48,14 +48,26 @@ They can. There is no threshold to meet, no form, and no reason required.
    itself is not optional: `build.ts` refuses to write a roster at all if
    `removed.txt` is missing, and prints how many names it read on every run,
    including zero. A list nobody is on is an empty file, never a deleted one.
-2. **Delete their row from `past-executives.csv` and commit both changes that
-   day.** Do not wait for a batch, a sprint, or a meeting. (Rebuilding also
-   produces the correct file, but you do not need a working cache to honour a
-   removal — just delete the line.)
-3. **Reply to them and say it is done.** One line is enough. Do not ask why, do
+2. **Delete their row from `past-executives.csv`.** Just the line. (Rebuilding
+   also produces the correct file, but you do not need a working cache to honour
+   a removal — that is the point.)
+3. **Run the refresh, then commit all three changes that day:**
+
+   ```bash
+   node --experimental-strip-types scripts/alumni-roster/build.ts --refresh-readme
+   ```
+
+   That rewrites the numbers this README derives from the roster — the coverage
+   table under "Gaps in the record", the count above it, and the
+   people-with-no-year sentence — from the CSV you just edited. It reads nothing
+   else: no snapshot cache, no network, no archive. It takes a second on a fresh
+   clone, it never touches the roster itself, and it is what keeps the tests
+   passing so that honouring a removal never leaves you with a red branch to
+   explain. Do not wait for a batch, a sprint, or a meeting.
+4. **Reply to them and say it is done.** One line is enough. Do not ask why, do
    not ask them to reconsider, and do not offer to keep a reduced version of
    their entry.
-4. If they ask what was held about them, tell them exactly: their name, the role
+5. If they ask what was held about them, tell them exactly: their name, the role
    the club published, the years, and the archived page it came from. That is the
    whole record. Show them this file if it helps.
 
@@ -293,11 +305,17 @@ posts state none — so they appear in no column above. A person counts once in
 every year their `years_active` spans, including the years inside a `..` run, so
 the columns sum to more than 199.
 
-**This table is generated, not maintained.** `build.ts` prints exactly these
-counts on its `coverage:` line at the end of every run; transcribe them rather
-than editing a number here. `tests/alumni-roster.test.ts` recomputes the table
-from the committed CSV and fails if the two disagree, so a rebuild nobody
-transcribed cannot leave the file's own gap report quietly wrong.
+**This table is generated, not maintained.** Do not edit a number here by hand:
+
+```bash
+node --experimental-strip-types scripts/alumni-roster/build.ts --refresh-readme
+```
+
+recomputes this table, the count above it and the sentence below it from the
+committed CSV alone — no cache, no network — and writes them back.
+`tests/alumni-roster.test.ts` recomputes the same numbers and fails if they
+disagree with the roster, so a stale gap report cannot survive a review. The fix
+when it fails is that command.
 
 These are the gaps we know about:
 

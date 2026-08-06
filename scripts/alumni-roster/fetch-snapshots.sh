@@ -86,16 +86,16 @@ archived() { # archived <prefix> <cdx-pattern> <original-url>
 # does not go through cdx()/archived(). The index goes to a file first, so a
 # rate-limited response is a failed query rather than an empty result set piped
 # into grep.
-spotlight() { # spotlight <prefix> <cdx-pattern>
+spotlight() { # spotlight <prefix> <cdx-pattern> <post-filter>
   local index="$cache/.$1-cdx"
   if curl -fsS --max-time 180 --retry 4 --retry-delay 5 --retry-connrefused \
     "http://web.archive.org/cdx/search/cdx?url=$2&output=text&fl=timestamp,original,statuscode&limit=20000" \
     -o "$index"; then
-    grep 'community-spotlight' "$index" \
+    grep -F "$3" "$index" \
       | grep -v 'wc-ajax\|/feed\|wp-json\|category/\|replytocom' \
       | awk '$3==200 && !seen[$2]++ {print $1, $2}' \
       | while read -r ts url; do
-          slug="$(printf '%s' "$url" | grep -oE 'community-spotlight-[a-z0-9-]+')"
+          slug="$(printf '%s' "$url" | grep -oE "$3-[a-z0-9-]+")"
           [ -n "$slug" ] || continue
           grab "$1-$ts-$slug.html" "$ts" "$url"
         done
@@ -118,20 +118,44 @@ live() { # live <prefix> <url>
   fi
 }
 
+bad_row() { # bad_row <line-number> <complaint>
+  echo "  ! $registry line $1: $2" >&2
+  echo "registry:line $1" >> "$failures"
+}
+
 # Every source comes from the registry, and nowhere else. A source this script
 # does not fetch is a source build.ts reports as yielding nothing, because both
 # read this one file — a list kept here as well would be a list that can drift.
-while IFS=$'\t' read -r key kind prefix pattern url <&3 || [ -n "${key:-}" ]; do
-  case "${key:-}" in '' | '#'*) continue ;; esac
+#
+# The row checks below are the ones parseSourceRegistry makes, so a registry one
+# reader rejects is a registry the other rejects too. A row with a stray leading
+# tab is the case worth the trouble: it once read as a blank line, so the source
+# was never fetched and this script still reported success.
+line=0
+seen_keys=""
+seen_prefixes=""
+while IFS=$'\t' read -r key kind prefix pattern url filter extra <&3 \
+  || [ -n "${key:-}${kind:-}${prefix:-}${pattern:-}${url:-}${filter:-}" ]; do
+  line=$((line + 1))
+  case "$key" in '#'*) continue ;; esac
+  [ -z "$key$kind$prefix$pattern$url$filter$extra" ] && continue
+
+  if [ -n "$extra" ] || [ -z "$key" ] || [ -z "$kind" ] || [ -z "$prefix" ] \
+    || [ -z "$pattern" ] || [ -z "$url" ] || [ -z "$filter" ]; then
+    bad_row "$line" "expected 6 non-empty tab-separated fields (write '-' for an unused column)"
+    continue
+  fi
+  case "$seen_keys" in *"|$key|"*) bad_row "$line" "duplicate source key '$key'"; continue ;; esac
+  case "$seen_prefixes" in *"|$prefix|"*) bad_row "$line" "duplicate cache prefix '$prefix'"; continue ;; esac
+  seen_keys="$seen_keys|$key|"
+  seen_prefixes="$seen_prefixes|$prefix|"
+
   echo "== $key"
   case "$kind" in
     archived)  archived  "$prefix" "$pattern" "$url" ;;
-    spotlight) spotlight "$prefix" "$pattern" ;;
+    spotlight) spotlight "$prefix" "$pattern" "$filter" ;;
     live)      live      "$prefix" "$url" ;;
-    *)
-      echo "  ! $registry declares kind '$kind' for $key, which this script cannot fetch" >&2
-      echo "registry:$key" >> "$failures"
-      ;;
+    *)         bad_row "$line" "kind '$kind' is not one of archived, spotlight, live" ;;
   esac
 done 3< "$registry"
 
