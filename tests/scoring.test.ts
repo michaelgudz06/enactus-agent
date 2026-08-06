@@ -10,6 +10,7 @@ import {
   evaluateGates,
   gateInputsFromFilterResult,
   geographyBand,
+  geographyScope,
   isRealPersonName,
   resolvePYes,
   scoreAccess,
@@ -834,6 +835,140 @@ describe("geographyBand", () => {
       expect(band === "core" || band === "metro", `${j.canonical} → ${band}`).toBe(true);
     }
   });
+
+  // metro-vancouver.csv ships BARE municipality names, and richmond, vancouver, surrey, langley,
+  // delta and white rock all name real places outside BC. Trusting the alias before reading the
+  // region scored a Richmond, Virginia company as a local prospect with full geography weight.
+  describe("a municipality alias is only trusted when the region is BC or absent", () => {
+    const COLLIDING = ["Richmond", "Vancouver", "Surrey", "Langley", "Delta", "White Rock"];
+
+    it.each(COLLIDING)("does not score %s with a non-BC region as Metro Vancouver", (municipality) => {
+      expect(geographyBand(company({ legal_name: "X", municipality, region: "VA" }), config, lists)).toBe(
+        "elsewhere",
+      );
+    });
+
+    it.each(COLLIDING)("still resolves %s as Metro Vancouver with no region recorded", (municipality) => {
+      const band = geographyBand(company({ legal_name: "X", municipality }), config, lists);
+      expect(band === "core" || band === "metro", `${municipality} → ${band}`).toBe(true);
+    });
+
+    it.each(COLLIDING)("still resolves %s as Metro Vancouver with region BC", (municipality) => {
+      const band = geographyBand(company({ legal_name: "X", municipality, region: "BC" }), config, lists);
+      expect(band === "core" || band === "metro", `${municipality} → ${band}`).toBe(true);
+    });
+
+    it("blocks the out-of-province namesake at G_GEO instead of awarding it metro weight", () => {
+      const virginia = company({
+        legal_name: "Acme",
+        municipality: "Richmond",
+        region: "VA",
+        has_consumer_storefront: true,
+        lawful_basis_strength: "express",
+      });
+      const g = evaluateGates(virginia, "S2", config, { lists, now: NOW }).find((x) => x.gate === "G_GEO");
+      expect(g?.verdict).toBe("fail");
+      expect(g?.effect).toBe("block");
+      expect(scoreCompany(virginia, config, { lists, now: NOW }).blocking_gates).toContain("G_GEO");
+    });
+
+    it("a metro postal prefix does not overturn a recorded non-BC region either", () => {
+      expect(
+        geographyBand(company({ legal_name: "X", postal_code: "V5A 1S6", region: "WA" }), config, lists),
+      ).toBe("elsewhere");
+    });
+  });
+
+  // All four spellings that appear in real records. normalizeMunicipality preserves hyphens, so
+  // the hyphenated and unhyphenated French forms are distinct keys and both must resolve.
+  it.each(["BC", "British Columbia", "Colombie-Britannique", "Colombie Britannique"])(
+    "reads %j as British Columbia",
+    (region) => {
+      expect(geographyBand(company({ legal_name: "X", region }), config, lists)).toBe("bc_outside_metro");
+    },
+  );
+});
+
+// ===========================================================================
+// The invariant the shared resolver exists to hold: the filter and the scorer never place the
+// same company in different provinces. They previously drifted in OPPOSITE directions.
+// ===========================================================================
+
+describe("filter and scoring never disagree about where a company is", () => {
+  const ROWS: { municipality?: string; region?: string; postal?: string }[] = [
+    { municipality: "Burnaby" },
+    { municipality: "Burnaby", region: "BC" },
+    { municipality: "Richmond" },
+    { municipality: "Richmond", region: "BC" },
+    { municipality: "Richmond", region: "VA" },
+    { municipality: "Vancouver", region: "WA" },
+    { municipality: "Surrey", region: "ON" },
+    { municipality: "Kitsilano", region: "BC" },
+    { municipality: "Bowen Island" },
+    { municipality: "Abbotsford", region: "BC" },
+    { municipality: "Abbotsford" },
+    { municipality: "Kelowna", region: "Colombie-Britannique" },
+    { municipality: "Kelowna", region: "Colombie Britannique" },
+    { region: "British Columbia" },
+    { region: "SK" },
+    { municipality: "Saskatoon", region: "SK" },
+    { municipality: "Nowheresville" },
+    {},
+  ];
+
+  it.each(ROWS.map((r) => [JSON.stringify(r), r] as const))(
+    "reaches the same in-scope conclusion for %s",
+    (_label, row) => {
+      const scoringScope = geographyScope(
+        company({
+          legal_name: "X",
+          municipality: row.municipality ?? null,
+          region: row.region ?? null,
+          postal_code: row.postal ?? null,
+        }),
+        config,
+        lists,
+      ).scope;
+
+      const filtered = runFilter(
+        {
+          legal_name: "X",
+          address_municipality: row.municipality ?? null,
+          address_region: row.region ?? null,
+          postal_code: row.postal ?? null,
+        },
+        lists,
+        { now: NOW },
+      );
+
+      // The filter's own verdict, read off the outcomes it emits rather than re-derived.
+      const outOfBc = filtered.kills.some((k) => k.reason === "outside_bc");
+      const outsideMetroPenalty = filtered.penalties.some(
+        (p) => p.tag === "outside_metro_vancouver",
+      );
+      const geoUnresolved = filtered.cannot_evaluate.some((c) => c.rule_id === "K-GEO-02");
+
+      if (scoringScope === "outside_bc") {
+        expect(outOfBc, "scoring says outside BC, the filter must too").toBe(true);
+      } else {
+        expect(outOfBc, "scoring did not say outside BC, so the filter must not kill").toBe(false);
+      }
+
+      if (scoringScope === "metro_vancouver") {
+        expect(outsideMetroPenalty, "in Metro Vancouver, so no -25").toBe(false);
+        expect(filtered.locality.in_scope || filtered.locality.bases_available.length === 0).toBe(true);
+      }
+
+      if (scoringScope === "bc_outside_metro" && row.municipality) {
+        expect(outsideMetroPenalty, "in BC but outside the 23 jurisdictions, so -25").toBe(true);
+      }
+
+      if (scoringScope === "unresolved") {
+        expect(outOfBc).toBe(false);
+        expect(geoUnresolved, "neither module may decide without a region").toBe(true);
+      }
+    },
+  );
 });
 
 describe("the three scores", () => {

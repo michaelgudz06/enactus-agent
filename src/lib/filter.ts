@@ -106,10 +106,31 @@
 //      never a terminal and never a `enactus_canada` channel: PwC is on it because it is BOTH a
 //      named donor AND a warm SFU relationship, and Scotiabank and CWB because the report could
 //      not tell "ended" from "mid-renewal" and left it as an open question for a human.
+//
+//  A4. A MUNICIPALITY ALIAS IS ONLY TRUSTWORTHY WHEN THE REGION IS BC OR ABSENT. §7.8's list
+//      ships BARE MUNICIPALITY NAMES, and richmond, vancouver, surrey, langley, delta and white
+//      rock all name real places outside BC. The report never says which wins when a row records
+//      both, so: a recorded CONTRARY region is consulted FIRST, and the alias never overturns
+//      it. `resolveGeography` in qualification-lists.ts is the single implementation — this
+//      module and src/lib/scoring.ts both consume it and neither keeps its own copy, because
+//      two resolvers over the same data drifted in OPPOSITE directions within one review round.
+//
+//  A5. AN EFFECT A RULE DESCRIBES IS PART OF ITS RETURN TYPE. Four rules in a row were found
+//      narrating an outcome nothing emitted (K-REL-08's sibling −40, L-04's email channel,
+//      P-08's forbid, §5's head-office reroute). Sweeping for it caught the ones that existed;
+//      the type catches the next one. So: `FranchiseReport`'s HEAD_OFFICE variant CARRIES its
+//      reroute and cannot be constructed without one; `SCOPE_EFFECTS` is a total record over
+//      `TerminalScope`; K-REL-08's sentence is RENDERED FROM its `SiblingOutcome` rather than
+//      written beside it. Each has a `never` arm, so adding a case without an effect stops
+//      compiling. Do not describe an effect in a message or doc comment that the return value
+//      does not carry.
+//
 
 import {
+  type GeographyVerdict,
   type KeyedList,
   type QualificationLists,
+  resolveGeography,
   isDomainOrSubdomainOf,
   lookupDomainOrSubdomain,
   lookupList,
@@ -398,10 +419,26 @@ export function isReversible(t: TerminalResult): boolean {
  * channel is recorded on the result as `email_channel_open`, and deleting a valid address here
  * would throw away the routing the CHANNEL outcome exists to preserve.
  */
-const SCOPE_FIELDS: Record<Exclude<TerminalScope, "account">, readonly (keyof Account)[]> = {
-  address: ["email", "email_local", "email_domain"],
-  email: [],
-  person: ["contact_name", "contact_title"],
+interface ScopeEffect {
+  /** The account fields this scope invalidates on the surviving record. */
+  clears: readonly (keyof Account)[];
+  /**
+   * Whether this scope bars sending a CEM. L-04 and P-08-CONSTRAINT are both CASL findings that
+   * destroy the BASIS for sending rather than the address, and `gateInputsFromFilterResult`
+   * turns a closed channel into `lawful_basis_strength: "none"` so G_LAWFUL_BASIS fails.
+   */
+  closes_email_channel: boolean;
+}
+
+/**
+ * What each non-account scope actually does — a TOTAL record, so a new `TerminalScope` cannot be
+ * added without declaring its effect, and `runFilter` reads the effect from here rather than
+ * from a hand-written `if` that a later edit can forget to extend.
+ */
+const SCOPE_EFFECTS: Record<Exclude<TerminalScope, "account">, ScopeEffect> = {
+  address: { clears: ["email", "email_local", "email_domain"], closes_email_channel: false },
+  email: { clears: [], closes_email_channel: true },
+  person: { clears: ["contact_name", "contact_title"], closes_email_channel: false },
 };
 
 export interface ChannelResult extends BaseResult {
@@ -1278,11 +1315,17 @@ export function kChan02IneligibleRequiresCharity(a: Account, now: Date): Predica
 // §3.3 — K-GEO, geography
 // ===========================================================================
 
-const BC_REGIONS = new Set(["bc", "british columbia", "colombie-britannique", "colombie britannique"]);
-
-function isBcRegion(region: string | null | undefined): boolean {
-  if (!region) return false;
-  return BC_REGIONS.has(normalizeMunicipality(region));
+/**
+ * Every geography question in this module goes through `resolveGeography` in
+ * qualification-lists.ts. There is no second BC-spelling set and no second alias reading here:
+ * the filter and the scorer disagreeing about where a company is was a real defect in both
+ * directions, so the decision lives in one place and both modules consume it.
+ */
+function geographyOf(a: Account, lists: QualificationLists): GeographyVerdict {
+  return resolveGeography(
+    { municipality: a.address_municipality, region: a.address_region },
+    lists,
+  );
 }
 
 /** Resolve a municipality name to its Metro Vancouver canonical jurisdictions, if any. */
@@ -1293,11 +1336,17 @@ export function metroVancouverJurisdictions(
   return metroVancouverCanonicals(municipality, lists);
 }
 
+/**
+ * Whether a municipality sits in Metro Vancouver, given whatever region was recorded ALONGSIDE
+ * it. The region is not optional decoration: "Richmond" with region "VA" is not in scope, and a
+ * municipality-only signature invited exactly that mistake.
+ */
 export function isInMetroVancouver(
   municipality: string | null | undefined,
   lists: QualificationLists,
+  region?: string | null,
 ): boolean {
-  return metroVancouverJurisdictions(municipality, lists).length > 0;
+  return resolveGeography({ municipality, region }, lists).scope === "metro_vancouver";
 }
 
 /**
@@ -1323,7 +1372,9 @@ export function localityBasis(a: Account, lists: QualificationLists): LocalityRe
 
   if (a.address_municipality) {
     available.push("registered_address");
-    if (isInMetroVancouver(a.address_municipality, lists)) inScope.push("registered_address");
+    // The registered address is the one basis that HAS a region recorded beside it, so the
+    // precondition applies here: a contrary region overrules the alias.
+    if (geographyOf(a, lists).scope === "metro_vancouver") inScope.push("registered_address");
   }
   if (o.operating_municipality) {
     available.push("operating_location");
@@ -1394,7 +1445,7 @@ export function kGeo02OutsideBc(
       "no province or state is recorded; a missing region is never a kill (§2.3)",
     );
   }
-  if (isBcRegion(a.address_region)) return pass("K-GEO-02");
+  if (geographyOf(a, lists).region_is_bc === true) return pass("K-GEO-02");
   if (a.observations?.bc_branch_confirmed) return pass("K-GEO-02");
   if (localityBasis(a, lists).in_scope) return pass("K-GEO-02");
 
@@ -1431,7 +1482,7 @@ export function kGeo03OutsideMetroVancouver(
   lists: QualificationLists,
   now: Date,
 ): PredicateResult {
-  if (!isBcRegion(a.address_region)) return pass("K-GEO-03");
+  if (resolveGeography({ region: a.address_region }, lists).region_is_bc !== true) return pass("K-GEO-03");
   if (!a.address_municipality) {
     return cannotEvaluate(
       "K-GEO-03",
@@ -1439,7 +1490,7 @@ export function kGeo03OutsideMetroVancouver(
       "the account is in BC but no municipality is recorded, so Metro Vancouver membership cannot be resolved",
     );
   }
-  if (isInMetroVancouver(a.address_municipality, lists)) return pass("K-GEO-03");
+  if (isInMetroVancouver(a.address_municipality, lists, a.address_region)) return pass("K-GEO-03");
 
   return {
     kind: "penalty",
@@ -1736,17 +1787,7 @@ export function kRel08HardBounced(
   if (!at) return pass("K-REL-08");
   const rawDomain = emailDomain(a);
   const address = a.email ?? "";
-  // Three distinct cases, rendered as three distinct sentences. Collapsing "the domain is
-  // free-mail" into "no domain is recorded" asserted the free-mail explanation for an account
-  // whose address was corporate — which is exactly what a re-filter pass sees, because the
-  // address-scoped terminal cleared `email`/`email_domain` while `rel.bounced_hard_at` stayed.
-  const freeMail = Boolean(rawDomain) && lists.freeMailProviders.domains.has(rawDomain);
-  const domain = rawDomain && !freeMail ? rawDomain : "";
-  const siblingClause = domain
-    ? `; every other lead sharing ${domain} takes a ${HARD_BOUNCE_SIBLING_DELTA} penalty but stays in the queue`
-    : freeMail
-      ? `, and no other lead is penalised because ${rawDomain} is a free-mail provider that implies no shared ownership`
-      : ", and no other lead is penalised because this row records no email domain to match siblings on — the address it bounced from is no longer on the record";
+  const outcome = siblingOutcome(rawDomain, address, at, lists, now);
   return {
     kind: "terminal",
     scope: "address",
@@ -1759,25 +1800,83 @@ export function kRel08HardBounced(
       account: a,
       rule_id: "K-REL-08",
       verb: "rejected at this address",
-      because: `mail to it hard-bounced on ${at}. The address is dead forever${siblingClause}`,
+      because: `mail to it hard-bounced on ${at}. The address is dead forever${siblingClause(outcome)}`,
       evidence_url: "rel.bounced_hard_at",
       now,
     }),
-    // No domain, or a free-mail domain, means there is no sibling to match: nothing to emit.
-    sibling_penalty: domain
-      ? {
-          match_field: "email_domain",
-          match_value: domain,
-          rule_id: "K-REL-08",
-          reason: "undeliverable",
-          tag: "sibling_domain_hard_bounced",
-          delta: HARD_BOUNCE_SIBLING_DELTA,
-          occurred_at: at,
-          cause_address: address,
-          message: siblingBounceSentence(domain, address, at, now),
-        }
-      : undefined,
+    sibling_penalty: outcome.levied ?? undefined,
   };
+}
+
+/**
+ * Whether the −40 lands on siblings, and if not, WHY not.
+ *
+ * The two silences are different facts: a free-mail domain implies no shared ownership, while a
+ * re-filtered row simply no longer carries the address it bounced from — `runFilter` cleared
+ * `email`/`email_domain` under the address-scoped terminal while `rel.bounced_hard_at` stayed.
+ * Modelling them as one empty string let the sentence assert the free-mail explanation for an
+ * account whose address was corporate.
+ */
+type SiblingOutcome =
+  | { levied: SiblingPenalty; suppressed_because: null }
+  | { levied: null; suppressed_because: "free_mail_provider"; domain: string }
+  | { levied: null; suppressed_because: "no_email_domain_on_record" };
+
+function siblingOutcome(
+  rawDomain: string,
+  address: string,
+  occurredAt: string,
+  lists: Pick<QualificationLists, "freeMailProviders">,
+  now: Date,
+): SiblingOutcome {
+  if (!rawDomain) return { levied: null, suppressed_because: "no_email_domain_on_record" };
+  if (lists.freeMailProviders.domains.has(rawDomain)) {
+    return { levied: null, suppressed_because: "free_mail_provider", domain: rawDomain };
+  }
+  return {
+    levied: {
+      match_field: "email_domain",
+      match_value: rawDomain,
+      rule_id: "K-REL-08",
+      reason: "undeliverable",
+      tag: "sibling_domain_hard_bounced",
+      delta: HARD_BOUNCE_SIBLING_DELTA,
+      occurred_at: occurredAt,
+      cause_address: address,
+      message: siblingBounceSentence(rawDomain, address, occurredAt, now),
+    },
+    suppressed_because: null,
+  };
+}
+
+/**
+ * The clause is DERIVED from the outcome, never written beside it, so the sentence cannot claim
+ * a penalty the return value does not carry. The `never` arm makes a new outcome a compile
+ * error rather than a silently unrendered case.
+ */
+function siblingClause(outcome: SiblingOutcome): string {
+  if (outcome.levied) {
+    return (
+      `; every other lead sharing ${outcome.levied.match_value} takes a ` +
+      `${outcome.levied.delta} penalty but stays in the queue`
+    );
+  }
+  switch (outcome.suppressed_because) {
+    case "free_mail_provider":
+      return (
+        `, and no other lead is penalised because ${outcome.domain} is a free-mail provider ` +
+        `that implies no shared ownership`
+      );
+    case "no_email_domain_on_record":
+      return (
+        ", and no other lead is penalised because this row records no email domain to match " +
+        "siblings on — the address it bounced from is no longer on the record"
+      );
+    default: {
+      const unhandled: never = outcome;
+      return unhandled;
+    }
+  }
 }
 
 /**
@@ -2506,12 +2605,39 @@ export function kRep02SensitiveSector(
 
 export type FranchiseStatus = "LOCAL_AUTHORITY" | "HEAD_OFFICE" | "UNPROVEN" | "NOT_APPLICABLE";
 
-export interface FranchiseReport {
-  status: FranchiseStatus;
+interface FranchiseReportBase {
   /** The signal ids that fired, e.g. ["S1", "S2", "S4"]. */
   signals: string[];
   message: string;
 }
+
+/**
+ * §5's verdict, as a DISCRIMINATED UNION rather than a status string beside some prose.
+ *
+ * A status alone let §5's HEAD_OFFICE branch say "the row is REROUTED, not dropped" while
+ * nothing anywhere emitted a reroute: `status` was read only by P-04 (which wants UNPROVEN) and
+ * K-SIZE-01 (which wants LOCAL_AUTHORITY), so a head-office row reached the queue unmarked and a
+ * student emailed the local branch — the exact outcome §5 exists to prevent.
+ *
+ * The HEAD_OFFICE variant therefore CARRIES the outcome it claims. It cannot be constructed
+ * without one, `franchiseReroute` below turns it into a `PredicateResult` through an exhaustive
+ * switch, and `killPredicateSequence` runs that like any other rule. A future status that
+ * declares an effect has to carry it too, or the switch stops compiling.
+ */
+export type FranchiseReport =
+  | (FranchiseReportBase & { status: "NOT_APPLICABLE" })
+  | (FranchiseReportBase & { status: "LOCAL_AUTHORITY" })
+  | (FranchiseReportBase & { status: "UNPROVEN" })
+  | (FranchiseReportBase & {
+      status: "HEAD_OFFICE";
+      /**
+       * The reroute, as an emittable outcome. §5 step 2 maps a published application path to
+       * CHANNEL `web_form` (its own worked case is Cactus Club Cafe). Where head office
+       * publishes NO channel the report names none, so this is a human-review FLAG rather than
+       * an invented `RequiredChannel` — and never a silent drop.
+       */
+      reroute: ChannelResult | FlagResult;
+    });
 
 /**
  * §5's ENTRY CONDITION: is this row a location of something bigger at all?
@@ -2546,8 +2672,16 @@ function isChainOrBranchLocation(a: Account): boolean {
   );
 }
 
-export function franchiseOrBranchCarveOut(a: Account): FranchiseReport {
+export interface FranchiseOptions {
+  /** Injected for deterministic tests. Defaults to the wall clock. */
+  now?: Date;
+  /** A path found by the K-CHAN-01 HTTP HEAD probe — what head office publishes, if anything. */
+  application_path_found?: string | null;
+}
+
+export function franchiseOrBranchCarveOut(a: Account, opts: FranchiseOptions = {}): FranchiseReport {
   const o = a.observations ?? {};
+  const now = opts.now ?? new Date();
 
   // Step 0 — the entry condition. Not a location of anything: §5 does not apply.
   if (!isChainOrBranchLocation(a)) {
@@ -2593,6 +2727,7 @@ export function franchiseOrBranchCarveOut(a: Account): FranchiseReport {
       status: "HEAD_OFFICE",
       signals: [...positive, ...negative],
       message: `Head office holds the decision (${negative.join(", ")}). The ask belongs to whatever channel head office publishes, so the row is REROUTED, not dropped.`,
+      reroute: headOfficeReroute(a, negative, opts.application_path_found ?? null, now),
     };
   }
 
@@ -2620,9 +2755,90 @@ export interface PenaltyContext {
   franchise?: FranchiseStatus;
 }
 
+/**
+ * §5 step 2's reroute, built as the outcome it is.
+ *
+ * Where head office publishes an application path, K-CHAN-01's channel is the right one and the
+ * report's own worked case (Cactus Club Cafe → CHANNEL `web_form`) says so. Where nothing is
+ * published the report names NO channel, so inventing a `RequiredChannel` would be asserting
+ * routing nobody verified; the head-office finding goes to a human instead.
+ */
+function headOfficeReroute(
+  a: Account,
+  negative: string[],
+  applicationPath: string | null,
+  now: Date,
+): ChannelResult | FlagResult {
+  const detail = negative.join(", ");
+  if (applicationPath) {
+    return {
+      kind: "channel",
+      rule_id: "FRANCHISE-HEAD-OFFICE",
+      reason: "head_office_holds_the_decision",
+      detail: `${detail}; head office publishes ${applicationPath}`,
+      evidence_url: applicationPath,
+      required_channel: "web_form",
+      message: sentence("head_office_holds_the_decision", {
+        account: a,
+        rule_id: "FRANCHISE-HEAD-OFFICE",
+        verb: "rerouted to the channel head office publishes",
+        because:
+          `§5 signal(s) ${detail} show the decision sits with head office rather than this ` +
+          `location, and head office publishes ${applicationPath}. The row is rerouted, not ` +
+          `dropped: emailing the local branch asks someone who cannot say yes`,
+        evidence_url: applicationPath,
+        now,
+      }),
+    };
+  }
+  return {
+    kind: "flag",
+    rule_id: "FRANCHISE-HEAD-OFFICE",
+    reason: "head_office_holds_the_decision",
+    flag_reason: "head_office_channel_unresolved",
+    detail,
+    evidence_url: "observations",
+    message: sentence("head_office_holds_the_decision", {
+      account: a,
+      rule_id: "FRANCHISE-HEAD-OFFICE",
+      verb: "flagged for a human to find the head-office channel",
+      because:
+        `§5 signal(s) ${detail} show the decision sits with head office rather than this ` +
+        `location, but no application channel was found on the site. §5 names no channel for ` +
+        `that case, so the row is not rerouted to a guess and not dropped either — a human ` +
+        `decides where the ask goes`,
+      evidence_url: "observations",
+      now,
+    }),
+  };
+}
+
+/**
+ * Turn §5's verdict into an outcome the runner emits.
+ *
+ * The `default` arm is an exhaustiveness check: `never` stops compiling the moment a
+ * `FranchiseStatus` is added, which forces whoever adds it to say what it emits rather than
+ * describing an effect in a message nobody wires up.
+ */
+export function franchiseReroute(report: FranchiseReport): PredicateResult {
+  switch (report.status) {
+    case "HEAD_OFFICE":
+      return report.reroute;
+    case "LOCAL_AUTHORITY":
+    case "UNPROVEN":
+    case "NOT_APPLICABLE":
+      return pass("FRANCHISE-HEAD-OFFICE");
+    default: {
+      const unhandled: never = report;
+      return unhandled;
+    }
+  }
+}
+
 /** P-04 clause 1: the account's registered head office is somewhere other than BC. */
-function headOfficeOutsideBc(a: Account): boolean {
-  if (a.address_region) return !isBcRegion(a.address_region);
+function headOfficeOutsideBc(a: Account, lists: QualificationLists): boolean {
+  const regionIsBc = resolveGeography({ region: a.address_region }, lists).region_is_bc;
+  if (regionIsBc !== null) return !regionIsBc;
   if (a.address_country) return a.address_country.trim().toUpperCase() !== "CA";
   return false;
 }
@@ -2720,7 +2936,7 @@ export function evaluatePenalties(a: Account, ctx: PenaltyContext): PenaltyResul
   // P-04 — ENTRY CONDITION, from §4's own definition: "Head office outside BC, local branch
   // exists but branch autonomy unproven". All three clauses are required. §5's bare UNPROVEN
   // fall-through implements only the third; see the REPORT CONTRADICTIONS note.
-  if (ctx.franchise === "UNPROVEN" && headOfficeOutsideBc(a) && localBranchExists(a, lists)) {
+  if (ctx.franchise === "UNPROVEN" && headOfficeOutsideBc(a, lists) && localBranchExists(a, lists)) {
     out.push(
       penalty(
         a,
@@ -2992,7 +3208,10 @@ export function killPredicateSequence(
   opts: FilterOptions = {},
 ): (() => PredicateResult | PredicateResult[])[] {
   const now = opts.now ?? new Date();
-  const franchise = franchiseOrBranchCarveOut(a).status;
+  const franchise = franchiseOrBranchCarveOut(a, {
+    now,
+    application_path_found: opts.application_path_found,
+  });
 
   return [
     // 1. suppression
@@ -3023,9 +3242,13 @@ export function killPredicateSequence(
     () => kGeo02OutsideBc(a, lists, now),
     () => kGeo03OutsideMetroVancouver(a, lists, now),
     // 7. size
-    () => kSize01EnterpriseScale(a, now, franchise),
+    () => kSize01EnterpriseScale(a, now, franchise.status),
     () => kChan01ApplicationChannel(a, now, { application_path_found: opts.application_path_found }),
     () => kChan02IneligibleRequiresCharity(a, now),
+    // §5 step 2's reroute, AFTER K-CHAN-02: the report's own caveat is "rerouted, not dropped,
+    // unless K-CHAN-02 also fires", and K-CHAN-02 is an account-scoped terminal that
+    // short-circuits, so the ordering implements the caveat rather than restating it.
+    () => franchiseReroute(franchise),
     // 8. deliverability
     () => d01DeadDomain(a, now),
     () => d02ParkedDomain(a, lists, now),
@@ -3089,7 +3312,10 @@ export function runFilter(
   opts: FilterOptions = {},
 ): FilterResult {
   const now = opts.now ?? new Date();
-  const franchise = franchiseOrBranchCarveOut(account);
+  const franchise = franchiseOrBranchCarveOut(account, {
+    now,
+    application_path_found: opts.application_path_found,
+  });
   const locality = localityBasis(account, lists);
 
   const neverKill =
@@ -3129,9 +3355,10 @@ export function runFilter(
           // penalty pass. The never-kill allowlist has nothing to suppress here: it protects the
           // ACCOUNT, and an unusable address stays unusable for a past sponsor too.
           if (r.scope !== "account") {
+            const effect = SCOPE_EFFECTS[r.scope];
             fieldTerminals.push(r);
-            for (const field of SCOPE_FIELDS[r.scope]) clearedFields.add(field);
-            if (r.scope === "email") emailChannelOpen = false;
+            for (const field of effect.clears) clearedFields.add(field);
+            if (effect.closes_email_channel) emailChannelOpen = false;
             if (r.sibling_penalty) siblingPenalties.push(r.sibling_penalty);
             break;
           }

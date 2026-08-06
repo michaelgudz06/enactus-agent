@@ -37,10 +37,12 @@ import type {
 } from "./icp-config";
 import type { FilterResult } from "./filter";
 import {
+  type GeographyVerdict,
   type QualificationLists,
   metroVancouverCanonicals,
   normalizeDomain,
   normalizeMunicipality,
+  resolveGeography,
 } from "./qualification-lists";
 
 export type { SegmentId, RelationshipTier, AlumniEvidence, AskClass, AskTier };
@@ -372,9 +374,12 @@ function domainMatches(url: string, domain: string): boolean {
  * they are absent? ABSENT INPUTS RETURN `cannot_evaluate` WITH EFFECT `none`. ONLY CONTRARY
  * EVIDENCE RETURNS `fail`. The audit, so the next reader does not have to redo it:
  *
- *   G_GEO         needs a region to say "outside BC". Municipality alone, unresolved against the
- *                 23 member jurisdictions, is an unrecognised place name and not evidence of
- *                 anything — `cannot_evaluate`, matching `kGeo02OutsideBc` on the same input.
+ *   G_GEO         reads `resolveGeography`, the SAME verdict the filter's K-GEO rules read, so
+ *                 the two modules cannot place a company in different provinces. Municipality
+ *                 alone, unresolved against the 23 member jurisdictions, is an unrecognised
+ *                 place name and not evidence of anything — `cannot_evaluate`. A recorded
+ *                 region that is not BC is the one contrary scope, and it is consulted BEFORE a
+ *                 municipality alias is trusted: "Richmond, VA" is not Richmond, BC.
  *   G_EXISTS      contrary DNS fails; uncorroborated-but-unrecorded is `cannot_evaluate`.
  *   G_SIZE        no headcount is `cannot_evaluate`; §6 records that as a specification bug.
  *   G_DELIVERABLE unchecked is `cannot_evaluate`.
@@ -419,6 +424,10 @@ export function evaluateGates(
   });
 
   // G_GEO — soft for S6 ONLY. An alum anywhere is worth more than a stranger next door.
+  // The SAME verdict the filter's K-GEO rules read. `outside_bc` is the only contrary scope, and
+  // it is decided before any municipality alias is trusted, so "Richmond, VA" cannot pass here
+  // on the strength of a bare municipality name that also exists in British Columbia.
+  const geo = geographyScope(c, config, opts.lists);
   const geoBand = geographyBand(c, config, opts.lists);
   if (seg === "S6") {
     out.push({
@@ -427,39 +436,31 @@ export function evaluateGates(
       effect: "none",
       message: "G_GEO is soft for S6: an alum elsewhere still qualifies. Geography is a weight here, not a gate",
     });
-  } else if (geoBand !== "elsewhere") {
+  } else if (geo.scope === "unresolved") {
+    out.push({
+      gate: "G_GEO",
+      verdict: "cannot_evaluate",
+      effect: "none",
+      message:
+        `nothing recorded resolves against config/exclusions/metro-vancouver.csv, so Metro Vancouver ` +
+        `membership cannot be resolved. Missing: ${geo.missing_fields.join(", ")}. ` +
+        `Absence of evidence is never a kill`,
+    });
+  } else if (geo.scope === "outside_bc") {
+    out.push({
+      gate: "G_GEO",
+      verdict: "fail",
+      effect: "block",
+      message: geo.alias_suppressed_by_region
+        ? `killed: out_of_area — the recorded region ${c.region} is not British Columbia, so the municipality "${c.municipality}" is not the Metro Vancouver jurisdiction of the same name`
+        : `killed: out_of_area — ${c.municipality ? `${c.municipality}, ` : ""}${c.region} is outside Metro Vancouver and outside BC`,
+    });
+  } else {
     out.push({
       gate: "G_GEO",
       verdict: "pass",
       effect: "block",
       message: `in the ${geoBand} band`,
-    });
-  } else if (normalizeMunicipality(c.region) === "") {
-    // `elsewhere` means "nothing matched", which is only CONTRARY evidence when a region was
-    // actually recorded and it is not BC. A municipality that did not resolve against the 23
-    // Metro Vancouver jurisdictions is an unrecognised place name, not a place known to be
-    // outside them — `kGeo02OutsideBc` returns `cannot_evaluate` on exactly this input and
-    // `kGeo03OutsideMetroVancouver` charges a penalty at most, never a kill.
-    const recorded = [
-      c.municipality ? `municipality "${c.municipality}"` : null,
-      c.postal_code ? `postal code "${c.postal_code}"` : null,
-    ]
-      .filter(Boolean)
-      .join(" and ");
-    out.push({
-      gate: "G_GEO",
-      verdict: "cannot_evaluate",
-      effect: "none",
-      message: recorded
-        ? `${recorded} did not resolve against config/exclusions/metro-vancouver.csv and no region is recorded, so Metro Vancouver membership cannot be resolved. Missing: region. Absence of evidence is never a kill`
-        : "no municipality, region or postal code is recorded, so Metro Vancouver membership cannot be resolved. Missing: municipality, region, postal_code. Absence of evidence is never a kill",
-    });
-  } else {
-    out.push({
-      gate: "G_GEO",
-      verdict: "fail",
-      effect: "block",
-      message: `killed: out_of_area — ${c.municipality ? `${c.municipality}, ` : ""}${c.region} is outside Metro Vancouver and outside BC`,
     });
   }
 
@@ -699,50 +700,50 @@ export type GeographyBand = "core" | "metro" | "bc_outside_metro" | "elsewhere";
  *
  * `config/exclusions/metro-vancouver.csv` decides MEMBERSHIP — whether a place is in scope at
  * all. It is the maintained list §7.8 of the disqualifier report specified and verified, it
- * carries all 23 member jurisdictions and their aliases, and it is the file a human edits. The
- * same map backs `isInMetroVancouver()` in the filter, so the two modules cannot disagree.
+ * carries all 23 member jurisdictions and their aliases, and it is the file a human edits.
  *
  * `config/icp.yaml` decides WEIGHT — how much a band contributes to fit_score, and which
  * jurisdictions count as `core` (the three SFU campuses). It never decides whether a place
  * qualifies.
+ *
+ * MEMBERSHIP IS NOT DECIDED HERE EITHER. `resolveGeography` in qualification-lists.ts answers it
+ * for both this module and the filter, so a place cannot be in scope for one and out for the
+ * other. This function only maps that one verdict onto a WEIGHT band.
  */
+export function geographyScope(
+  c: CompanyFacts,
+  config: IcpConfig,
+  lists: QualificationLists,
+): GeographyVerdict {
+  return resolveGeography(
+    { municipality: c.municipality, region: c.region, postal_code: c.postal_code },
+    lists,
+    { metro_postal_prefixes: config.geography.postal_prefixes },
+  );
+}
+
 export function geographyBand(
   c: CompanyFacts,
   config: IcpConfig,
   lists: QualificationLists,
 ): GeographyBand {
-  const muni = normalizeMunicipality(c.municipality);
-  if (muni) {
+  const geo = geographyScope(c, config, lists);
+
+  if (geo.scope === "metro_vancouver") {
+    const muni = normalizeMunicipality(c.municipality);
     const coreNames = config.geography.core.map((m) => normalizeMunicipality(m));
     if (coreNames.includes(muni)) return "core";
-
-    const canonicals = metroVancouverCanonicals(muni, lists);
-    if (canonicals.length > 0) {
-      // A core name resolved through the same alias map, so "Kitsilano" lands on core rather
-      // than on plain metro.
-      const coreCanonicals = new Set(config.geography.core.flatMap((m) => metroVancouverCanonicals(m, lists)));
-      if (canonicals.some((canonical) => coreCanonicals.has(canonical))) return "core";
-      return "metro";
-    }
+    // A core name resolved through the same alias map, so "Kitsilano" lands on core rather
+    // than on plain metro.
+    const coreCanonicals = new Set(
+      config.geography.core.flatMap((m) => metroVancouverCanonicals(m, lists)),
+    );
+    if (geo.metro_canonicals.some((canonical) => coreCanonicals.has(canonical))) return "core";
+    return "metro";
   }
 
-  const prefix = (c.postal_code ?? "").trim().slice(0, 2).toUpperCase();
-  if (prefix && config.geography.postal_prefixes.includes(prefix)) return "metro";
-
-  if (isBcRegionName(c.region)) return "bc_outside_metro";
+  if (geo.scope === "bc_outside_metro") return "bc_outside_metro";
   return "elsewhere";
-}
-
-/**
- * Whether a recorded region names British Columbia.
- *
- * Extracted so the one spelling list backs both the band and anything else that has to ask the
- * question. G_GEO's own test is narrower — whether a region was RECORDED at all — because by the
- * time it looks, the band has already established that this one is not BC.
- */
-export function isBcRegionName(region: string | null | undefined): boolean {
-  const r = normalizeMunicipality(region);
-  return r === "bc" || r === "british columbia" || r === "colombie-britannique";
 }
 
 export interface ScoreTerm {

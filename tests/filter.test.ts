@@ -1614,9 +1614,79 @@ describe("§5 · franchise or branch — test the LOCATION, not the brand", () =
         ...FIXTURES.cactusClubCafe,
         observations: { has_central_donation_form: true, only_head_office_contact: true },
       }),
+      { now: NOW, application_path_found: "/donation-requests" },
     );
     expect(report.status).toBe("HEAD_OFFICE");
     expect(report.signals).toEqual(expect.arrayContaining(["N1", "N2"]));
+    if (report.status !== "HEAD_OFFICE") return;
+    // The reroute is CARRIED, not described: §5's worked case maps this row to CHANNEL web_form.
+    expect(report.reroute.kind).toBe("channel");
+    if (report.reroute.kind !== "channel") return;
+    expect(report.reroute.required_channel).toBe("web_form");
+    expect(report.reroute.reason).toBe("head_office_holds_the_decision");
+  });
+
+  // The live defect: §5 said "REROUTED, not dropped" and nothing emitted a reroute, so a
+  // head-office row reached the queue unmarked and a student emailed the local branch.
+  describe("§5 step 2's reroute is emitted, not merely narrated", () => {
+    const headOfficeOnly = {
+      legal_name: "Some Chain Location",
+      registrable_domain: "somechain.ca",
+      address_municipality: "Vancouver",
+      address_region: "BC",
+      address_country: "CA",
+      observations: { only_head_office_contact: true },
+    };
+
+    it("routes to web_form through runFilter when head office publishes a path", () => {
+      const result = run(account(headOfficeOnly), { application_path_found: "/donation-requests" });
+      expect(result.decision).toBe("channel");
+      expect(
+        result.channels.filter((c) => c.rule_id === "FRANCHISE-HEAD-OFFICE").map((c) => c.required_channel),
+      ).toEqual(["web_form"]);
+      expect(result.kills).toHaveLength(0);
+    });
+
+    it("flags for human review when head office publishes NO channel, rather than inventing one", () => {
+      const result = run(account(headOfficeOnly));
+      // §5 names no channel for this case, so the row is neither routed to a guess...
+      expect(result.channels.map((c) => c.rule_id)).not.toContain("FRANCHISE-HEAD-OFFICE");
+      expect(result.required_channel).toBeNull();
+      // ...nor dropped, nor left unmarked — which is what it used to be.
+      expect(result.kills).toHaveLength(0);
+      const flag = result.flags.find((f) => f.rule_id === "FRANCHISE-HEAD-OFFICE");
+      expect(flag).toBeDefined();
+      expect(flag?.flag_reason).toBe("head_office_channel_unresolved");
+      expect(flag?.reason).toBe("head_office_holds_the_decision");
+    });
+
+    it("marks nothing when §5 does not return HEAD_OFFICE", () => {
+      const local = run(
+        account({
+          ...headOfficeOnly,
+          observations: { location_has_own_domain_with_mx: true, named_local_owner: "Jane Whitcombe" },
+        }),
+      );
+      expect(local.franchise.status).toBe("LOCAL_AUTHORITY");
+      expect(local.flags.map((f) => f.rule_id)).not.toContain("FRANCHISE-HEAD-OFFICE");
+      expect(local.channels.map((c) => c.rule_id)).not.toContain("FRANCHISE-HEAD-OFFICE");
+    });
+
+    // §5's own caveat: "rerouted, not dropped, UNLESS K-CHAN-02 also fires". K-CHAN-02 is an
+    // account-scoped terminal, so it short-circuits and the reroute never runs.
+    it("is pre-empted by K-CHAN-02, which the report says takes precedence", () => {
+      const result = run(
+        account({
+          ...headOfficeOnly,
+          source_page_text: "Only registered charities are eligible for our community fund.",
+        }),
+        { application_path_found: "/donation-requests" },
+      );
+      expect(result.decision).toBe("terminal");
+      expect(result.reject_rule_id).toBe("K-CHAN-02");
+      expect(result.channels.map((c) => c.rule_id)).not.toContain("FRANCHISE-HEAD-OFFICE");
+      expect(result.flags.map((f) => f.rule_id)).not.toContain("FRANCHISE-HEAD-OFFICE");
+    });
   });
 
   // Red Bull is a chain, so §5 applies to it — but the fixture has to SAY it is a chain, because
