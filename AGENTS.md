@@ -187,9 +187,32 @@ Four invariants these modules exist to hold. Breaking one silently is the failur
    carrying the missing field names. Every rule also carries an explicit ENTRY CONDITION — "does
    this rule apply to this row at all?" — taken from its own definition row. An unproven condition
    on an entity the rule does not cover is a no-op, not a penalty.
-4. **Never blend the scores.** `fit` / `affinity` / `access` stay separate, and so do the two
-   objectives (`deployable_cash` vs `relationship_volume`). For Tier B segments the cash
-   objective is *not applicable*, not zero.
+4. **Never blend the scores.** `fit` / `affinity` / `access` stay separate, and so do the three
+   objectives (`deployable_cash`, `relationship_volume`, `advisory_capacity`). For Tier B
+   segments the cash objective is *not applicable*, not zero.
+
+## Two captain rulings the scorer encodes as parameters
+
+Both are product statements, both live in `config/icp.yaml`, and both are held by tests in
+`tests/scoring.test.ts` that compare against the pre-ruling behaviour rather than asserting the
+new number in isolation. Full record: `/Users/test/firstmate/data/decisions/captain-answers-2026-08-06-batch.md`.
+
+- **`smb_band` — small-to-medium is 5 to 250 employees.** It bounds the per-segment bands and
+  supplies the enterprise line the §4 ladder used to carry as a literal 500. **An unknown
+  headcount is never a kill and never a penalty** — absence may only penalise after a documented
+  attempt to resolve it. 24 of the 25 seeded rows record no headcount, so a band that fired on
+  absence would empty the board. Applicability is decided per SEGMENT before the headcount is
+  read (`smbBandApplies`): a credit union or a foundation makes no size judgement, and Vancity
+  must survive it.
+- **`advisory` — a mentor or project advisor is worth the same as money.** Advisory capacity is
+  its own objective, never a term, a bonus or a tie-break inside the cash score, and it is
+  applicable independently of whether funding evidence exists. `parity: equal_to_cash` is the
+  ruling and `loadIcpConfig()` rejects any other value, so a cash preference cannot drift back in
+  as a weight.
+
+**Known gap, upstream of this layer:** nothing can supply `advisory_commitments` yet. The
+`sponsorship_type` column in `supabase-setup.sql` carries only `monetary` and `in_kind`, so 0 of
+25 seeded rows can record a mentor even though two describe one in prose.
 
 ## Policy lives in `config/`, not in code
 

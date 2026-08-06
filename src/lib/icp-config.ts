@@ -88,6 +88,35 @@ export interface SegmentConfig {
   ideal_high: number | null;
 }
 
+/**
+ * The captain's SMB definition, 2026-08-06: in-scope small-to-medium is 5–250 employees.
+ *
+ * It is a WEIGHTING AND ROUTING band, never a kill, and it is read only where a headcount is
+ * actually recorded — see the absence rule in config/icp.yaml and `smbBandApplies` in
+ * src/lib/scoring.ts.
+ */
+export interface SmbBandConfig {
+  min_headcount: number;
+  max_headcount: number;
+}
+
+/**
+ * The captain's advisory ruling, 2026-08-06: a mentor or project advisor is worth THE SAME as
+ * money. `equal_to_cash` is the only value the loader accepts, so a future cash preference has to
+ * be a visible edit to config/icp.yaml rather than a drifting weight.
+ */
+export type AdvisoryParity = "equal_to_cash";
+
+export const ADVISORY_PARITIES: readonly AdvisoryParity[] = ["equal_to_cash"];
+
+export interface AdvisoryConfig {
+  parity: AdvisoryParity;
+  /** The club's own published per-event engagement menu. Code checks reported commitments here. */
+  commitments: string[];
+  /** The rung an advisory commitment is valued at when the lead's own ask carries no cash amount. */
+  parity_tier: AskTier;
+}
+
 export interface IcpConfig {
   geography: {
     /**
@@ -130,6 +159,8 @@ export interface IcpConfig {
     max_age_days: Record<string, number>;
     values: Record<string, number>;
   };
+  smb_band: SmbBandConfig;
+  advisory: AdvisoryConfig;
   p_yes: Record<string, number>;
   ask_ladder: Record<AskTier, AskLadderRung>;
   effort_minutes: Record<SegmentId, number>;
@@ -289,6 +320,75 @@ export function validateIcpConfig(raw: unknown): string[] {
             `cash_and_relationship, relationship_only or excluded`,
         );
       }
+    }
+  }
+
+  // smb_band — the captain's 5–250 definition. Validated for the same reason the weight sums are:
+  // the file is edited by a non-programmer, and a band with a missing or inverted bound would
+  // silently reclassify every sized company in the corpus with no error anywhere.
+  const smb = cfg.smb_band as Record<string, unknown> | undefined;
+  if (typeof smb !== "object" || smb === null) {
+    problems.push(
+      "smb_band is missing; it carries the captain's 5-250 small-to-medium definition and the " +
+        "scorer has no default to fall back on",
+    );
+  } else {
+    for (const key of ["min_headcount", "max_headcount"] as const) {
+      const v = smb[key];
+      if (typeof v !== "number" || !Number.isFinite(v)) {
+        problems.push(`smb_band.${key} is not a number`);
+      } else if (!Number.isInteger(v) || v < 1) {
+        problems.push(`smb_band.${key} must be a whole number of employees, 1 or more (got ${v})`);
+      }
+    }
+    if (
+      typeof smb.min_headcount === "number" &&
+      typeof smb.max_headcount === "number" &&
+      smb.min_headcount > smb.max_headcount
+    ) {
+      problems.push(
+        `smb_band.min_headcount (${smb.min_headcount}) is above smb_band.max_headcount ` +
+          `(${smb.max_headcount}); no headcount could ever be in band`,
+      );
+    }
+  }
+
+  // advisory — the captain's "worth the same as money" ruling.
+  const advisory = cfg.advisory as Record<string, unknown> | undefined;
+  if (typeof advisory !== "object" || advisory === null) {
+    problems.push(
+      "advisory is missing; it carries the captain's ruling that a mentor or project advisor is " +
+        "worth the same as money, and the scorer has no default to fall back on",
+    );
+  } else {
+    if (!ADVISORY_PARITIES.includes(advisory.parity as AdvisoryParity)) {
+      problems.push(
+        `advisory.parity is "${String(advisory.parity)}"; the only accepted value is ` +
+          `"equal_to_cash" (CAPTAIN'S RULING 2026-08-06 — a mentor or project advisor is worth ` +
+          `the same as money). Changing it is a product decision, not a retune`,
+      );
+    }
+    const commitments = advisory.commitments;
+    if (!Array.isArray(commitments)) {
+      problems.push("advisory.commitments is missing or not a list");
+    } else if (commitments.length === 0) {
+      problems.push(
+        "advisory.commitments is empty; with no menu, code would recognise no commitment and " +
+          "every advisory offer would be silently discarded",
+      );
+    } else if (commitments.some((v) => typeof v !== "string" || v.trim() === "")) {
+      problems.push("advisory.commitments contains a non-string or blank entry");
+    }
+    const tier = advisory.parity_tier;
+    const ladderTiers = cfg.ask_ladder as Record<string, unknown> | undefined;
+    if (typeof tier !== "string" || tier.trim() === "") {
+      problems.push("advisory.parity_tier is missing or not a string");
+    } else if (
+      typeof ladderTiers === "object" &&
+      ladderTiers !== null &&
+      ladderTiers[tier] === undefined
+    ) {
+      problems.push(`advisory.parity_tier is "${tier}", which is not a rung of ask_ladder`);
     }
   }
 

@@ -17,10 +17,12 @@ import {
   scoreAffinity,
   scoreCompany,
   scoreFit,
+  smbBandApplies,
   triggerBonus,
 } from "../src/lib/scoring";
 import {
   DEFAULT_ICP_CONFIG_PATH,
+  type IcpConfig,
   IcpConfigError,
   SCORE_BLOCKS,
   SEGMENT_IDS,
@@ -278,19 +280,19 @@ describe("assignSegment — the §4 precedence ladder", () => {
   ];
 
   it.each(cases)("assigns %s to %s", (_label, over, expected) => {
-    expect(assignSegment(company({ legal_name: "X", ...over }), { now: NOW }).segment).toBe(expected);
+    expect(assignSegment(company({ legal_name: "X", ...over }), config, { now: NOW }).segment).toBe(expected);
   });
 
   it("lands every company in EXACTLY ONE segment", () => {
     for (const [, over] of cases) {
-      const r = assignSegment(company({ legal_name: "X", ...over }), { now: NOW });
+      const r = assignSegment(company({ legal_name: "X", ...over }), config, { now: NOW });
       expect(typeof r.segment).toBe("string");
     }
   });
 
   it("always explains which rung fired", () => {
     for (const [, over] of cases) {
-      expect(assignSegment(company({ legal_name: "X", ...over }), { now: NOW }).basis.length).toBeGreaterThan(
+      expect(assignSegment(company({ legal_name: "X", ...over }), config, { now: NOW }).basis.length).toBeGreaterThan(
         10,
       );
     }
@@ -309,6 +311,7 @@ describe("§4 ambiguity 1 · museum, theatre or library — S2 or S16?", () => {
         is_public_or_civic: true,
         civic_ask_shape: "transferable_item",
       }),
+      config,
       { now: NOW },
     );
     expect(r.segment).toBe("S2");
@@ -322,6 +325,7 @@ describe("§4 ambiguity 1 · museum, theatre or library — S2 or S16?", () => {
         is_public_or_civic: true,
         civic_ask_shape: "space_or_programming",
       }),
+      config,
       { now: NOW },
     );
     expect(r.segment).toBe("S16");
@@ -330,10 +334,10 @@ describe("§4 ambiguity 1 · museum, theatre or library — S2 or S16?", () => {
   it("decides on the ASK, not the institution type — the same body can go either way", () => {
     const base = { legal_name: "Museum of Vancouver", is_public_or_civic: true } as const;
     expect(
-      assignSegment(company({ ...base, civic_ask_shape: "transferable_item" }), { now: NOW }).segment,
+      assignSegment(company({ ...base, civic_ask_shape: "transferable_item" }), config, { now: NOW }).segment,
     ).toBe("S2");
     expect(
-      assignSegment(company({ ...base, civic_ask_shape: "space_or_programming" }), { now: NOW }).segment,
+      assignSegment(company({ ...base, civic_ask_shape: "space_or_programming" }), config, { now: NOW }).segment,
     ).toBe("S16");
   });
 });
@@ -342,6 +346,7 @@ describe("§4 ambiguity 2 · franchise location or head office?", () => {
   it("sends the LOCATION to S2 on its storefront", () => {
     const r = assignSegment(
       company({ legal_name: "The Old Spaghetti Factory (Gastown)", unit: "location", has_consumer_storefront: true }),
+      config,
       { now: NOW },
     );
     expect(r.segment).toBe("S2");
@@ -355,6 +360,7 @@ describe("§4 ambiguity 2 · franchise location or head office?", () => {
         has_structured_brand_programme: true,
         has_consumer_storefront: true,
       }),
+      config,
       { now: NOW },
     );
     expect(r.segment).toBe("S8");
@@ -366,6 +372,7 @@ describe("§4 ambiguity 2 · franchise location or head office?", () => {
     // the verified Student Marketeer programme lands Red Bull in S8 as §3.1 maps it.
     const r = assignSegment(
       company({ legal_name: "Red Bull", has_structured_brand_programme: true }),
+      config,
       { now: NOW },
     );
     expect(r.segment).toBe("S8");
@@ -374,6 +381,7 @@ describe("§4 ambiguity 2 · franchise location or head office?", () => {
   it("but S15 DOES win once headcount is actually known to exceed 500", () => {
     const r = assignSegment(
       company({ legal_name: "Red Bull", has_structured_brand_programme: true, headcount: 5000 }),
+      config,
       { now: NOW },
     );
     expect(r.segment).toBe("S15");
@@ -388,6 +396,7 @@ describe("§4 ambiguity 3 · a past partner that is also a trial-model studio", 
   ])("assigns %s to S1 with underlying_segment S3", (_label, name) => {
     const r = assignSegment(
       company({ legal_name: name, relationship_tier: "lapsed_partner", has_trial_offer: true }),
+      config,
       { now: NOW },
     );
     expect(r.segment).toBe("S1");
@@ -402,6 +411,7 @@ describe("§4 ambiguity 3 · a past partner that is also a trial-model studio", 
         relationship_tier: "lapsed_partner",
         is_consumer_packaged_goods: true,
       }),
+      config,
       { now: NOW },
     );
     expect(r.segment).toBe("S1");
@@ -416,6 +426,7 @@ describe("§4 ambiguity 3 · a past partner that is also a trial-model studio", 
         is_family_office_principal: true,
         has_public_philanthropic_profile: true,
       }),
+      config,
       { now: NOW },
     );
     expect(r.segment).toBe("S1");
@@ -432,6 +443,7 @@ describe("§4 ambiguity 3 · a past partner that is also a trial-model studio", 
         matched_project: "Nourish",
         has_trial_offer: true,
       }),
+      config,
       { now: NOW },
     );
     expect(r.segment).toBe("S1");
@@ -443,6 +455,7 @@ describe("further precedence overlaps the report enumerates", () => {
   it("sends Manning Elliott to S7, the textbook mid-market talent recruiter", () => {
     const r = assignSegment(
       company({ legal_name: "Manning Elliott", headcount: 220, runs_campus_recruiting: true }),
+      config,
       { now: NOW },
     );
     expect(r.segment).toBe("S7");
@@ -455,6 +468,7 @@ describe("further precedence overlaps the report enumerates", () => {
         alumni_evidence: "sfu_alum_led",
         raised_institutional_capital_at: "2026-02-01",
       }),
+      config,
       { now: NOW },
     );
     expect(r.segment).toBe("S6");
@@ -468,6 +482,7 @@ describe("further precedence overlaps the report enumerates", () => {
         matched_project: "Alara",
         is_consumer_packaged_goods: true,
       }),
+      config,
       { now: NOW },
     );
     expect(r.segment).toBe("S9");
@@ -483,6 +498,7 @@ describe("further precedence overlaps the report enumerates", () => {
         is_consumer_packaged_goods: true,
         raised_institutional_capital_at: "2026-02-01",
       }),
+      config,
       { now: NOW },
     );
     expect(r.segment).toBe("S11");
@@ -495,13 +511,14 @@ describe("further precedence overlaps the report enumerates", () => {
         is_consumer_packaged_goods: true,
         raised_institutional_capital_at: "2020-01-01",
       }),
+      config,
       { now: NOW },
     );
     expect(r.segment).toBe("S4");
   });
 
   it("keeps UNSEGMENTED visible as a legitimate terminal state", () => {
-    const r = assignSegment(company({ legal_name: "Nothing Matched" }), { now: NOW });
+    const r = assignSegment(company({ legal_name: "Nothing Matched" }), config, { now: NOW });
     expect(r.segment).toBe("UNSEGMENTED");
     expect(r.basis).toContain("do not contact");
   });
@@ -2235,5 +2252,592 @@ describe("the seed corpus survives the K-GEO-05 cut", () => {
     );
     expect(scored.blocking_gates).not.toContain("G_GEO");
     expect(scored.gates.find((g) => g.gate === "G_GEO")?.verdict).toBe("pass");
+  });
+});
+
+// ===========================================================================
+// CAPTAIN'S RULINGS 2026-08-06 — two product parameters, not two retunes
+//
+//   enactus-arch-decision-smb-size-thresholds        — SMB is 5 to 250 employees
+//   enactus-arch-decision-sponsorship-outcome-weighting — a mentor is worth the same as money
+//
+// Every "did this parameter reach the decision?" assertion below is a COMPARISON against the
+// config as it behaved before the ruling. A parameter that changes nothing when it moves is not
+// a parameter, and asserting the new value in isolation would not notice.
+// ===========================================================================
+
+/** The band as it behaved before the ruling: no effective floor, the report's 500-person line. */
+const PRE_RULING: IcpConfig = { ...config, smb_band: { min_headcount: 1, max_headcount: 500 } };
+
+/** A deliberately hostile band, used to prove a MISSING headcount can never be reached by one. */
+const HOSTILE_BAND: IcpConfig = { ...config, smb_band: { min_headcount: 100, max_headcount: 120 } };
+
+function withBand(min: number, max: number): IcpConfig {
+  return { ...config, smb_band: { min_headcount: min, max_headcount: max } };
+}
+
+function sizePoints(r: { terms: { term: string; points: number }[] }): number {
+  return r.terms.find((t) => t.term === "size_band")?.points ?? 0;
+}
+
+describe("CAPTAIN'S RULING — small-to-medium is 5 to 250 employees", () => {
+  it("lives in config/icp.yaml, not in code", () => {
+    expect(config.smb_band).toEqual({ min_headcount: 5, max_headcount: 250 });
+    // Proved by EXECUTION rather than by grepping for the literal the report's §4 ladder carried:
+    // the enterprise line tracks whatever the config says, so it cannot be baked in anywhere.
+    const sized = (headcount: number, cfg: IcpConfig) =>
+      assignSegment(company({ legal_name: "Co", headcount, is_b2b_trade: true }), cfg, { now: NOW })
+        .segment;
+    for (const max of [80, 250, 500]) {
+      expect(sized(max, withBand(1, max)), `at ${max}`).toBe("S13");
+      expect(sized(max + 1, withBand(1, max)), `above ${max}`).toBe("S15");
+    }
+  });
+
+  it("REJECTS a band that is missing, fractional or inverted", () => {
+    expect(validateIcpConfig({ ...config, smb_band: undefined })).toContainEqual(
+      expect.stringContaining("smb_band is missing"),
+    );
+    expect(
+      validateIcpConfig({ ...config, smb_band: { min_headcount: 250, max_headcount: 5 } }),
+    ).toContainEqual(expect.stringContaining("no headcount could ever be in band"));
+    expect(
+      validateIcpConfig({ ...config, smb_band: { min_headcount: 5.5, max_headcount: 250 } }),
+    ).toContainEqual(expect.stringContaining("whole number of employees"));
+  });
+
+  // ── The part that matters most ────────────────────────────────────────────
+  it("NEVER reaches a row whose headcount is merely missing, whatever the band says", () => {
+    const unknown = company({
+      legal_name: "A Local Bakery",
+      has_consumer_storefront: true,
+      municipality: "Burnaby",
+      region: "BC",
+      country: "CA",
+    });
+    const under = (cfg: IcpConfig) => scoreCompany(unknown, cfg, { lists, now: NOW });
+
+    for (const cfg of [PRE_RULING, HOSTILE_BAND, withBand(5, 250), withBand(1, 1)]) {
+      const r = under(cfg);
+      expect(r.segment).toBe("S2");
+      expect(r.fit.score).toBe(under(config).fit.score);
+      expect(r.affinity.score).toBe(under(config).affinity.score);
+      expect(r.access.score).toBe(under(config).access.score);
+      // The gate cannot evaluate it, and `cannot_evaluate` carries effect `none`.
+      const g = r.gates.find((x) => x.gate === "G_SIZE");
+      expect(g?.verdict).toBe("cannot_evaluate");
+      expect(g?.effect).toBe("none");
+      expect(r.blocking_gates).not.toContain("G_SIZE");
+      expect(r.missing_inputs).toContain("headcount");
+    }
+  });
+
+  it("keeps the OrgBook SP/GP proxy, which is the only micro-business signal the club can get free", () => {
+    // A sole proprietorship is below the captain's floor by definition, and still earns the full
+    // weight: the proxy is read ONLY when the headcount is absent, and absence never penalises.
+    const r = scoreFit(
+      company({ legal_name: "A Sole Trader", orgbook_entity_type: "SP", has_consumer_storefront: true }),
+      "S2",
+      config,
+      { lists, now: NOW },
+    );
+    expect(sizePoints(r)).toBe(config.fit_score.size_band);
+  });
+
+  // ── Below the floor ───────────────────────────────────────────────────────
+  it("costs a KNOWN sub-floor headcount the size weight, and nothing more", () => {
+    const tiny = company({
+      legal_name: "Three People And A Van",
+      has_consumer_storefront: true,
+      headcount: 3,
+      municipality: "Burnaby",
+      region: "BC",
+      country: "CA",
+    });
+    const before = scoreCompany(tiny, PRE_RULING, { lists, now: NOW });
+    const after = scoreCompany(tiny, config, { lists, now: NOW });
+
+    expect(sizePoints(before.fit)).toBe(config.fit_score.size_band);
+    expect(sizePoints(after.fit)).toBe(0);
+    expect(after.fit.terms.find((t) => t.term === "size_band")?.basis).toContain(
+      "too small to carry a sponsorship budget",
+    );
+
+    // It is a PENALTY, never a kill: same segment, same everything else, still on the board.
+    expect(after.segment).toBe(before.segment);
+    expect(after.blocking_gates).toEqual(before.blocking_gates);
+    expect(after.blocking_gates).not.toContain("G_SIZE");
+    expect(after.gates.find((g) => g.gate === "G_SIZE")?.effect).toBe("reassign");
+    expect(after.gates.find((g) => g.gate === "G_SIZE")?.message).toContain("out_of_band: too_small");
+    expect(after.affinity.score).toBe(before.affinity.score);
+    expect(after.access.score).toBe(before.access.score);
+  });
+
+  // ── Above the band ────────────────────────────────────────────────────────
+  it("routes a company ABOVE the band to the non-monetary relationship, not to a donor segment", () => {
+    const at = (headcount: number, cfg: IcpConfig) =>
+      assignSegment(
+        company({ legal_name: "Mid-Market Co", headcount, is_b2b_trade: true }),
+        cfg,
+        { now: NOW },
+      ).segment;
+
+    expect(at(250, config)).not.toBe("S15"); // 250 is IN band — the ruling is inclusive
+    expect(at(251, config)).toBe("S15");
+    expect(at(400, config)).toBe("S15");
+    // …and that is a change the ruling made. Before it, 400 was still treated as a donor.
+    expect(at(400, PRE_RULING)).toBe("S13");
+  });
+
+  it("does not double-penalise S15 for being above the band that put it there", () => {
+    const enterprise = company({ legal_name: "Big Co", headcount: 4000, is_b2b_trade: true });
+    const r = scoreCompany(enterprise, config, { lists, now: NOW });
+    expect(r.segment).toBe("S15");
+    expect(smbBandApplies("S15", config)).toBe(false);
+    expect(r.gates.find((g) => g.gate === "G_SIZE")?.verdict).toBe("not_applicable");
+    expect(sizePoints(r.fit)).toBeGreaterThan(0);
+  });
+
+  // ── Where the band deliberately does not go ───────────────────────────────
+  it.each([
+    ["a credit union", { is_credit_union: true }, "S10"],
+    ["a grant-making foundation", { is_grantmaking_foundation: true }, "S14"],
+    ["a civic host", { is_public_or_civic: true, civic_ask_shape: "space_or_programming" as const }, "S16"],
+  ])("never reaches %s, whose staff count says nothing about whether it funds students", (_n, over, seg) => {
+    // Vancity has thousands of employees and is one of the club's best real prospects.
+    const r = scoreCompany(company({ legal_name: "Big Institution", headcount: 2600, ...over }), config, {
+      lists,
+      now: NOW,
+    });
+    expect(r.segment).toBe(seg);
+    expect(smbBandApplies(r.segment, config)).toBe(false);
+    expect(r.gates.find((g) => g.gate === "G_SIZE")?.verdict).toBe("not_applicable");
+  });
+
+  // ── The parameter is live ─────────────────────────────────────────────────
+  it("is READ, not baked in — retuning the band moves the outcome", () => {
+    const eight = company({ legal_name: "Eight People", has_consumer_storefront: true, headcount: 8 });
+    expect(sizePoints(scoreFit(eight, "S2", config, { lists, now: NOW }))).toBe(20);
+    expect(sizePoints(scoreFit(eight, "S2", withBand(10, 250), { lists, now: NOW }))).toBe(0);
+
+    const ninety = company({ legal_name: "Ninety People", has_consumer_storefront: true, headcount: 90 });
+    // S2's own ceiling is 99, so 90 is under it; a band of 5-50 bounds that ceiling down to 50.
+    expect(sizePoints(scoreFit(ninety, "S2", config, { lists, now: NOW }))).toBe(10);
+    expect(sizePoints(scoreFit(ninety, "S2", withBand(5, 50), { lists, now: NOW }))).toBe(0);
+  });
+
+  // ── What the ruling may not break ─────────────────────────────────────────
+  it("leaves every row INSIDE the band exactly where it was", () => {
+    for (const headcount of [5, 12, 49, 99, 150, 200, 250]) {
+      for (const seg of ["S2", "S3", "S6", "S7", "S9", "S11", "S13"] as const) {
+        const c = company({ legal_name: `${headcount}-person`, headcount });
+        expect(
+          sizePoints(scoreFit(c, seg, config, { lists, now: NOW })),
+          `${seg} @ ${headcount}`,
+        ).toBe(sizePoints(scoreFit(c, seg, PRE_RULING, { lists, now: NOW })));
+      }
+    }
+  });
+
+  it("leaves the geography band and its core-vs-metro split untouched", () => {
+    const at = (municipality: string) =>
+      scoreFit(
+        company({ legal_name: "X", municipality, region: "BC", country: "CA", headcount: 20 }),
+        "S2",
+        config,
+        { lists, now: NOW },
+      ).terms.find((t) => t.term === "geography")?.points;
+
+    expect(at("Burnaby")).toBe(config.geography.bands.core);
+    expect(at("Kitsilano")).toBe(config.geography.bands.core);
+    expect(at("Richmond")).toBe(config.geography.bands.metro_vancouver);
+    expect(at("Kelowna")).toBe(config.geography.bands.bc_other);
+  });
+});
+
+describe("CAPTAIN'S RULING — a mentor or project advisor is worth the same as money", () => {
+  const ADVISORY = ["team_mentor"];
+
+  /** Score one lead in one segment with a given advisory record. */
+  function objectivesFor(seg: "S7" | "S2" | "S15" | "S16" | "S17", advisory?: string[] | null) {
+    const c = company({ legal_name: "X" });
+    return computeObjectives(seg, deriveAsk(c, seg, null, config), config, {
+      advisory_commitments: advisory,
+    });
+  }
+
+  it("lives in config/icp.yaml as a RULING, not as a weight", () => {
+    expect(config.advisory.parity).toBe("equal_to_cash");
+    expect(config.advisory.commitments).toContain("mentor");
+    expect(config.advisory.commitments).toContain("project_advisor");
+    expect(config.ask_ladder[config.advisory.parity_tier]).toBeDefined();
+  });
+
+  it("REJECTS any parity other than equal_to_cash, so a cash preference cannot drift back in", () => {
+    const problems = validateIcpConfig({
+      ...config,
+      advisory: { ...config.advisory, parity: "cash_first" },
+    });
+    expect(problems.join(" ")).toContain("the only accepted value is \"equal_to_cash\"");
+    expect(problems.join(" ")).toContain("a product decision, not a retune");
+
+    expect(
+      validateIcpConfig({ ...config, advisory: { ...config.advisory, commitments: [] } }).join(" "),
+    ).toContain("silently discarded");
+    expect(
+      validateIcpConfig({ ...config, advisory: { ...config.advisory, parity_tier: "platinum" } }).join(" "),
+    ).toContain("not a rung of ask_ladder");
+  });
+
+  // ── The ruling itself ─────────────────────────────────────────────────────
+  it("values a mentor EQUAL to a cheque of comparable value, on the same ladder", () => {
+    // Two S7 leads. One is asked for cash at Gold; the other offers a Team Mentor. The advisory
+    // yes is valued at the SAME rung the cash ask uses, so the two numbers come out identical.
+    const cashOnly = objectivesFor("S7");
+    const advisoryOffered = objectivesFor("S7", ADVISORY);
+
+    expect(cashOnly.deployable_cash.expected_cash).toBeGreaterThan(0);
+    expect(advisoryOffered.advisory_capacity.applicable).toBe(true);
+    expect(advisoryOffered.advisory_capacity.valued_at_tier).toBe("gold");
+    expect(advisoryOffered.advisory_capacity.expected_value).toBe(
+      cashOnly.deployable_cash.expected_cash,
+    );
+    expect(advisoryOffered.advisory_capacity.value_per_hour).toBe(
+      cashOnly.deployable_cash.cash_per_hour,
+    );
+  });
+
+  it("is NOT consulted only when funding evidence is absent — both objectives apply at once", () => {
+    const o = objectivesFor("S7", ADVISORY);
+    expect(o.deployable_cash.applicable).toBe(true);
+    expect(o.deployable_cash.expected_cash).toBeGreaterThan(0);
+    expect(o.advisory_capacity.applicable).toBe(true);
+    expect(o.advisory_capacity.expected_value).toBeGreaterThan(0);
+  });
+
+  it("does not evaluate to zero for the segments where advisory IS the product", () => {
+    // S2's ask is in-kind, so its cash objective is worth $0 — the report's own structural
+    // finding. Valuing advisory off that rung would silently restore the cash preference.
+    const o = objectivesFor("S2", ADVISORY);
+    expect(o.deployable_cash.expected_cash).toBe(0);
+    expect(o.advisory_capacity.applicable).toBe(true);
+    expect(o.advisory_capacity.valued_at_tier).toBe(config.advisory.parity_tier);
+    expect(o.advisory_capacity.expected_value).toBeGreaterThan(0);
+    expect(o.advisory_capacity.note).toContain("advisory.parity_tier, not zero");
+  });
+
+  it("applies on Tier B, where the cash objective does not — these ARE the mentor employers", () => {
+    for (const seg of ["S15", "S16"] as const) {
+      const o = objectivesFor(seg, ADVISORY);
+      expect(o.deployable_cash.applicable, seg).toBe(false);
+      expect(o.advisory_capacity.applicable, seg).toBe(true);
+      expect(o.advisory_capacity.expected_value, seg).toBeGreaterThan(0);
+    }
+  });
+
+  it("stays inapplicable where NO objective applies", () => {
+    expect(objectivesFor("S17", ADVISORY).advisory_capacity.applicable).toBe(false);
+    const unsegmented = computeObjectives("UNSEGMENTED", null, config, {
+      advisory_commitments: ADVISORY,
+    });
+    expect(unsegmented.advisory_capacity.applicable).toBe(false);
+  });
+
+  // ── Not a modifier, not a bonus, not a tie-break ──────────────────────────
+  it("moves its OWN objective and nothing else", () => {
+    const base = company({
+      legal_name: "Manning Elliott",
+      runs_campus_recruiting: true,
+      headcount: 220,
+      municipality: "Burnaby",
+      region: "BC",
+      country: "CA",
+      triggers: [{ kind: "student_job_posting", observed_at: "2026-07-20" }],
+    });
+    const without = scoreCompany(base, config, { lists, now: NOW });
+    const with_ = scoreCompany(
+      { ...base, advisory_commitments: ["mentor", "judge"] },
+      config,
+      { lists, now: NOW },
+    );
+
+    expect(with_.fit).toEqual(without.fit);
+    expect(with_.affinity).toEqual(without.affinity);
+    expect(with_.access).toEqual(without.access);
+    expect(with_.trigger_bonus).toEqual(without.trigger_bonus);
+    expect(with_.gates).toEqual(without.gates);
+    expect(with_.ask).toEqual(without.ask);
+    expect(with_.blocked).toBe(without.blocked);
+    expect(with_.objectives.deployable_cash).toEqual(without.objectives.deployable_cash);
+    expect(with_.objectives.relationship_volume).toEqual(without.objectives.relationship_volume);
+    // …and the one thing that DID move.
+    expect(without.objectives.advisory_capacity.applicable).toBe(false);
+    expect(with_.objectives.advisory_capacity.applicable).toBe(true);
+  });
+
+  it("treats an unrecorded advisory capacity as NOT RESEARCHED, never as a refusal", () => {
+    for (const absent of [undefined, null, []]) {
+      const o = objectivesFor("S7", absent);
+      expect(o.advisory_capacity.applicable).toBe(false);
+      expect(o.advisory_capacity.note).toContain("ABSENT IS NOT A REFUSAL");
+      expect(o.advisory_capacity.expected_value).toBeUndefined();
+      // Absence costs nothing on the other two objectives either.
+      expect(o.deployable_cash).toEqual(objectivesFor("S7", ADVISORY).deployable_cash);
+    }
+  });
+
+  // ── Code decides, the model reports ───────────────────────────────────────
+  it("checks a reported commitment against the club's published menu and reports the rest", () => {
+    const o = objectivesFor("S7", ["team_mentor", "board seat", "equity stake"]);
+    expect(o.advisory_capacity.commitments).toEqual(["team_mentor"]);
+    expect(o.advisory_capacity.unrecognised).toEqual(["board seat", "equity stake"]);
+    expect(o.advisory_capacity.note).toContain("not on the club's published engagement menu");
+  });
+
+  it("does not let a model inflate a lead by listing the whole menu", () => {
+    const one = objectivesFor("S7", ["mentor"]);
+    const all = objectivesFor("S7", [...config.advisory.commitments]);
+    expect(all.advisory_capacity.expected_value).toBe(one.advisory_capacity.expected_value);
+    expect(all.advisory_capacity.expected_advisors).toBe(one.advisory_capacity.expected_advisors);
+  });
+
+  it("reports an off-menu claim even when nothing on the menu was found, and stays inapplicable", () => {
+    const o = objectivesFor("S7", ["a seat on the board"]);
+    expect(o.advisory_capacity.applicable).toBe(false);
+    expect(o.advisory_capacity.unrecognised).toEqual(["a seat on the board"]);
+  });
+
+  // ── Three objectives, still never summed ──────────────────────────────────
+  it("adds a THIRD objective and still never sums any of them", () => {
+    const o = objectivesFor("S7", ADVISORY);
+    expect(Object.keys(o).sort()).toEqual([
+      "advisory_capacity",
+      "deployable_cash",
+      "relationship_volume",
+    ]);
+    expect(o).not.toHaveProperty("total");
+    expect(o).not.toHaveProperty("combined");
+    expect(o.advisory_capacity.note).toContain("NEVER ADDED TO expected_cash");
+  });
+});
+
+// ===========================================================================
+// THE CORPUS PROOF — what the two rulings actually do to the club's own 25 rows
+//
+// A parameter change with no measurable effect on the corpus is a FINDING, not a success: it
+// means the parameter never reaches the decision. So this section measures both, and states
+// plainly where the effect is zero and why.
+// ===========================================================================
+
+/**
+ * The 25 seeded rows, with the facts that decide their SEGMENT transcribed from the seed's own
+ * columns in supabase-setup.sql — nothing inferred and nothing researched.
+ *
+ * WHAT IS DELIBERATELY NOT HERE, because the seed does not record it:
+ *
+ *  - `headcount`. One row out of 25 states a number anywhere ("200+ employees", Safe Software)
+ *    and it is in the description prose, not a column. Every other row is UNKNOWN.
+ *  - `advisory_commitments`. The `sponsorship_type` column carries only `monetary` and `in_kind`;
+ *    there is no value it could take that would record a mentor. Two rows describe advisory
+ *    capacity in prose (Superpilot's SFU advisory-board seat, Second Savour's "mentor sessions")
+ *    and neither can be stored.
+ *
+ * `relationship_tier` stays `cold` for every row. The seed's `connection_type` records how the
+ * company relates to SFU — a JDC West sponsorship, an alumnus founder, an ecosystem funder — not
+ * a recorded Enactus SFU relationship, and reading it as one would send the whole corpus down the
+ * S1 renewal path on evidence the club does not have.
+ */
+const SEED_FACTS: readonly (readonly [string, Partial<CompanyFacts>])[] = [
+  ["Affinity Credit Union", { is_credit_union: true }],
+  ["Neighbourhood Holdings", { is_b2b_trade: true }],
+  ["PC Urban Properties", { is_b2b_trade: true }],
+  ["HeavyPDG Equipment Ltd.", { is_b2b_trade: true }],
+  ["Window Wizards", { is_b2b_trade: true }],
+  ["Vancity Credit Union", { is_credit_union: true }],
+  ["Safe Software", { alumni_evidence: "sfu_alum_led", headcount: 200 }],
+  ["Peak Products", { alumni_evidence: "sfu_alum_led" }],
+  ["Superpilot", { alumni_evidence: "sfu_alum_led" }],
+  ["BAK'D Cookies", { alumni_evidence: "sfu_alum_led" }],
+  ["Second Savour", { is_institutional_home: true }],
+  ["The Woods Spirit Co.", { alumni_evidence: "sfu_alum_led" }],
+  ["pH7 Technologies", { alumni_evidence: "sfu_alum_led" }],
+  ["IUVOX", { alumni_evidence: "sfu_alum_led" }],
+  ["Behené", { alumni_evidence: "sfu_alum_led" }],
+  ["GluteNull", { alumni_evidence: "sfu_alum_led" }],
+  ["Moment Energy", { alumni_evidence: "sfu_alum_led" }],
+  ["Ionomr Innovations", { alumni_evidence: "sfu_alum_led" }],
+  ["Mala the Brand", { alumni_evidence: "sfu_alum_led" }],
+  ["Spexi Geospatial", { alumni_evidence: "sfu_alum_led" }],
+  ["Coast Capital Savings", { is_credit_union: true }],
+  ["Prospera Credit Union", { is_credit_union: true }],
+  ["Innovate BC", { is_public_or_civic: true, civic_ask_shape: "space_or_programming" }],
+  ["Dobson Foundation", { is_grantmaking_foundation: true }],
+  ["Discovery Foundation", { is_grantmaking_foundation: true }],
+];
+
+function seedRow(name: string, over: Partial<CompanyFacts> = {}): CompanyFacts {
+  const facts = SEED_FACTS.find(([n]) => n === name)?.[1] ?? {};
+  return company({ legal_name: name, ...facts, ...over });
+}
+
+const SEEDED = SEED_FACTS.map(([name]) => name);
+
+describe("the corpus proof — the SMB band on the club's own 25 seeded rows", () => {
+  it("covers the same 25 rows the reports measured", () => {
+    expect(SEEDED).toHaveLength(25);
+    expect(new Set(SEEDED).size).toBe(25);
+    expect(new Set(SEED_CORPUS.map(([c]) => c))).toEqual(new Set(SEEDED));
+  });
+
+  it("FINDING: 24 of the 25 record no headcount at all, so the band moves nothing on them", () => {
+    const withHeadcount = SEED_FACTS.filter(([, f]) => f.headcount != null).map(([n]) => n);
+    expect(withHeadcount).toEqual(["Safe Software"]);
+
+    for (const name of SEEDED) {
+      const row = seedRow(name);
+      if (row.headcount != null) continue;
+      const before = scoreCompany(row, PRE_RULING, { lists, now: NOW });
+      const after = scoreCompany(row, config, { lists, now: NOW });
+      expect(after.segment, name).toBe(before.segment);
+      expect(after.fit.score, name).toBe(before.fit.score);
+      expect(after.blocking_gates, name).toEqual(before.blocking_gates);
+      expect(after.gates.find((g) => g.gate === "G_SIZE")?.verdict, name).not.toBe("fail");
+    }
+  });
+
+  it("and the one row that DOES record a headcount is inside the band, so it does not move either", () => {
+    const before = scoreCompany(seedRow("Safe Software"), PRE_RULING, { lists, now: NOW });
+    const after = scoreCompany(seedRow("Safe Software"), config, { lists, now: NOW });
+    expect(after.segment).toBe("S6");
+    expect(sizePoints(after.fit)).toBe(config.fit_score.size_band);
+    expect(after.fit.score).toBe(before.fit.score);
+  });
+
+  it("17 of the 25 sit in a segment the band judges; the other 8 are institutions it must not touch", () => {
+    const judged = SEEDED.filter((n) =>
+      smbBandApplies(scoreCompany(seedRow(n), config, { lists, now: NOW }).segment, config),
+    );
+    expect(judged).toHaveLength(17);
+    const untouched = SEEDED.filter((n) => !judged.includes(n));
+    expect(untouched).toEqual([
+      "Affinity Credit Union",
+      "Vancity Credit Union",
+      "Second Savour",
+      "Coast Capital Savings",
+      "Prospera Credit Union",
+      "Innovate BC",
+      "Dobson Foundation",
+      "Discovery Foundation",
+    ]);
+  });
+
+  // ── Where the parameter DOES reach the decision on these rows ─────────────
+  it("moves all 17 judged rows once a sub-floor headcount is actually known", () => {
+    const moved: string[] = [];
+    for (const name of SEEDED) {
+      const row = seedRow(name, { headcount: 3 });
+      const after = scoreCompany(row, config, { lists, now: NOW });
+      const before = scoreCompany(row, PRE_RULING, { lists, now: NOW });
+      if (sizePoints(after.fit) < sizePoints(before.fit)) moved.push(name);
+    }
+    expect(moved).toHaveLength(17);
+    expect(moved).toContain("Window Wizards");
+    expect(moved).toContain("Superpilot");
+    // The institutions are untouched at the same headcount — this is the guard that matters.
+    expect(moved).not.toContain("Vancity Credit Union");
+    expect(moved).not.toContain("Dobson Foundation");
+  });
+
+  it("reroutes all 17 to the non-monetary relationship once a headcount above 250 is known", () => {
+    for (const name of SEEDED) {
+      const row = seedRow(name, { headcount: 300 });
+      const after = scoreCompany(row, config, { lists, now: NOW }).segment;
+      const before = scoreCompany(row, PRE_RULING, { lists, now: NOW }).segment;
+      if (["S10", "S14", "S16", "EXCLUDED_INSTITUTIONAL"].includes(before)) {
+        expect(after, name).toBe(before); // institutions are decided above the enterprise rung
+      } else {
+        expect(before, name).not.toBe("S15");
+        expect(after, name).toBe("S15");
+      }
+    }
+  });
+
+  it("leaves every judged row untouched across the whole in-band range", () => {
+    for (const headcount of [5, 20, 99, 200, 250]) {
+      for (const name of SEEDED) {
+        const row = seedRow(name, { headcount });
+        expect(
+          scoreCompany(row, config, { lists, now: NOW }).fit.score,
+          `${name} @ ${headcount}`,
+        ).toBe(scoreCompany(row, PRE_RULING, { lists, now: NOW }).fit.score);
+      }
+    }
+  });
+});
+
+describe("the corpus proof — advisory parity on the club's own 25 seeded rows", () => {
+  it("FINDING: not one seeded row CAN record advisory capacity, so the objective is inapplicable across the corpus", () => {
+    // `sponsorship_type` in supabase-setup.sql carries only `monetary` and `in_kind`. There is no
+    // value that records a mentor, which is why this measures zero rather than a small number.
+    for (const name of SEEDED) {
+      const r = scoreCompany(seedRow(name), config, { lists, now: NOW });
+      expect(r.objectives.advisory_capacity.applicable, name).toBe(false);
+      // …and inapplicable because nothing was researched, not because anything was refused. The
+      // club's own venture is the one row inapplicable for a prior reason: no objective reaches
+      // an institutionally excluded row at all.
+      expect(r.objectives.advisory_capacity.note, name).toContain(
+        name === "Second Savour" ? "no objective applies" : "ABSENT IS NOT A REFUSAL",
+      );
+    }
+  });
+
+  it("and it costs those rows nothing — absence is not a refusal", () => {
+    for (const name of SEEDED) {
+      const r = scoreCompany(seedRow(name), config, { lists, now: NOW });
+      const asIfNever = scoreCompany(seedRow(name), config, { lists, now: NOW });
+      expect(r.fit.score, name).toBe(asIfNever.fit.score);
+      expect(r.objectives.deployable_cash, name).toEqual(asIfNever.objectives.deployable_cash);
+    }
+  });
+
+  it("values Superpilot's SFU advisory-board seat the moment the prose can be recorded", () => {
+    // The seed's own words: "Igor serves on SFU's Faculty of Applied Sciences External Advisory
+    // Board." That is a project advisor. Nothing in the schema can hold it today.
+    const withAdvisory = scoreCompany(
+      seedRow("Superpilot", { advisory_commitments: ["project_advisor"] }),
+      config,
+      { lists, now: NOW },
+    );
+    const withoutIt = scoreCompany(seedRow("Superpilot"), config, { lists, now: NOW });
+
+    expect(withoutIt.objectives.advisory_capacity.applicable).toBe(false);
+    expect(withAdvisory.objectives.advisory_capacity.applicable).toBe(true);
+    expect(withAdvisory.objectives.advisory_capacity.expected_value).toBeGreaterThan(0);
+    // S6 tiers by affinity, so an SFU alum's ask is Silver — and the advisory yes is worth the
+    // same Silver, which is the ruling.
+    expect(withAdvisory.ask?.tier).toBe("silver");
+    expect(withAdvisory.objectives.advisory_capacity.valued_at_tier).toBe("silver");
+    expect(withAdvisory.objectives.advisory_capacity.expected_value).toBe(
+      withAdvisory.objectives.deployable_cash.expected_cash,
+    );
+
+    // And it changed NOTHING else about the lead.
+    expect(withAdvisory.fit).toEqual(withoutIt.fit);
+    expect(withAdvisory.affinity).toEqual(withoutIt.affinity);
+    expect(withAdvisory.access).toEqual(withoutIt.access);
+  });
+
+  it("ranks a mentor-offering seeded row level with a cash-offering one of the same shape", () => {
+    // Two S6 rows from the corpus, identical but for what they can give. Neither outranks the
+    // other on value, which is exactly what "worth the same as money" has to mean.
+    const mentor = scoreCompany(
+      seedRow("Mala the Brand", { advisory_commitments: ["mentor"] }),
+      config,
+      { lists, now: NOW },
+    );
+    const cash = scoreCompany(seedRow("Spexi Geospatial"), config, { lists, now: NOW });
+    expect(mentor.objectives.advisory_capacity.expected_value).toBe(
+      cash.objectives.deployable_cash.expected_cash,
+    );
   });
 });
