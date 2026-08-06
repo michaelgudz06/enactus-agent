@@ -21,8 +21,6 @@ import {
   kChan01ApplicationChannel,
   kChan02IneligibleRequiresCharity,
   kGeo01OutsideCanada,
-  kGeo02OutsideBc,
-  kGeo03OutsideMetroVancouver,
   kOrg01NationalPartner,
   kOrg02StudentOrganisation,
   kOrg03aPaidMembershipList,
@@ -50,7 +48,7 @@ import {
   placeholderContactName,
   runFilter,
 } from "../src/lib/filter";
-import { loadQualificationLists } from "../src/lib/qualification-lists";
+import { loadQualificationLists, resolveGeography } from "../src/lib/qualification-lists";
 
 const lists = loadQualificationLists();
 
@@ -70,6 +68,14 @@ const FIXTURES = {
     address_municipality: "Saskatoon",
     address_region: "SK",
     address_country: "CA",
+  }),
+  // Outside Canada — the one geographic terminal that survives the 2026-08-06 supersession.
+  seattleRoasters: account({
+    legal_name: "Seattle Roasters",
+    registrable_domain: "seattleroasters.com",
+    address_municipality: "Seattle",
+    address_region: "WA",
+    address_country: "US",
   }),
   cactusClubCafe: account({
     legal_name: "Cactus Club Cafe",
@@ -434,20 +440,103 @@ describe("K-CHAN-02 · published eligibility the club cannot satisfy → TERMINA
 // §3.3 K-GEO
 // ===========================================================================
 
-describe("K-GEO · geography", () => {
-  it("rejects Affinity Credit Union, which nothing in the current system catches", () => {
-    const r = kGeo02OutsideBc(FIXTURES.affinityCreditUnion, lists, NOW);
-    expect(r.kind).toBe("terminal");
-    if (r.kind !== "terminal") return;
-    expect(r.reason).toBe("outside_bc");
-    expect(r.scope).toBe("account");
-    expect(r.detail).toBe("Saskatoon, SK");
+describe("K-GEO · geography, under the 2026-08-06 supersession", () => {
+  function bandOf(over: Partial<Account>) {
+    return resolveGeography(
+      {
+        municipality: over.address_municipality,
+        region: over.address_region,
+        country: over.address_country,
+      },
+      lists,
+    ).band;
+  }
+
+  // IN SCOPE: anywhere in Canada. Affinity Credit Union (Saskatoon, SK) used to be an
+  // account-scoped kill; it is now a prospect at the lowest Canadian band.
+  it("keeps a Saskatchewan credit union on the board at a lower band", () => {
+    const result = run(FIXTURES.affinityCreditUnion);
+    expect(result.kills).toHaveLength(0);
+    expect(bandOf(FIXTURES.affinityCreditUnion)).toBe("canada_other");
   });
 
-  // UNPARSEABLE IS NOT CONTRARY (§2.3). A region spelling nobody recognised is the same
-  // evidential state as no region at all, and neither may drop the row. "B.C." was simply the
-  // first spelling to surface; the guarantee has to hold for the next one too.
-  describe("an unrecognised region is treated as absent, never as contrary", () => {
+  it("charges no geography penalty anywhere in Canada, because the band already says it", () => {
+    for (const over of [
+      { address_municipality: "Abbotsford", address_region: "BC", address_country: "CA" },
+      { address_municipality: "Toronto", address_region: "ON", address_country: "CA" },
+      { address_municipality: "Saskatoon", address_region: "SK", address_country: "CA" },
+    ]) {
+      const result = run(account({ legal_name: "X", ...over }));
+      expect(result.penalties.map((p) => p.tag)).not.toContain("outside_metro_vancouver");
+      expect(result.penalties.map((p) => p.rule_id)).not.toContain("P-01");
+    }
+  });
+
+  it.each([
+    ["Burnaby", "BC", "metro_vancouver"],
+    ["Kitsilano", "BC", "metro_vancouver"],
+    ["Steveston", "BC", "metro_vancouver"],
+    ["Fort Langley", "BC", "metro_vancouver"],
+    ["UBC", "BC", "metro_vancouver"],
+    ["Abbotsford", "BC", "bc_other"],
+    ["Squamish", "BC", "bc_other"],
+    ["Chilliwack", "BC", "bc_other"],
+    ["Kelowna", "BC", "bc_other"],
+    ["Toronto", "ON", "canada_other"],
+    ["Saskatoon", "SK", "canada_other"],
+  ])("puts %s, %s in the %s band", (municipality, region, band) => {
+    expect(
+      bandOf({ address_municipality: municipality, address_region: region, address_country: "CA" }),
+    ).toBe(band);
+  });
+
+  // The one geographic terminal that survives.
+  it("terminals outside Canada, and nowhere else", () => {
+    const r = kGeo01OutsideCanada(
+      account({
+        legal_name: "Acme",
+        address_municipality: "Seattle",
+        address_region: "WA",
+        address_country: "US",
+      }),
+      lists,
+      NOW,
+    );
+    expect(r.kind).toBe("terminal");
+    if (r.kind !== "terminal") return;
+    expect(r.reason).toBe("outside_canada");
+    expect(r.scope).toBe("account");
+  });
+
+  it.each(["ON", "SK", "AB", "Ontario", "Quebec"])(
+    "does NOT terminal a Canadian account in %s",
+    (region) => {
+      const a = account({
+        legal_name: "Acme",
+        address_municipality: "Somewhere",
+        address_region: region,
+        address_country: "CA",
+      });
+      expect(kGeo01OutsideCanada(a, lists, NOW).kind).toBe("pass");
+      expect(run(a).kills).toHaveLength(0);
+    },
+  );
+
+  // "CA" is the ISO code this module uses for CANADA. An earlier enumeration read it as
+  // California and terminalled a Vancouver bakery; province is now derived only within Canada.
+  it("never reads the region token CA as California", () => {
+    const a = account({
+      legal_name: "Crema Artisan Bakers",
+      address_municipality: "Vancouver",
+      address_region: "CA",
+      address_country: "CA",
+    });
+    expect(run(a).kills).toHaveLength(0);
+    expect(bandOf(a)).toBe("metro_vancouver");
+  });
+
+  // UNRECOGNISED IS ABSENT, IN EVERY BRANCH — not merely "never a kill".
+  describe("an unrecognised value takes exactly the path an absent one takes", () => {
     const burnaby = {
       legal_name: "Crema Artisan Bakers",
       registrable_domain: "crema.ca",
@@ -466,37 +555,37 @@ describe("K-GEO · geography", () => {
       "Colombie Britannique",
       "Freedonia",
       "Canada",
-    ])("does not terminal a Burnaby account recorded as %j", (region) => {
-      const r = kGeo02OutsideBc(account({ ...burnaby, address_region: region }), lists, NOW);
-      expect(r.kind).not.toBe("terminal");
-      expect(run(account({ ...burnaby, address_region: region })).kills).toHaveLength(0);
+      "CA",
+    ])("keeps a Burnaby account in the metro band with region %j", (region) => {
+      const a = account({ ...burnaby, address_region: region });
+      expect(run(a).kills).toHaveLength(0);
+      expect(bandOf(a)).toBe("metro_vancouver");
     });
 
-    it.each(["VA", "Virginia", "ON", "Ontario", "WA", "Washington", "SK"])(
-      "still terminals on the genuinely contrary region %j",
-      (region) => {
-        const r = kGeo02OutsideBc(
-          account({ legal_name: "Acme", address_municipality: "Springfield", address_region: region }),
-          lists,
-          NOW,
-        );
-        expect(r.kind).toBe("terminal");
-        if (r.kind !== "terminal") return;
-        expect(r.reason).toBe("outside_bc");
-      },
-    );
-
-    it("cannot evaluate rather than passing silently when the region is unrecognised", () => {
-      const r = kGeo02OutsideBc(account({ ...burnaby, address_region: "Freedonia" }), lists, NOW);
-      expect(r.kind).toBe("cannot_evaluate");
-      if (r.kind !== "cannot_evaluate") return;
-      expect(r.missing_fields).toContain("address_region");
+    it("resolves identically whether an unrecognised region is present or omitted", () => {
+      const present = bandOf({ ...burnaby, address_region: "Freedonia" });
+      const omitted = bandOf(burnaby);
+      expect(present).toBe(omitted);
     });
-  });
 
-  it("never kills on a MISSING region — absence of evidence is not evidence", () => {
-    const r = kGeo02OutsideBc(account({ legal_name: "Unknown Co" }), lists, NOW);
-    expect(r.kind).toBe("cannot_evaluate");
+    it("resolves identically whether an unrecognised country is present or omitted", () => {
+      const present = bandOf({ ...burnaby, address_country: "Freedonia" });
+      const omitted = bandOf({ ...burnaby, address_country: undefined });
+      // A recorded country that is not Canada IS contrary — K-GEO-01 is the surviving terminal —
+      // so this asserts the pair that matters: a BLANK country behaves as absent.
+      expect(present).toBe("outside_canada");
+      expect(bandOf({ ...burnaby, address_country: "   " })).toBe(omitted);
+    });
+
+    it("keeps the Richmond/VA precondition: a contrary province still overrules the alias", () => {
+      expect(
+        bandOf({ address_municipality: "Richmond", address_region: "ON", address_country: "CA" }),
+      ).toBe("canada_other");
+      expect(bandOf({ address_municipality: "Richmond", address_region: "BC" })).toBe(
+        "metro_vancouver",
+      );
+      expect(bandOf({ address_municipality: "Richmond" })).toBe("metro_vancouver");
+    });
   });
 
   it("never kills on a missing country", () => {
@@ -510,53 +599,10 @@ describe("K-GEO · geography", () => {
     const remoteFirst = account({
       legal_name: "Superpilot",
       address_region: "ON",
-      address_country: "CA",
+      address_country: "US",
       observations: { decision_maker_municipality: "Vancouver" },
     });
-    expect(kGeo02OutsideBc(remoteFirst, lists, NOW).kind).toBe("pass");
-  });
-
-  it("spares a chain with a confirmed BC branch", () => {
-    const a = account({
-      legal_name: "National Chain",
-      address_region: "ON",
-      address_country: "CA",
-      observations: { bc_branch_confirmed: true },
-    });
-    expect(kGeo02OutsideBc(a, lists, NOW).kind).toBe("pass");
-  });
-
-  const geoCases: [string, string, "penalty" | "pass"][] = [
-    ["Burnaby", "Burnaby", "pass"],
-    ["Kitsilano", "Kitsilano", "pass"],
-    ["Steveston", "Steveston", "pass"],
-    ["Fort Langley", "Fort Langley", "pass"],
-    ["UBC", "UBC", "pass"],
-    ["Abbotsford", "Abbotsford", "penalty"],
-    ["Squamish", "Squamish", "penalty"],
-    ["Chilliwack", "Chilliwack", "penalty"],
-    ["Kelowna", "Kelowna", "penalty"],
-  ];
-
-  it.each(geoCases)("BC municipality %s → %s", (_label, municipality, expected) => {
-    const r = kGeo03OutsideMetroVancouver(
-      account({ legal_name: "X", address_region: "BC", address_municipality: municipality }),
-      lists,
-      NOW,
-    );
-    expect(r.kind).toBe(expected);
-    if (r.kind === "penalty") expect(r.delta).toBe(-25);
-  });
-
-  it("PENALISES rather than kills BC-outside-Metro, because prize donations travel", () => {
-    const r = kGeo03OutsideMetroVancouver(
-      account({ legal_name: "Abbotsford Bakery", address_region: "BC", address_municipality: "Abbotsford" }),
-      lists,
-      NOW,
-    );
-    if (r.kind !== "penalty") throw new Error("expected a penalty");
-    expect(r.tag).toBe("outside_metro_vancouver");
-    expect(r.delta).toBe(-25);
+    expect(kGeo01OutsideCanada(remoteFirst, lists, NOW).kind).toBe("pass");
   });
 });
 
@@ -987,12 +1033,18 @@ describe("role accounts — 25 of 25 seeded addresses are role accounts, so a ki
 // ---------------------------------------------------------------------------
 
 describe("P-08's paired hard constraint · a role account may not claim conspicuous_pub", () => {
+  // The walkable shape: a storefront inside Greater Vancouver, which is the population the ICP
+  // report makes the walk-list argument for.
   const roleClaimingConspicuousPub = account({
     legal_name: "Example Ltd",
     registrable_domain: "example.ca",
     email: "info@example.ca",
+    address_municipality: "Burnaby",
+    address_region: "BC",
+    address_country: "CA",
     lawful_basis: "conspicuous_pub",
     lawful_basis_url: "https://example.ca/contact",
+    observations: { has_consumer_storefront: true },
   });
 
   it("passes L-04, which only tests the PUBLISHING DOMAIN — so L-04 cannot be the enforcement", () => {
@@ -1000,7 +1052,11 @@ describe("P-08's paired hard constraint · a role account may not claim conspicu
   });
 
   it("rejects the combination for email, leaving the account and the address intact", () => {
-    const [terminal] = p08RoleAccountCannotClaimConspicuousPub(roleClaimingConspicuousPub, NOW);
+    const [terminal] = p08RoleAccountCannotClaimConspicuousPub(
+      roleClaimingConspicuousPub,
+      lists,
+      NOW,
+    );
     expect(terminal.kind).toBe("terminal");
     if (terminal.kind !== "terminal") return;
     expect(terminal.reason).toBe("role_account_cannot_claim_conspicuous_pub");
@@ -1010,16 +1066,53 @@ describe("P-08's paired hard constraint · a role account may not claim conspicu
   });
 
   // §3.5: the treatment for a role account is a penalty plus a constraint, NEVER a kill. The ICP
-  // report names the alternative route for exactly these segments: the walk list, because an
-  // in-person ask is not a CEM at all.
-  it("routes the row to the walk list rather than leaving it with nowhere to go", () => {
-    const channel = p08RoleAccountCannotClaimConspicuousPub(roleClaimingConspicuousPub, NOW).find(
-      (r) => r.kind === "channel",
-    );
+  // report names the alternative route for the LOCAL STOREFRONT segments: the walk list, because
+  // an in-person ask is not a CEM at all.
+  it("routes a walkable storefront to the walk list", () => {
+    const channel = p08RoleAccountCannotClaimConspicuousPub(
+      roleClaimingConspicuousPub,
+      lists,
+      NOW,
+    ).find((r) => r.kind === "channel");
     expect(channel).toBeDefined();
     if (channel?.kind !== "channel") return;
     expect(channel.required_channel).toBe("in_person");
     expect(channel.reason).toBe("role_account_belongs_on_the_walk_list");
+  });
+
+  // ENTRY CONDITION. A walk a student cannot make is worse than saying nothing, so the route is
+  // only asserted where an in-person ask is actually possible.
+  it.each([
+    ["no storefront signal", { observations: {} }],
+    [
+      "a storefront outside Greater Vancouver",
+      {
+        address_municipality: "Abbotsford",
+        observations: { has_consumer_storefront: true },
+      },
+    ],
+    [
+      "a remote-first company with no address at all",
+      {
+        address_municipality: null,
+        address_region: null,
+        observations: { has_consumer_storefront: true },
+      },
+    ],
+  ])("flags for a human rather than asserting a walk, given %s", (_label, over) => {
+    const a = account({ ...roleClaimingConspicuousPub, ...over });
+    const out = p08RoleAccountCannotClaimConspicuousPub(a, lists, NOW);
+    expect(out.some((r) => r.kind === "channel")).toBe(false);
+    const flag = out.find((r) => r.kind === "flag");
+    expect(flag).toBeDefined();
+    if (flag?.kind !== "flag") return;
+    expect(flag.flag_reason).toBe("role_account_channel_unresolved");
+
+    // Never a kill, never a block — the row stays on the board with its -15 either way.
+    const result = run(a);
+    expect(result.kills).toHaveLength(0);
+    expect(result.email_channel_open).toBe(false);
+    expect(result.penalties.find((p) => p.rule_id === "P-08")?.delta).toBe(-15);
   });
 
   it.each([
@@ -1029,6 +1122,7 @@ describe("P-08's paired hard constraint · a role account may not claim conspicu
   ])("does not fire for %s", (_label, over) => {
     const out = p08RoleAccountCannotClaimConspicuousPub(
       { ...roleClaimingConspicuousPub, ...over },
+      lists,
       NOW,
     );
     expect(out.every((r) => r.kind === "pass")).toBe(true);
@@ -1054,6 +1148,7 @@ describe("P-08's paired hard constraint · a role account may not claim conspicu
     expect(result.required_channel).toBeNull();
   });
 });
+
 
 // ---------------------------------------------------------------------------
 // Placeholder names — TERMINAL for the person, never for the account.
@@ -1502,7 +1597,7 @@ describe("terminal duration", () => {
   });
 
   it("every terminal the §2.4 order can emit carries a scope and a duration", () => {
-    const results = evaluateKillPredicates(FIXTURES.affinityCreditUnion, lists, { now: NOW });
+    const results = evaluateKillPredicates(FIXTURES.seattleRoasters, lists, { now: NOW });
     const terminals = results.filter((r) => r.kind === "terminal");
     expect(terminals.length).toBeGreaterThan(0);
     for (const t of terminals) {
@@ -2085,18 +2180,18 @@ describe("§7.2 national-flag list → FLAG only", () => {
 // ===========================================================================
 
 describe("runFilter", () => {
-  it("rejects Affinity Credit Union with a reason a human can read and argue with", () => {
-    const result = run(FIXTURES.affinityCreditUnion);
+  it("rejects an account outside Canada with a reason a human can read and argue with", () => {
+    const result = run(FIXTURES.seattleRoasters);
     expect(result.decision).toBe("terminal");
-    expect(result.reject_reason).toBe("outside_bc");
-    expect(result.reject_rule_id).toBe("K-GEO-02");
-    expect(result.reject_detail).toBe("Saskatoon, SK");
+    expect(result.reject_reason).toBe("outside_canada");
+    expect(result.reject_rule_id).toBe("K-GEO-01");
+    expect(result.reject_detail).toBe("US");
     expect(result.reject_evidence_url).toBeTruthy();
     expect(result.reject_at).toBe(NOW.toISOString());
   });
 
   it("populates the whole §2.5 reason-string contract on every rejection", () => {
-    const result = run(FIXTURES.affinityCreditUnion);
+    const result = run(FIXTURES.seattleRoasters);
     expect(result.reject_reason).toBeTruthy();
     expect(result.reject_detail).toBeTruthy();
     expect(result.reject_evidence_url).toBeTruthy();
@@ -2132,7 +2227,7 @@ describe("runFilter", () => {
   });
 
   it("keeps hard kills and soft penalties in separate places", () => {
-    const result = run(FIXTURES.affinityCreditUnion);
+    const result = run(FIXTURES.seattleRoasters);
     expect(result.kills.every((k) => k.kind === "terminal")).toBe(true);
     expect(result.penalties.every((p) => p.kind === "penalty")).toBe(true);
     // A terminal short-circuits before the penalty pass: a score on a rejected row means nothing.
@@ -2154,11 +2249,12 @@ describe("runFilter", () => {
     );
     expect(result.decision).toBe("pass");
     expect(result.penalty_total).toBeLessThan(0);
-    expect(result.penalties.map((p) => p.tag)).toContain("outside_metro_vancouver");
     expect(result.penalties.map((p) => p.tag)).toContain("role_account");
   });
 
-  it("charges a signal that surfaces from two rules exactly once", () => {
+  // Geography is expressed EXACTLY ONCE, as the band weight. Charging a penalty as well would
+  // count the same fact twice, so the retired -25 must not reappear from any rule.
+  it("expresses geography through the band alone, never as a penalty", () => {
     const result = run(
       account({
         legal_name: "Squamish Bakery",
@@ -2169,8 +2265,8 @@ describe("runFilter", () => {
         address_country: "CA",
       }),
     );
-    const geoPenalties = result.penalties.filter((p) => p.tag === "outside_metro_vancouver");
-    expect(geoPenalties).toHaveLength(1);
+    expect(result.penalties.map((p) => p.tag)).not.toContain("outside_metro_vancouver");
+    expect(result.penalties.map((p) => p.rule_id)).not.toContain("P-01");
   });
 
   it("short-circuits on the first TERMINAL", () => {
@@ -2209,18 +2305,19 @@ describe("runFilter", () => {
   });
 
   it("lets the never-kill allowlist override a §3 kill, and RECORDS the override", () => {
-    // Varshney Capital Corp would otherwise be killed by geography; the allowlist protects the
-    // converted relationship, and the suppressed kill stays visible.
+    // Varshney Capital Corp would otherwise be killed as outside Canada; the allowlist protects
+    // the converted relationship, and the suppressed kill stays visible.
     const result = run(
       account({
         legal_name: "Varshney Capital Corp",
         registrable_domain: "varshneycapital.com",
-        address_region: "ON",
-        address_country: "CA",
+        address_municipality: "Seattle",
+        address_region: "WA",
+        address_country: "US",
       }),
     );
     expect(result.decision).not.toBe("terminal");
-    expect(result.overridden_kills.map((o) => o.reason)).toContain("outside_bc");
+    expect(result.overridden_kills.map((o) => o.reason)).toContain("outside_canada");
     expect(result.overridden_kills[0].overridden_by).toContain("never-kill allowlist");
   });
 

@@ -35,7 +35,7 @@ import type {
   RelationshipTier,
   SegmentId,
 } from "./icp-config";
-import type { FilterResult } from "./filter";
+import type { FilterResult, RequiredChannel } from "./filter";
 import {
   type GeographyVerdict,
   type QualificationLists,
@@ -124,6 +124,8 @@ export interface CompanyFacts {
   municipality?: string | null;
   region?: string | null;
   postal_code?: string | null;
+  /** Consulted BEFORE the region, so the ISO code "CA" is never read as California. */
+  country?: string | null;
   /** A named sub-vertical beat a generic category match. */
   industry_sub_vertical?: boolean;
   orgbook_status?: "ACT" | "HIS" | null;
@@ -151,15 +153,13 @@ export interface CompanyFacts {
   /** S8 / S10 / S14: published eligibility requires charity status the club does not have. */
   eligibility_requires_charity?: boolean;
   /**
-   * The non-email route the filter decided this row takes, if any.
+   * The route the filter decided this row takes, if any.
    *
-   * G_LAWFUL_BASIS asks one question: MAY THIS LEAD BE EMAILED. Every `RequiredChannel` value is
-   * a route that is not email — a web form, a phone call, a walk-in, another organisation — and
-   * none of them is a commercial electronic message, so the CASL basis is NOT APPLICABLE rather
-   * than failing. Without this the P-08 walk-list route would close the email channel and then
-   * block the row anyway, one layer down.
+   * G_LAWFUL_BASIS asks one question: MAY THIS LEAD BE EMAILED. Only the routes in
+   * `NON_CEM_CHANNELS` make that question moot; `renewal_motion` and the internal handoffs are
+   * still reached by email and must still prove a basis.
    */
-  required_channel?: string | null;
+  required_channel?: RequiredChannel | null;
 }
 
 export interface SegmentResult {
@@ -377,6 +377,25 @@ function domainMatches(url: string, domain: string): boolean {
 }
 
 /**
+ * The routes that carry NO commercial electronic message from Enactus SFU, and therefore make
+ * G_LAWFUL_BASIS NOT APPLICABLE rather than failed.
+ *
+ * ENUMERATED, never inferred from "a channel is set". `renewal_motion` IS an email motion —
+ * K-REL-03 routes a current sponsor away from a COLD acquisition email precisely so they get the
+ * renewal one — and `enactus_canada`, `sfu_advancement` and `grants_pipeline` are handoffs whose
+ * own sends still need a basis. Suppressing the CASL gate for any of them would be a compliance
+ * hole, so a future addition to `RequiredChannel` has to be added here deliberately.
+ */
+const NON_CEM_CHANNELS: ReadonlySet<RequiredChannel> = new Set<RequiredChannel>([
+  // An in-person ask at a counter is not a CEM at all.
+  "in_person",
+  // §3.2 K-CHAN-01's own reasoning: a form submission is not a CEM sent by Enactus SFU.
+  "web_form",
+  // A phone call is not an electronic message.
+  "phone",
+]);
+
+/**
  * §6.3's twelve gates.
  *
  * THE ASYMMETRY RULE APPLIES TO GATES TOO, and this set has been walked once end to end rather
@@ -446,26 +465,25 @@ export function evaluateGates(
       effect: "none",
       message: "G_GEO is soft for S6: an alum elsewhere still qualifies. Geography is a weight here, not a gate",
     });
-  } else if (geo.scope === "unresolved") {
+  } else if (geo.band === "unresolved") {
     out.push({
       gate: "G_GEO",
       verdict: "cannot_evaluate",
       effect: "none",
       message:
-        `nothing recorded resolves against config/exclusions/metro-vancouver.csv, so Metro Vancouver ` +
-        `membership cannot be resolved. Missing: ${geo.missing_fields.join(", ")}. ` +
-        `Absence of evidence is never a kill`,
+        `nothing recorded places this account, so its geography band cannot be resolved. ` +
+        `Missing: ${geo.missing_fields.join(", ")}. Absence of evidence is never a kill`,
     });
-  } else if (geo.scope === "outside_bc") {
+  } else if (geo.band === "outside_canada") {
     out.push({
       gate: "G_GEO",
       verdict: "fail",
       effect: "block",
-      message: geo.alias_suppressed_by_region
-        ? `killed: out_of_area — the recorded region ${c.region} is not British Columbia, so the municipality "${c.municipality}" is not the Metro Vancouver jurisdiction of the same name`
-        : `killed: out_of_area — ${c.municipality ? `${c.municipality}, ` : ""}${c.region} is outside Metro Vancouver and outside BC`,
+      message: `killed: outside_canada — ${c.country} is outside Canada, the one geographic terminal`,
     });
   } else {
+    // Everywhere in Canada is IN SCOPE per the 2026-08-06 supersession. Where in Canada is a
+    // weight, carried by the band, never a gate failure.
     out.push({
       gate: "G_GEO",
       verdict: "pass",
@@ -572,12 +590,12 @@ export function evaluateGates(
   });
 
   // G_LAWFUL_BASIS — the email gate, and ONLY the email gate.
-  if (c.required_channel) {
+  if (c.required_channel && NON_CEM_CHANNELS.has(c.required_channel)) {
     out.push({
       gate: "G_LAWFUL_BASIS",
       verdict: "not_applicable",
       effect: "none",
-      message: `this lead is routed to ${c.required_channel}, which is not a commercial electronic message, so no CASL sending basis is required`,
+      message: `this lead is routed to ${c.required_channel}, which carries no commercial electronic message from Enactus SFU, so no CASL sending basis is required`,
     });
   } else {
     out.push({
@@ -712,7 +730,18 @@ function triggerAgeKey(kind: string): string {
 // §6.4 — the three scores
 // ===========================================================================
 
-export type GeographyBand = "core" | "metro" | "bc_outside_metro" | "elsewhere";
+/**
+ * The WEIGHT bands. `core` is a split INSIDE `metro_vancouver` — the three places events actually
+ * happen (SFU Burnaby, SFU Harbour Centre, SFU Surrey) — and config/icp.yaml owns which names
+ * count as core. Everything below it comes straight from the shared geography verdict.
+ */
+export type GeographyBand =
+  | "core"
+  | "metro_vancouver"
+  | "bc_other"
+  | "canada_other"
+  | "outside_canada"
+  | "unresolved";
 
 /**
  * ONE SOURCE OF TRUTH PER CONCERN.
@@ -731,7 +760,7 @@ export type GeographyBand = "core" | "metro" | "bc_outside_metro" | "elsewhere";
  */
 export function geographyScope(c: CompanyFacts, lists: QualificationLists): GeographyVerdict {
   return resolveGeography(
-    { municipality: c.municipality, region: c.region, postal_code: c.postal_code },
+    { municipality: c.municipality, region: c.region, country: c.country },
     lists,
   );
 }
@@ -743,21 +772,20 @@ export function geographyBand(
 ): GeographyBand {
   const geo = geographyScope(c, lists);
 
-  if (geo.scope === "metro_vancouver") {
+  if (geo.band === "metro_vancouver") {
     const muni = normalizeMunicipality(c.municipality);
     const coreNames = config.geography.core.map((m) => normalizeMunicipality(m));
     if (coreNames.includes(muni)) return "core";
     // A core name resolved through the same alias map, so "Kitsilano" lands on core rather
-    // than on plain metro.
+    // than on plain metro_vancouver.
     const coreCanonicals = new Set(
       config.geography.core.flatMap((m) => metroVancouverCanonicals(m, lists)),
     );
     if (geo.metro_canonicals.some((canonical) => coreCanonicals.has(canonical))) return "core";
-    return "metro";
+    return "metro_vancouver";
   }
 
-  if (geo.scope === "bc_outside_metro") return "bc_outside_metro";
-  return "elsewhere";
+  return geo.band;
 }
 
 export interface ScoreTerm {

@@ -121,6 +121,28 @@
 //      named donor AND a warm SFU relationship, and Scotiabank and CWB because the report could
 //      not tell "ended" from "mid-renewal" and left it as an open question for a human.
 //
+//  A6. THE CAPTAIN SUPERSEDED THE REPORT'S GEOGRAPHY, 2026-08-06.
+//
+//      The captain, who owns the ICP: "ideally we want businesses in BC, but anything across
+//      canada is fine". IN SCOPE: ANYWHERE IN CANADA. PREFERRED: BC, and Greater Vancouver most
+//      of all. OUT OF SCOPE: outside Canada. The report was written to a narrower assumption;
+//      where the two disagree the captain's decision wins, and the report stays unedited.
+//
+//      WHAT THAT DELETED, rather than corrected:
+//        · K-GEO-02 `outside_bc` was a TERMINAL. It is GONE. An Ontario or Alberta company is a
+//          prospect at a lower weight, not an invisible row.
+//        · K-GEO-03 / P-01's -25 `outside_metro_vancouver` penalty is GONE. Geography is
+//          expressed EXACTLY ONCE, as the band weight in config/icp.yaml; charging a penalty as
+//          well would count the same fact twice.
+//        · The non-BC region enumeration is GONE. It read the token "CA" — the ISO code this
+//          module itself uses for Canada — as California and terminalled a Vancouver bakery.
+//          Province is now derived only WITHIN Canada, so that collision cannot recur.
+//        · The metro postal-prefix set is GONE. Report §8 rejected FSA-prefix geography in
+//          writing, and V3G/V4X being Abbotsford, V4S Mission and V4T/V4V Central Okanagan is
+//          exactly the defect it predicted.
+//
+//      K-GEO-01 `outside_canada` is the ONLY geographic terminal that survives.
+//
 //  A4. A MUNICIPALITY ALIAS IS ONLY TRUSTWORTHY WHEN THE REGION IS BC OR ABSENT. §7.8's list
 //      ships BARE MUNICIPALITY NAMES, and richmond, vancouver, surrey, langley, delta and white
 //      rock all name real places outside BC. The report never says which wins when a row records
@@ -130,11 +152,12 @@
 //      resolvers over the same data drifted in OPPOSITE directions within one review round, and
 //      then two CALLERS of one resolver drifted again by passing it different fields.
 //
-//      AND UNPARSEABLE IS NOT CONTRARY. `RegionVerdict` is `bc | contrary | unparsed`, and only
-//      `contrary` may overrule an alias or kill. Reading "not one of the BC spellings I know" as
-//      "somewhere else" terminalled a Burnaby bakery whose region was recorded as "B.C.". A
-//      longer spelling list is not the fix — there is always another spelling — so the guarantee
-//      is structural: `unparsed` is treated exactly as absent, which is §2.3 as a type.
+//      AND UNRECOGNISED IS ABSENT, IN EVERY BRANCH. `RegionVerdict` is `bc | canada_other |
+//      unparsed`, and `unparsed` takes exactly the path a null region takes — same band, same
+//      weight, same outcome. Reading "not one of the BC spellings I know" as "somewhere else"
+//      terminalled a Burnaby bakery whose region was recorded as "B.C."; suppressing the alias
+//      for an unrecognised region then cost the same row its metro band. A longer spelling list
+//      is not the fix — there is always another spelling — so the guarantee is structural.
 //
 //  A5. AN EFFECT A RULE DESCRIBES IS PART OF ITS RETURN TYPE. Four rules in a row were found
 //      narrating an outcome nothing emitted (K-REL-08's sibling −40, L-04's email channel,
@@ -277,6 +300,11 @@ export interface AccountObservations {
   other_leads_on_domain?: number;
   /** P-10: whether the account has a website at all (social-only presence). */
   social_only_presence?: boolean;
+  /**
+   * P-08's walk-list entry condition: a customer-facing address a student could actually walk
+   * into. The ICP report makes the walk-list argument for the LOCAL STOREFRONT segments only.
+   */
+  has_consumer_storefront?: boolean;
   /**
    * P-10: how many website-enrichment passes have run and recorded their result on this row.
    *
@@ -1348,7 +1376,7 @@ function geographyOf(a: Account, lists: QualificationLists): GeographyVerdict {
     {
       municipality: a.address_municipality,
       region: a.address_region,
-      postal_code: a.postal_code,
+      country: a.address_country,
     },
     lists,
   );
@@ -1371,9 +1399,9 @@ export function isInMetroVancouver(
   municipality: string | null | undefined,
   lists: QualificationLists,
   region?: string | null,
-  postal_code?: string | null,
+  country?: string | null,
 ): boolean {
-  return resolveGeography({ municipality, region, postal_code }, lists).scope === "metro_vancouver";
+  return resolveGeography({ municipality, region, country }, lists).band === "metro_vancouver";
 }
 
 /**
@@ -1401,7 +1429,7 @@ export function localityBasis(a: Account, lists: QualificationLists): LocalityRe
     available.push("registered_address");
     // The registered address is the one basis that HAS a region recorded beside it, so the
     // precondition applies here: a contrary region overrules the alias.
-    if (geographyOf(a, lists).scope === "metro_vancouver") inScope.push("registered_address");
+    if (geographyOf(a, lists).band === "metro_vancouver") inScope.push("registered_address");
   }
   if (o.operating_municipality) {
     available.push("operating_location");
@@ -1416,24 +1444,29 @@ export function localityBasis(a: Account, lists: QualificationLists): LocalityRe
   return { in_scope: inScope.length > 0, bases_available: available, bases_in_scope: inScope };
 }
 
-/** K-GEO-01 · Outside Canada → TERMINAL. */
+/**
+ * K-GEO-01 · Outside Canada → TERMINAL, and the ONLY geographic terminal that survives the
+ * 2026-08-06 supersession. Everywhere in Canada is in scope; where in Canada is a WEIGHT.
+ */
 export function kGeo01OutsideCanada(
   a: Account,
   lists: QualificationLists,
   now: Date,
 ): PredicateResult {
-  if (!a.address_country) {
+  const geo = geographyOf(a, lists);
+  if (geo.band === "unresolved") {
     return cannotEvaluate(
       "K-GEO-01",
-      ["address_country"],
-      "no country is recorded; a missing country is never a kill (§2.3)",
+      geo.missing_fields.map((f) => `address_${f}`),
+      a.address_country
+        ? `the recorded country "${a.address_country}" matches nothing this module recognises, and no other field places the account; an unrecognised value is never a kill (§2.3)`
+        : "no country is recorded; a missing country is never a kill (§2.3)",
     );
   }
-  if (a.address_country.trim().toUpperCase() === "CA") return pass("K-GEO-01");
-
+  if (geo.band !== "outside_canada") return pass("K-GEO-01");
   if (localityBasis(a, lists).in_scope) return pass("K-GEO-01");
 
-  const detail = a.address_country;
+  const detail = a.address_country ?? "";
   return {
     kind: "terminal",
     scope: "account",
@@ -1453,97 +1486,12 @@ export function kGeo01OutsideCanada(
   };
 }
 
-/**
- * K-GEO-02 · Outside British Columbia → TERMINAL.
- *
- * Live example from the club's own pipeline: Affinity Credit Union (sponsorship@affinitycu.ca),
- * head office Saskatoon SK, 50 branches in 41 Saskatchewan communities, no BC presence.
- * This rule catches it; nothing in the current system does.
+/*
+ * K-GEO-02 (outside_bc TERMINAL) and K-GEO-03 / P-01 (outside_metro_vancouver, -25) USED TO LIVE
+ * HERE. Both were retired by the 2026-08-06 supersession recorded at the head of this file:
+ * everywhere in Canada is in scope, and where in Canada is expressed ONCE, as the geography band
+ * weight in config/icp.yaml. Charging a penalty as well would count one fact twice.
  */
-export function kGeo02OutsideBc(
-  a: Account,
-  lists: QualificationLists,
-  now: Date,
-): PredicateResult {
-  const geo = geographyOf(a, lists);
-  if (geo.region === "bc") return pass("K-GEO-02");
-  // UNPARSED IS NOT CONTRARY (§2.3). An absent region and a region nobody recognised are the
-  // same evidential state, and neither may kill: "B.C." is simply the first spelling that
-  // surfaced, and there will be another one.
-  if (geo.region === "unparsed") {
-    return cannotEvaluate(
-      "K-GEO-02",
-      ["address_region"],
-      a.address_region
-        ? `the recorded region "${a.address_region}" matches no known province or state, so it is not evidence this account is outside BC; an unrecognised region is never a kill (§2.3)`
-        : "no province or state is recorded; a missing region is never a kill (§2.3)",
-    );
-  }
-  if (a.observations?.bc_branch_confirmed) return pass("K-GEO-02");
-  if (localityBasis(a, lists).in_scope) return pass("K-GEO-02");
-
-  const region = a.address_region ?? "";
-  const where = a.address_municipality ? `${a.address_municipality}, ${region}` : region;
-  const evidence = a.website_url ?? domainKey(a);
-  return {
-    kind: "terminal",
-    scope: "account",
-    rule_id: "K-GEO-02",
-    reason: "outside_bc",
-    detail: where,
-    evidence_url: evidence,
-    duration: { kind: "until_human_clears" },
-    message: sentence("outside_bc", {
-      account: a,
-      rule_id: "K-GEO-02",
-      verb: "rejected",
-      because: `its head office is in ${where} and no British Columbia location was found`,
-      evidence_url: evidence,
-      now,
-    }),
-  };
-}
-
-/**
- * K-GEO-03 · In BC but outside Metro Vancouver → PENALTY -25, NOT a kill.
- *
- * Abbotsford, Squamish and Chilliwack businesses can and do donate prizes; the ask is a gift
- * certificate in an envelope, not a site visit. Killing all of BC-outside-Metro trades a real
- * prospect pool for a rule that buys nothing — and that loss is permanent.
- */
-export function kGeo03OutsideMetroVancouver(
-  a: Account,
-  lists: QualificationLists,
-  now: Date,
-): PredicateResult {
-  if (classifyRegion(a.address_region) !== "bc") return pass("K-GEO-03");
-  if (!a.address_municipality) {
-    return cannotEvaluate(
-      "K-GEO-03",
-      ["address_municipality"],
-      "the account is in BC but no municipality is recorded, so Metro Vancouver membership cannot be resolved",
-    );
-  }
-  if (geographyOf(a, lists).scope === "metro_vancouver") return pass("K-GEO-03");
-
-  return {
-    kind: "penalty",
-    rule_id: "K-GEO-03",
-    reason: "outside_metro_vancouver",
-    tag: "outside_metro_vancouver",
-    delta: -25,
-    detail: a.address_municipality,
-    evidence_url: "config/exclusions/metro-vancouver.csv",
-    message: sentence("outside_metro_vancouver", {
-      account: a,
-      rule_id: "K-GEO-03",
-      verb: "penalised -25",
-      because: `${a.address_municipality} is in BC but is not one of the 23 Metro Vancouver member jurisdictions. Prize donations travel even when site visits do not, so this is never a kill`,
-      evidence_url: "config/exclusions/metro-vancouver.csv",
-      now,
-    }),
-  };
-}
 
 /**
  * K-GEO-04 · Phone area code — EXPLICITLY NOT A KILL, and the obvious version is wrong.
@@ -2416,33 +2364,74 @@ export function l04NotConspicuouslyPublished(a: Account, now: Date): PredicateRe
  * The remedy for a human is to record a basis this address can actually carry, so the duration
  * is `until_human_clears` rather than `forever`.
  */
-export function p08RoleAccountCannotClaimConspicuousPub(a: Account, now: Date): PredicateResult[] {
+export function p08RoleAccountCannotClaimConspicuousPub(
+  a: Account,
+  lists: QualificationLists,
+  now: Date,
+): PredicateResult[] {
   if (a.lawful_basis !== "conspicuous_pub") return [pass("P-08-CONSTRAINT")];
   if (!isRoleAccount(a)) return [pass("P-08-CONSTRAINT")];
   const local = emailLocal(a);
   const evidence = a.lawful_basis_url ?? "lawful_basis";
-  return [
-    {
-      kind: "terminal",
-      scope: "email",
+
+  const terminal: TerminalResult = {
+    kind: "terminal",
+    scope: "email",
+    rule_id: "P-08-CONSTRAINT",
+    reason: "role_account_cannot_claim_conspicuous_pub",
+    detail: `${local}@ with lawful_basis=conspicuous_pub`,
+    evidence_url: evidence,
+    duration: { kind: "until_human_clears" },
+    message: sentence("role_account_cannot_claim_conspicuous_pub", {
+      account: a,
       rule_id: "P-08-CONSTRAINT",
-      reason: "role_account_cannot_claim_conspicuous_pub",
-      detail: `${local}@ with lawful_basis=conspicuous_pub`,
+      verb: "rejected for email",
+      because:
+        `${local}@ is a shared role mailbox and the basis claimed for it is conspicuous ` +
+        `publication. CASL requires the message to be relevant to the recipient's role, which ` +
+        `cannot be established for a mailbox that names no person, so §4 forbids this basis ` +
+        `for this address. The EMAIL is barred, not the account`,
       evidence_url: evidence,
-      duration: { kind: "until_human_clears" },
-      message: sentence("role_account_cannot_claim_conspicuous_pub", {
-        account: a,
+      now,
+    }),
+  };
+
+  // ENTRY CONDITION on the walk-list route, the same discipline every penalty got. The ICP
+  // report argues the walk list for the LOCAL STOREFRONT segments; a remote-first company or an
+  // account outside Greater Vancouver cannot be walked into, and asserting a walk that cannot
+  // happen is worse than saying nothing.
+  const walkable =
+    geographyOf(a, lists).band === "metro_vancouver" &&
+    a.observations?.has_consumer_storefront === true;
+
+  if (!walkable) {
+    return [
+      terminal,
+      {
+        kind: "flag",
         rule_id: "P-08-CONSTRAINT",
-        verb: "rejected for email",
-        because:
-          `${local}@ is a shared role mailbox and the basis claimed for it is conspicuous ` +
-          `publication. CASL requires the message to be relevant to the recipient's role, which ` +
-          `cannot be established for a mailbox that names no person, so §4 forbids this basis ` +
-          `for this address. The EMAIL is barred, not the account`,
+        reason: "role_account_channel_unresolved",
+        flag_reason: "role_account_channel_unresolved",
+        detail: `${local}@`,
         evidence_url: evidence,
-        now,
-      }),
-    },
+        message: sentence("role_account_channel_unresolved", {
+          account: a,
+          rule_id: "P-08-CONSTRAINT",
+          verb: "flagged for a human to choose a channel",
+          because:
+            `the conspicuous-publication basis is unsound for the shared mailbox ${local}@, so ` +
+            `the email channel is closed — but no walkable storefront in Greater Vancouver was ` +
+            `observed, so the walk list is not available either. A human picks the channel. The ` +
+            `row stays on the board and keeps its -15`,
+          evidence_url: evidence,
+          now,
+        }),
+      },
+    ];
+  }
+
+  return [
+    terminal,
     {
       kind: "channel",
       rule_id: "P-08-CONSTRAINT",
@@ -2456,10 +2445,10 @@ export function p08RoleAccountCannotClaimConspicuousPub(a: Account, now: Date): 
         verb: "routed to the walk list",
         because:
           `the only CASL basis a cold prospect can carry is conspicuous publication, and that ` +
-          `basis is unsound for the shared mailbox ${local}@. The ICP report's own answer for ` +
-          `these segments is the walk list rather than the email list: an in-person ask is not ` +
-          `a commercial electronic message at all, and it is the highest-converting motion the ` +
-          `club has. The row stays on the board and keeps its -15`,
+          `basis is unsound for the shared mailbox ${local}@. This account has a storefront in ` +
+          `Greater Vancouver, so the ICP report's own answer applies: the walk list rather than ` +
+          `the email list, because an in-person ask is not a commercial electronic message at ` +
+          `all. The row stays on the board and keeps its -15`,
         evidence_url: evidence,
         now,
       }),
@@ -2909,10 +2898,8 @@ export function franchiseReroute(report: FranchiseReport): PredicateResult {
 
 /** P-04 clause 1: the account's registered head office is somewhere other than BC. */
 function headOfficeOutsideBc(a: Account, lists: QualificationLists): boolean {
-  const region = classifyRegion(a.address_region);
-  if (region !== "unparsed") return region === "contrary";
-  if (a.address_country) return a.address_country.trim().toUpperCase() !== "CA";
-  return false;
+  const geo = geographyOf(a, lists);
+  return geo.band === "canada_other" || geo.band === "outside_canada";
 }
 
 /** P-04 clause 2: a local branch of that head office exists in scope. */
@@ -2961,9 +2948,8 @@ export function evaluatePenalties(a: Account, ctx: PenaltyContext): PenaltyResul
   const out: PenaltyResult[] = [];
   const o = a.observations ?? {};
 
-  // P-01 — outside Metro Vancouver but in BC. (K-GEO-03 produces this too; deduped by caller.)
-  const geo = kGeo03OutsideMetroVancouver(a, lists, now);
-  if (geo.kind === "penalty") out.push({ ...geo, rule_id: "P-01" });
+  // P-01 — RETIRED 2026-08-06. Geography is expressed exactly once, as the band weight; see the
+  // supersession note at the head of this file.
 
   // P-02 — headcount 100-499 (ISED "medium").
   const hc = a.headcount ?? a.headcount_band_max ?? null;
@@ -3318,8 +3304,6 @@ export function killPredicateSequence(
     () => kRep02SensitiveSector(a, lists, now),
     // 6. geography
     () => kGeo01OutsideCanada(a, lists, now),
-    () => kGeo02OutsideBc(a, lists, now),
-    () => kGeo03OutsideMetroVancouver(a, lists, now),
     // 7. size
     () => kSize01EnterpriseScale(a, now, franchise.status),
     () => kChan01ApplicationChannel(a, now, { application_path_found: opts.application_path_found }),
@@ -3341,7 +3325,7 @@ export function killPredicateSequence(
     () => l02NoSolicitationStatement(a, now),
     () => l03HarvestedAddress(a, now),
     () => l04NotConspicuouslyPublished(a, now),
-    () => p08RoleAccountCannotClaimConspicuousPub(a, now),
+    () => p08RoleAccountCannotClaimConspicuousPub(a, lists, now),
     () => l05NoLawfulBasis(a, now),
     () => l06l07ConsentBasisExpired(a, now),
     () => l08NoProvenanceSnapshot(a, now),

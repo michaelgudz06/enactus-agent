@@ -170,7 +170,7 @@ describe("config/icp.yaml", () => {
   // The geography block is load-bearing: `scoreFit` reads bands[band] straight into clamp(), so
   // a missing key used to produce NaN through the whole fit score with no error anywhere.
   describe("the geography block is validated as loudly as the weights", () => {
-    it.each(["core", "metro", "bc_outside_metro", "elsewhere"])(
+    it.each(["core", "metro_vancouver", "bc_other", "canada_other", "outside_canada", "unresolved"])(
       "rejects a config whose %s band was deleted, naming the key",
       (band) => {
         const bands = { ...config.geography.bands } as Record<string, number>;
@@ -184,12 +184,22 @@ describe("config/icp.yaml", () => {
     );
 
     it("rejects a renamed band rather than silently scoring NaN", () => {
-      const { bc_outside_metro, ...rest } = config.geography.bands;
+      const { bc_other, ...rest } = config.geography.bands;
       const problems = validateIcpConfig({
         ...config,
-        geography: { ...config.geography, bands: { ...rest, bc_outside_the_metro: bc_outside_metro } },
+        geography: { ...config.geography, bands: { ...rest, bc_outside_the_metro: bc_other } },
       });
-      expect(problems.join(" ")).toContain("geography.bands.bc_outside_metro is missing");
+      expect(problems.join(" ")).toContain("geography.bands.bc_other is missing");
+    });
+
+    // The captain's ORDERING is a ruling, not a tuning choice: the numbers move, the order
+    // does not.
+    it("keeps the captain's band ordering: metro_vancouver > bc_other > canada_other", () => {
+      const b = config.geography.bands;
+      expect(b.core).toBeGreaterThanOrEqual(b.metro_vancouver);
+      expect(b.metro_vancouver).toBeGreaterThan(b.bc_other);
+      expect(b.bc_other).toBeGreaterThan(b.canada_other);
+      expect(b.canada_other).toBeGreaterThan(b.outside_canada);
     });
 
     it.each([
@@ -512,9 +522,12 @@ describe("evaluateGates", () => {
     const s6 = evaluateGates(alum, "S6", config, { lists, now: NOW }).find((g) => g.gate === "G_GEO");
     expect(s6?.verdict).toBe("not_applicable");
 
-    const notS6 = evaluateGates({ ...alum, alumni_evidence: "none" }, "S2", config, { lists, now: NOW }).find(
-      (g) => g.gate === "G_GEO",
-    );
+    const notS6 = evaluateGates(
+      { ...alum, alumni_evidence: "none", country: "US" },
+      "S2",
+      config,
+      { lists, now: NOW },
+    ).find((g) => g.gate === "G_GEO");
     expect(notS6?.verdict).toBe("fail");
   });
 
@@ -580,7 +593,7 @@ describe("evaluateGates", () => {
     }
 
     it.each([
-      ["G_GEO", {}, { municipality: "Toronto", region: "ON" }, "S2"],
+      ["G_GEO", {}, { municipality: "Seattle", region: "WA", country: "US" }, "S2"],
       ["G_EXISTS", {}, { domain_resolves: false }, "S2"],
       ["G_SIZE", {}, { headcount: 400 }, "S2"],
       ["G_DELIVERABLE", {}, { deliverable_contact: false }, "S2"],
@@ -649,9 +662,10 @@ describe("evaluateGates", () => {
       expect(r.missing_inputs).toContain("G_GEO");
     });
 
-    it("still FAILS on a recorded region that is not BC", () => {
-      expect(geoGate({ municipality: "Toronto", region: "ON" })?.verdict).toBe("fail");
-      expect(geoGate({ region: "SK" })?.verdict).toBe("fail");
+    it("passes anywhere in Canada, and fails only outside it", () => {
+      expect(geoGate({ municipality: "Toronto", region: "ON", country: "CA" })?.verdict).toBe("pass");
+      expect(geoGate({ region: "SK", country: "CA" })?.verdict).toBe("pass");
+      expect(geoGate({ municipality: "Seattle", region: "WA", country: "US" })?.verdict).toBe("fail");
     });
 
     it("passes a BC municipality outside Metro Vancouver on the strength of the region", () => {
@@ -779,20 +793,36 @@ describe("geographyBand", () => {
     ["Burnaby", { municipality: "Burnaby" }, "core"],
     ["Vancouver", { municipality: "Vancouver" }, "core"],
     ["Surrey", { municipality: "Surrey" }, "core"],
-    ["Richmond", { municipality: "Richmond" }, "metro"],
-    ["a V5 postal code", { postal_code: "V5A 1S6" }, "metro"],
-    ["Kelowna", { municipality: "Kelowna", region: "BC" }, "bc_outside_metro"],
-    ["Toronto", { municipality: "Toronto", region: "ON" }, "elsewhere"],
-    ["nothing at all", {}, "elsewhere"],
+    ["Richmond", { municipality: "Richmond" }, "metro_vancouver"],
+    ["Kelowna", { municipality: "Kelowna", region: "BC" }, "bc_other"],
+    // IN SCOPE at a lower weight, per the 2026-08-06 supersession.
+    ["Toronto", { municipality: "Toronto", region: "ON" }, "canada_other"],
+    ["somewhere unnamed in Canada", { country: "CA" }, "canada_other"],
+    ["Seattle", { municipality: "Seattle", region: "WA", country: "US" }, "outside_canada"],
+    ["nothing at all", {}, "unresolved"],
   ];
 
   it.each(cases)("puts %s in the %s band", (_label, over, expected) => {
     expect(geographyBand(company({ legal_name: "X", ...over }), config, lists)).toBe(expected);
   });
 
+  // A postal code is NOT a membership signal. Report §8 rejected FSA-prefix geography, and V3G
+  // and V4X are Abbotsford, V4S is Mission, V4T/V4V are Central Okanagan.
+  it("never lets a postal code decide the band", () => {
+    expect(geographyBand(company({ legal_name: "X", postal_code: "V5A 1S6" }), config, lists)).toBe(
+      "unresolved",
+    );
+    expect(
+      geographyBand(
+        company({ legal_name: "X", municipality: "Abbotsford", region: "BC", postal_code: "V3G 2J5" }),
+        config,
+        lists,
+      ),
+    ).toBe("bc_other");
+  });
+
   // The maintained CSV carries all 23 member jurisdictions; the six below were absent from the
-  // shorter list config/icp.yaml used to carry, so G_GEO killed them as `out_of_area`. A local
-  // business on Bowen Island is exactly the in-kind prospect this pipeline exists to find.
+  // shorter list config/icp.yaml used to carry, so G_GEO killed them as `out_of_area`.
   const PREVIOUSLY_BLOCKED = [
     "Anmore",
     "Belcarra",
@@ -802,8 +832,10 @@ describe("geographyBand", () => {
     "Electoral Area A",
   ];
 
-  it.each(PREVIOUSLY_BLOCKED)("counts %s as Metro Vancouver, not elsewhere", (municipality) => {
-    expect(geographyBand(company({ legal_name: "X", municipality }), config, lists)).toBe("metro");
+  it.each(PREVIOUSLY_BLOCKED)("counts %s as Metro Vancouver", (municipality) => {
+    expect(geographyBand(company({ legal_name: "X", municipality }), config, lists)).toBe(
+      "metro_vancouver",
+    );
   });
 
   it.each(PREVIOUSLY_BLOCKED)("does not let G_GEO block a business in %s", (municipality) => {
@@ -822,7 +854,7 @@ describe("geographyBand", () => {
       "core",
     );
     expect(geographyBand(company({ legal_name: "X", municipality: "Steveston" }), config, lists)).toBe(
-      "metro",
+      "metro_vancouver",
     );
   });
 
@@ -831,37 +863,53 @@ describe("geographyBand", () => {
     for (const j of lists.metroVancouver) {
       const band = geographyBand(company({ legal_name: "X", municipality: j.canonical }), config, lists);
       expect(isInMetroVancouver(j.canonical, lists), j.canonical).toBe(true);
-      expect(band === "core" || band === "metro", `${j.canonical} → ${band}`).toBe(true);
+      expect(band === "core" || band === "metro_vancouver", `${j.canonical} → ${band}`).toBe(true);
     }
   });
 
   // metro-vancouver.csv ships BARE municipality names, and richmond, vancouver, surrey, langley,
-  // delta and white rock all name real places outside BC. Trusting the alias before reading the
-  // region scored a Richmond, Virginia company as a local prospect with full geography weight.
-  describe("a municipality alias is only trusted when the region is BC or absent", () => {
+  // delta and white rock all name real places elsewhere. Trusting the alias before reading the
+  // province scored a Richmond, Ontario company as a local prospect.
+  describe("a municipality alias is only trusted when the province is BC or absent", () => {
     const COLLIDING = ["Richmond", "Vancouver", "Surrey", "Langley", "Delta", "White Rock"];
 
-    it.each(COLLIDING)("does not score %s with a non-BC region as Metro Vancouver", (municipality) => {
-      expect(geographyBand(company({ legal_name: "X", municipality, region: "VA" }), config, lists)).toBe(
-        "elsewhere",
-      );
+    it.each(COLLIDING)("does not score %s with a contrary province as Metro Vancouver", (municipality) => {
+      expect(
+        geographyBand(company({ legal_name: "X", municipality, region: "ON" }), config, lists),
+      ).toBe("canada_other");
     });
 
-    it.each(COLLIDING)("still resolves %s as Metro Vancouver with no region recorded", (municipality) => {
+    it.each(COLLIDING)("still resolves %s as Metro Vancouver with no province recorded", (municipality) => {
       const band = geographyBand(company({ legal_name: "X", municipality }), config, lists);
-      expect(band === "core" || band === "metro", `${municipality} → ${band}`).toBe(true);
+      expect(band === "core" || band === "metro_vancouver", `${municipality} → ${band}`).toBe(true);
     });
 
-    it.each(COLLIDING)("still resolves %s as Metro Vancouver with region BC", (municipality) => {
+    it.each(COLLIDING)("still resolves %s as Metro Vancouver with province BC", (municipality) => {
       const band = geographyBand(company({ legal_name: "X", municipality, region: "BC" }), config, lists);
-      expect(band === "core" || band === "metro", `${municipality} → ${band}`).toBe(true);
+      expect(band === "core" || band === "metro_vancouver", `${municipality} → ${band}`).toBe(true);
     });
 
-    it("blocks the out-of-province namesake at G_GEO instead of awarding it metro weight", () => {
+    // A Canadian namesake is IN SCOPE at the lower band, never blocked — only outside Canada is.
+    it("puts the out-of-province namesake in canada_other rather than blocking it", () => {
+      const ontario = company({
+        legal_name: "Acme",
+        municipality: "Richmond",
+        region: "ON",
+        country: "CA",
+        has_consumer_storefront: true,
+        lawful_basis_strength: "express",
+      });
+      const g = evaluateGates(ontario, "S2", config, { lists, now: NOW }).find((x) => x.gate === "G_GEO");
+      expect(g?.verdict).toBe("pass");
+      expect(scoreCompany(ontario, config, { lists, now: NOW }).blocking_gates).not.toContain("G_GEO");
+    });
+
+    it("blocks the same namesake once the country says it is outside Canada", () => {
       const virginia = company({
         legal_name: "Acme",
         municipality: "Richmond",
         region: "VA",
+        country: "US",
         has_consumer_storefront: true,
         lawful_basis_strength: "express",
       });
@@ -870,38 +918,31 @@ describe("geographyBand", () => {
       expect(g?.effect).toBe("block");
       expect(scoreCompany(virginia, config, { lists, now: NOW }).blocking_gates).toContain("G_GEO");
     });
-
-    it("a metro postal prefix does not overturn a recorded non-BC region either", () => {
-      expect(
-        geographyBand(company({ legal_name: "X", postal_code: "V5A 1S6", region: "WA" }), config, lists),
-      ).toBe("elsewhere");
-    });
   });
 
-  // All four spellings that appear in real records. normalizeMunicipality preserves hyphens, so
-  // the hyphenated and unhyphenated French forms are distinct keys and both must resolve.
-  it.each(["BC", "British Columbia", "Colombie-Britannique", "Colombie Britannique"])(
+  // All four spellings that appear in real records, plus the abbreviated forms.
+  it.each(["BC", "B.C.", "British Columbia", "Colombie-Britannique", "Colombie Britannique"])(
     "reads %j as British Columbia",
     (region) => {
-      expect(geographyBand(company({ legal_name: "X", region }), config, lists)).toBe("bc_outside_metro");
+      expect(geographyBand(company({ legal_name: "X", region }), config, lists)).toBe("bc_other");
     },
   );
 });
 
-// ===========================================================================
-// The invariant the shared resolver exists to hold: the filter and the scorer never place the
-// same company in different provinces. They previously drifted in OPPOSITE directions.
-// ===========================================================================
-
 describe("filter and scoring never disagree about where a company is", () => {
-  const ROWS: { municipality?: string; region?: string; postal?: string }[] = [
+  const ROWS: { municipality?: string; region?: string; country?: string }[] = [
     { municipality: "Burnaby" },
     { municipality: "Burnaby", region: "BC" },
+    { municipality: "Burnaby", region: "BC", country: "CA" },
     { municipality: "Richmond" },
     { municipality: "Richmond", region: "BC" },
-    { municipality: "Richmond", region: "VA" },
-    { municipality: "Vancouver", region: "WA" },
+    // Namesakes elsewhere in Canada: in scope at the lower band, never killed.
+    { municipality: "Richmond", region: "ON", country: "CA" },
+    { municipality: "Vancouver", region: "ON" },
     { municipality: "Surrey", region: "ON" },
+    // Namesakes outside Canada: the one geographic terminal.
+    { municipality: "Richmond", region: "VA", country: "US" },
+    { municipality: "Vancouver", region: "WA", country: "US" },
     { municipality: "Kitsilano", region: "BC" },
     { municipality: "Bowen Island" },
     { municipality: "Abbotsford", region: "BC" },
@@ -909,91 +950,75 @@ describe("filter and scoring never disagree about where a company is", () => {
     { municipality: "Kelowna", region: "Colombie-Britannique" },
     { municipality: "Kelowna", region: "Colombie Britannique" },
     { region: "British Columbia" },
-    { region: "SK" },
+    { region: "SK", country: "CA" },
     { municipality: "Saskatoon", region: "SK" },
     { municipality: "Nowheresville" },
     {},
-    // Postal codes: the field the two callers used to disagree about, because only one of them
-    // passed it. Yaletown is a real Vancouver neighbourhood absent from the alias set, so the
-    // prefix is the ONLY metro signal on the row.
-    { municipality: "Yaletown", region: "BC", postal: "V6B 1A1" },
-    { municipality: "Yaletown", postal: "V6B 1A1" },
-    { postal: "V6B 1A1" },
-    { postal: "V6B 1A1", region: "BC" },
-    { postal: "M5V 2T6", region: "ON" },
-    { postal: "M5V 2T6" },
-    { municipality: "Richmond", region: "VA", postal: "23219" },
-    { municipality: "Vancouver", region: "WA", postal: "98660" },
     // Every BC spelling, including the one that used to kill an in-scope row.
     { municipality: "Burnaby", region: "B.C." },
     { municipality: "Burnaby", region: "B.C" },
     { municipality: "Burnaby", region: "British Columbia, Canada" },
-    { municipality: "Burnaby", region: "Colombie-Britannique" },
-    { municipality: "Burnaby", region: "Colombie Britannique" },
-    // An unrecognised region: unparsed, therefore absent, therefore never a kill.
+    // Unrecognised values, which must behave exactly as absent ones.
     { municipality: "Burnaby", region: "Freedonia" },
     { region: "Freedonia" },
+    { municipality: "Vancouver", region: "CA", country: "CA" },
     // Each field independently null.
-    { municipality: "Burnaby", region: undefined, postal: undefined },
-    { municipality: undefined, region: "BC", postal: undefined },
-    { municipality: undefined, region: undefined, postal: "V5A 1S6" },
+    { municipality: "Burnaby", region: undefined, country: undefined },
+    { municipality: undefined, region: "BC", country: undefined },
+    { municipality: undefined, region: undefined, country: "CA" },
+    { municipality: undefined, region: undefined, country: "US" },
   ];
 
   it.each(ROWS.map((r) => [JSON.stringify(r), r] as const))(
-    "reaches the same in-scope conclusion for %s",
+    "reaches the same band for %s",
     (_label, row) => {
-      const scoringScope = geographyScope(
+      const scoringBand = geographyScope(
         company({
           legal_name: "X",
           municipality: row.municipality ?? null,
           region: row.region ?? null,
-          postal_code: row.postal ?? null,
+          country: row.country ?? null,
         }),
         lists,
-      ).scope;
+      ).band;
 
       const filtered = runFilter(
         {
           legal_name: "X",
           address_municipality: row.municipality ?? null,
           address_region: row.region ?? null,
-          postal_code: row.postal ?? null,
+          address_country: row.country ?? null,
         },
         lists,
         { now: NOW },
       );
 
       // The filter's own verdict, read off the outcomes it emits rather than re-derived.
-      const outOfBc = filtered.kills.some((k) => k.reason === "outside_bc");
-      const outsideMetroPenalty = filtered.penalties.some(
-        (p) => p.tag === "outside_metro_vancouver",
+      const outsideCanada = filtered.kills.some((k) => k.reason === "outside_canada");
+      const geoUnresolved = filtered.cannot_evaluate.some((c) => c.rule_id === "K-GEO-01");
+
+      // ONLY outside_canada may drop a row, in either module.
+      expect(outsideCanada, `filter kill must match band ${scoringBand}`).toBe(
+        scoringBand === "outside_canada",
       );
-      const geoUnresolved = filtered.cannot_evaluate.some((c) => c.rule_id === "K-GEO-02");
 
-      if (scoringScope === "outside_bc") {
-        expect(outOfBc, "scoring says outside BC, the filter must too").toBe(true);
-      } else {
-        expect(outOfBc, "scoring did not say outside BC, so the filter must not kill").toBe(false);
+      if (scoringBand === "unresolved") {
+        expect(geoUnresolved, "neither module may decide without evidence").toBe(true);
       }
 
-      if (scoringScope === "metro_vancouver") {
-        expect(outsideMetroPenalty, "in Metro Vancouver, so no -25").toBe(false);
-        expect(filtered.locality.in_scope || filtered.locality.bases_available.length === 0).toBe(true);
-      }
+      // Geography is expressed exactly once, so no row anywhere carries the retired penalty.
+      expect(filtered.penalties.map((p) => p.tag)).not.toContain("outside_metro_vancouver");
 
-      if (scoringScope === "bc_outside_metro" && row.municipality) {
-        expect(outsideMetroPenalty, "in BC but outside the 23 jurisdictions, so -25").toBe(true);
-      }
-
-      if (scoringScope === "unresolved") {
-        expect(outOfBc).toBe(false);
-        expect(geoUnresolved, "neither module may decide without a region").toBe(true);
+      if (scoringBand === "metro_vancouver") {
+        expect(filtered.locality.in_scope || filtered.locality.bases_available.length === 0).toBe(
+          true,
+        );
       }
     },
   );
 
-  it("never lets an unrecognised region drop a row in either module", () => {
-    for (const region of ["B.C.", "B.C", "British Columbia, Canada", "Freedonia", "Canada"]) {
+  it("never lets an unrecognised region drop a row or change its band in either module", () => {
+    for (const region of ["B.C.", "B.C", "British Columbia, Canada", "Freedonia", "CA"]) {
       const facts = company({
         legal_name: "Crema Artisan Bakers",
         municipality: "Burnaby",
@@ -1004,6 +1029,7 @@ describe("filter and scoring never disagree about where a company is", () => {
       expect(scoreCompany(facts, config, { lists, now: NOW }).blocking_gates, region).not.toContain(
         "G_GEO",
       );
+      expect(geographyBand(facts, config, lists), region).toBe("core");
       expect(
         runFilter(
           { legal_name: "Crema Artisan Bakers", address_municipality: "Burnaby", address_region: region },
@@ -1015,12 +1041,6 @@ describe("filter and scoring never disagree about where a company is", () => {
     }
   });
 });
-
-// ===========================================================================
-// P-08's forbid closes the EMAIL channel. It must never empty the board: conspicuous publication
-// is the only basis a cold prospect can carry, and §9.4 measured 25 of 25 seeded addresses as
-// role accounts.
-// ===========================================================================
 
 describe("a role-account board does not empty", () => {
   // The four conventional shapes §9.4 measured. `makegoodnow@` is deliberately NOT here: it is
@@ -1038,6 +1058,7 @@ describe("a role-account board does not empty", () => {
       address_country: "CA",
       lawful_basis: "conspicuous_pub" as const,
       lawful_basis_url: `https://${local}co.ca/contact`,
+      observations: { has_consumer_storefront: true },
     };
   }
 
@@ -1091,6 +1112,57 @@ describe("a role-account board does not empty", () => {
     // direction to fail in.
     expect(filtered.email_channel_open).toBe(true);
     expect(filtered.penalties.map((p) => p.rule_id)).not.toContain("P-08");
+  });
+
+  // ENUMERATED, never inferred from "a channel is set". renewal_motion IS an email motion, and
+  // the internal handoffs still send. A future addition to RequiredChannel must be added to
+  // NON_CEM_CHANNELS deliberately, so each value is pinned here.
+  it.each([
+    ["in_person", "not_applicable"],
+    ["web_form", "not_applicable"],
+    ["phone", "not_applicable"],
+    ["renewal_motion", "fail"],
+    ["enactus_canada", "fail"],
+    ["sfu_advancement", "fail"],
+    ["grants_pipeline", "fail"],
+  ] as const)("G_LAWFUL_BASIS is %s → %s when no basis is recorded", (channel, verdict) => {
+    const g = evaluateGates(
+      company({ legal_name: "X", lawful_basis_strength: "none", required_channel: channel }),
+      "S2",
+      config,
+      { lists, now: NOW },
+    ).find((x) => x.gate === "G_LAWFUL_BASIS");
+    expect(g?.verdict).toBe(verdict);
+    expect(g?.effect).toBe(verdict === "fail" ? "block" : "none");
+  });
+
+  // The compliance hole this closes: a current sponsor routed to renewal_motion whose L-04
+  // finding invalidated the claimed basis must still be stopped, not waved through.
+  it("still blocks a renewal lead whose CASL basis L-04 invalidated", () => {
+    const filtered = runFilter(
+      {
+        legal_name: "Past Sponsor",
+        registrable_domain: "example.ca",
+        address_municipality: "Burnaby",
+        address_region: "BC",
+        address_country: "CA",
+        email: "priya.patel@example.ca",
+        lawful_basis: "conspicuous_pub",
+        lawful_basis_url: "https://some-directory.example.org/listing/123",
+        rel: { sponsor_cycles: ["2026-27"] },
+      },
+      lists,
+      { now: NOW, current_cycle: "2026-27" },
+    );
+    expect(filtered.required_channel).toBe("renewal_motion");
+    expect(filtered.email_channel_open).toBe(false);
+
+    const scored = scoreCompany(
+      company({ legal_name: "Past Sponsor", ...gateInputsFromFilterResult(filtered) }),
+      config,
+      { lists, now: NOW },
+    );
+    expect(scored.blocking_gates).toContain("G_LAWFUL_BASIS");
   });
 
   it("still fails G_LAWFUL_BASIS when there is no basis AND no alternative route", () => {
@@ -1680,7 +1752,9 @@ describe("gateInputsFromFilterResult", () => {
         // which routes to the walk list and makes the CASL gate not applicable. Abbotsford
         // instead of Burnaby so the row still carries a penalty, proving the penalty pass runs
         // under an email-scoped terminal.
-        address_municipality: "Abbotsford",
+        // A real penalty that is NOT geography, so the row still proves the penalty pass runs
+        // under an email-scoped terminal now that the -25 band penalty is retired.
+        observations: { project_industry_match: false },
         email: "priya.patel@example.ca",
         lawful_basis: "conspicuous_pub",
         lawful_basis_url: "https://some-directory.example.org/listing/123",

@@ -34,17 +34,24 @@ geography:
   # Anmore, Belcarra, Bowen Island, Lions Bay, Tsawwassen First Nation and Electoral Area A were
   # killed as `out_of_area`. Add a jurisdiction to the CSV, never here.
   #
-  # THE METRO POSTAL PREFIXES ARE NOT HERE EITHER, for the same reason: they decide MEMBERSHIP,
-  # not weight. They live with the alias map in src/lib/qualification-lists.ts, which is also
-  # what lets the disqualifier filter — which deliberately never reads this file — and the
-  # scorer reach the same verdict for the same address.
+  # POSTAL PREFIXES ARE NOT HERE EITHER, and are not anywhere. Report section 8 rejected
+  # FSA-prefix geography in writing, and a coarse V3-V7 set proved it: V3G and V4X are
+  # Abbotsford, V4S is Mission, V4T/V4V are Central Okanagan. The rule uses municipality names.
   #
   # Points awarded by the `geography` term of fit_score.
+  #
+  # CAPTAIN'S RULING 2026-08-06: in scope is ANYWHERE IN CANADA; preferred is BC, and Greater
+  # Vancouver most of all. Retune the NUMBERS freely — they are starting values like every other
+  # weight in this file — but the ORDERING metro_vancouver > bc_other > canada_other is the
+  # ruling itself, not a tuning choice. `outside_canada` is the one geographic terminal, so its
+  # weight is never reached in practice; it is present so the lookup can never be NaN.
   bands:
     core: 20
-    metro: 12
-    bc_outside_metro: 4
-    elsewhere: 0
+    metro_vancouver: 12
+    bc_other: 4
+    canada_other: 1
+    outside_canada: 0
+    unresolved: 0
 
 # ---------------------------------------------------------------------------
 # The three scores. NEVER summed on the card — see report §6.1. Three different failures

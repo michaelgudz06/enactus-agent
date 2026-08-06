@@ -8,6 +8,7 @@ import {
   normalizeMunicipality,
   normalizeName,
   parseCsv,
+  resolveGeography,
 } from "../src/lib/qualification-lists";
 
 const lists = loadQualificationLists();
@@ -300,5 +301,59 @@ describe("the shipped seed data", () => {
         );
       }
     });
+  });
+});
+
+// ===========================================================================
+// The shared geography verdict. NOT-RECOGNISED MEANS ABSENT, in every branch and every field —
+// the property that keeps a spelling from costing a real prospect its band or its place.
+// ===========================================================================
+
+describe("resolveGeography · an unrecognised value behaves exactly as an omitted one", () => {
+  // A deliberately wide parameter type: a postal code passed here must be INERT, and the point
+  // of the assertion below is that GeographyFacts does not carry it at all.
+  function band(facts: Record<string, string | undefined>) {
+    return resolveGeography(facts, lists).band;
+  }
+
+  it.each([
+    ["region", { municipality: "Burnaby", region: "Freedonia" }, { municipality: "Burnaby" }],
+    ["country", { municipality: "Burnaby", country: "  " }, { municipality: "Burnaby" }],
+    [
+      "region on a row with a country",
+      { municipality: "Burnaby", region: "Ruritania", country: "CA" },
+      { municipality: "Burnaby", country: "CA" },
+    ],
+    ["municipality", { region: "BC", municipality: "Nowheresville" }, { region: "BC" }],
+  ])("resolves identically whether an unrecognised %s is present or omitted", (_f, present, omitted) => {
+    expect(band(present)).toBe(band(omitted));
+  });
+
+  it("never reads the token CA as anything but Canada", () => {
+    expect(band({ municipality: "Vancouver", region: "CA", country: "CA" })).toBe("metro_vancouver");
+    expect(resolveGeography({ country: "CA" }, lists).country).toBe("canada");
+    expect(resolveGeography({ region: "CA" }, lists).region).toBe("unparsed");
+  });
+
+  // Report §8 rejected FSA-prefix geography in writing, and a coarse V3-V7 set proved it: V3G
+  // and V4X are Abbotsford, not Metro Vancouver. A postal code must move nothing.
+  it("ignores a postal code entirely — it is not even an input", () => {
+    const withPostal = { municipality: "Abbotsford", region: "BC", postal_code: "V3G 2J5" };
+    expect(band(withPostal)).toBe("bc_other");
+    expect(band(withPostal)).toBe(band({ municipality: "Abbotsford", region: "BC" }));
+    expect(band({ postal_code: "V5A 1S6" })).toBe("unresolved");
+  });
+
+  it("puts every band a Canadian row can reach outside the kill path", () => {
+    for (const facts of [
+      { municipality: "Burnaby", region: "BC", country: "CA" },
+      { municipality: "Abbotsford", region: "BC", country: "CA" },
+      { municipality: "Toronto", region: "ON", country: "CA" },
+      { country: "CA" },
+      {},
+    ]) {
+      expect(band(facts)).not.toBe("outside_canada");
+    }
+    expect(band({ municipality: "Seattle", region: "WA", country: "US" })).toBe("outside_canada");
   });
 });

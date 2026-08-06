@@ -283,9 +283,9 @@ export function metroVancouverCanonicals(
  *
  * `normalizeMunicipality` preserves hyphens and collapses everything else to spaces, so
  * "colombie-britannique" and "colombie britannique" are DISTINCT KEYS and both must be here.
- * `regionCandidates` below tries a few further shapes ("B.C.", "British Columbia, Canada") on top
- * — but that tolerance is a convenience, never the safety mechanism. The safety mechanism is
- * `RegionVerdict`: there will always be another spelling, and an unrecognised one must not kill.
+ * `regionCandidates` below tries a few further shapes ("B.C.", "British Columbia, Canada") on
+ * top — but that tolerance is a convenience, never the safety mechanism. The safety mechanism is
+ * that an unrecognised region reads as ABSENT.
  */
 export const BC_REGION_SPELLINGS: ReadonlySet<string> = new Set([
   "bc",
@@ -298,62 +298,47 @@ export const BC_REGION_SPELLINGS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Regions that are KNOWN NOT to be British Columbia — the Canadian provinces and territories and
- * the US states, by code and by name.
+ * The twelve Canadian provinces and territories that are NOT British Columbia.
  *
- * This list exists so the resolver can tell "this row says Virginia" from "this row says
- * something I do not recognise". Only the former is contrary evidence.
+ * DELIBERATELY NOT A WORLD GAZETTEER. An earlier version enumerated the US states too, so the
+ * token "CA" — the ISO code this codebase itself uses for CANADA — was read as California and
+ * terminalled a Vancouver bakery. Province is now derived only WITHIN Canada, which removes that
+ * collision by construction rather than by another list entry.
  */
-const NON_BC_REGIONS: ReadonlySet<string> = new Set([
+const CANADA_OTHER_PROVINCES: ReadonlySet<string> = new Set([
   "ab", "alberta",
   "sk", "saskatchewan",
   "mb", "manitoba",
   "on", "ontario",
-  "qc", "pq", "quebec", "que",
+  "qc", "pq", "que", "quebec",
   "nb", "new brunswick", "nouveau-brunswick",
   "ns", "nova scotia", "nouvelle-ecosse",
-  "pe", "pei", "prince edward island",
-  "nl", "nf", "newfoundland and labrador", "newfoundland",
+  "pe", "pei", "prince edward island", "ile-du-prince-edouard",
+  "nl", "nf", "newfoundland", "newfoundland and labrador", "terre-neuve-et-labrador",
   "yt", "yukon",
-  "nt", "northwest territories",
+  "nt", "northwest territories", "territoires du nord-ouest",
   "nu", "nunavut",
-  "al", "alabama", "ak", "alaska", "az", "arizona", "ar", "arkansas",
-  "ca", "california", "co", "colorado", "ct", "connecticut", "de", "delaware",
-  "fl", "florida", "ga", "georgia", "hi", "hawaii", "id", "idaho",
-  "il", "illinois", "in", "indiana", "ia", "iowa", "ks", "kansas",
-  "ky", "kentucky", "la", "louisiana", "me", "maine", "md", "maryland",
-  "ma", "massachusetts", "mi", "michigan", "mn", "minnesota", "ms", "mississippi",
-  "mo", "missouri", "mt", "montana", "ne", "nebraska", "nv", "nevada",
-  "nh", "new hampshire", "nj", "new jersey", "nm", "new mexico", "ny", "new york",
-  "nc", "north carolina", "nd", "north dakota", "oh", "ohio", "ok", "oklahoma",
-  "or", "oregon", "pa", "pennsylvania", "ri", "rhode island", "sc", "south carolina",
-  "sd", "south dakota", "tn", "tennessee", "tx", "texas", "ut", "utah",
-  "vt", "vermont", "va", "virginia", "wa", "washington", "wv", "west virginia",
-  "wi", "wisconsin", "wy", "wyoming", "dc", "district of columbia",
 ]);
 
-/**
- * WHAT A RECORDED REGION TELLS US — report §2.3 expressed as a type rather than as a comment.
- *
- *   bc        the row says British Columbia
- *   contrary  the row names a province or state that is NOT British Columbia. The ONLY value
- *             that may kill, and the only one that may overrule a municipality alias.
- *   unparsed  a region string nobody recognised. TREATED EXACTLY AS ABSENT: `cannot_evaluate`,
- *             never a kill. "B.C." was simply the first spelling to surface; there will be
- *             another, so the safe answer has to be structural rather than a longer list.
- */
-export type RegionVerdict = "bc" | "contrary" | "unparsed";
+const CANADA_SPELLINGS: ReadonlySet<string> = new Set(["ca", "can", "canada"]);
 
 /**
- * The shapes a region string is tried in. Beyond `normalizeMunicipality`, this drops the
- * separators inside an abbreviation ("B.C." → "bc") and a trailing country ("British Columbia,
- * Canada" → "british columbia"), because both are ordinary in scraped addresses.
+ * WHAT A RECORDED FIELD TELLS US — report §2.3 expressed as a type rather than as a comment.
+ * `unparsed` covers both "nothing was recorded" and "something was recorded that nobody
+ * recognised", because those are the same evidential state and neither may ever kill.
  */
-function regionCandidates(region: string | null | undefined): string[] {
-  const key = normalizeMunicipality(region);
+export type RegionVerdict = "bc" | "canada_other" | "unparsed";
+export type CountryVerdict = "canada" | "outside_canada" | "unparsed";
+
+/**
+ * The shapes a value is tried in. Beyond `normalizeMunicipality`, this drops the separators
+ * inside an abbreviation ("B.C." → "bc") and a trailing country ("British Columbia, Canada" →
+ * "british columbia"), because both are ordinary in scraped addresses.
+ */
+function candidates(value: string | null | undefined): string[] {
+  const key = normalizeMunicipality(value);
   if (!key) return [];
-  const out = new Set<string>([key]);
-  out.add(key.replace(/[\s-]+/g, ""));
+  const out = new Set<string>([key, key.replace(/[\s-]+/g, "")]);
   const trailingCountry = /\s+(canada|ca|usa|us|united states|united states of america)$/;
   const trimmed = key.replace(trailingCountry, "").trim();
   if (trimmed && trimmed !== key) {
@@ -363,138 +348,128 @@ function regionCandidates(region: string | null | undefined): string[] {
   return [...out].filter(Boolean);
 }
 
-/** Classify a recorded region into the three states above. An absent region is `unparsed`. */
+/**
+ * Classify a recorded country. A recorded country that is not Canada IS contrary evidence —
+ * K-GEO-01 is the one geographic terminal that survives the 2026-08-06 supersession — but an
+ * absent or unrecognised one is not.
+ */
+export function classifyCountry(country: string | null | undefined): CountryVerdict {
+  const keys = candidates(country);
+  if (keys.length === 0) return "unparsed";
+  if (keys.some((k) => CANADA_SPELLINGS.has(k))) return "canada";
+  return "outside_canada";
+}
+
+/**
+ * Classify a recorded region WITHIN Canada. Anything the province vocabulary does not carry is
+ * `unparsed`, which behaves exactly as absent.
+ */
 export function classifyRegion(region: string | null | undefined): RegionVerdict {
-  const candidates = regionCandidates(region);
-  if (candidates.length === 0) return "unparsed";
-  if (candidates.some((c) => BC_REGION_SPELLINGS.has(c))) return "bc";
-  if (candidates.some((c) => NON_BC_REGIONS.has(c))) return "contrary";
+  const keys = candidates(region);
+  if (keys.length === 0) return "unparsed";
+  if (keys.some((k) => BC_REGION_SPELLINGS.has(k))) return "bc";
+  if (keys.some((k) => CANADA_OTHER_PROVINCES.has(k))) return "canada_other";
   return "unparsed";
 }
 
 /**
- * The postal prefixes that fall inside Metro Vancouver.
+ * WHERE A ROW SITS — one band, and only one of them kills.
  *
- * MEMBERSHIP DATA, so it lives here beside the alias map and the BC spellings rather than in
- * config/icp.yaml. icp.yaml decides band WEIGHTS ONLY; a membership list there is the second
- * source of truth that already killed six member jurisdictions once. Keeping it here is also
- * what lets the filter and the scorer make the SAME call with the SAME inputs — the filter
- * deliberately never reads icp.yaml.
- */
-export const METRO_POSTAL_PREFIXES: readonly string[] = ["V3", "V4", "V5", "V6", "V7"];
-
-/**
- * Where a row sits, as one verdict.
+ * CAPTAIN'S RULING, 2026-08-06, which SUPERSEDES the disqualifier report: "ideally we want
+ * businesses in BC, but anything across canada is fine". In scope is ANYWHERE IN CANADA;
+ * preferred is BC, and Greater Vancouver most of all; out of scope is outside Canada.
  *
- *   metro_vancouver   one of the 23 member jurisdictions of config/exclusions/metro-vancouver.csv
- *   bc_outside_metro  recorded in BC, but not in a member jurisdiction
- *   outside_bc        recorded in a region KNOWN not to be BC — the only CONTRARY verdict
- *   unresolved        nothing recorded resolves; `missing_fields` says what would decide it
+ *   metro_vancouver  one of the 23 member jurisdictions of config/exclusions/metro-vancouver.csv
+ *   bc_other         in BC, outside those 23
+ *   canada_other     elsewhere in Canada — ACCEPTABLE at a lower weight, NEVER a kill
+ *   outside_canada   recorded outside Canada — the ONLY band that terminals (K-GEO-01)
+ *   unresolved       nothing recorded decides it; `missing_fields` says what would
  */
-export type GeographyScope =
+export type GeographyBandId =
   | "metro_vancouver"
-  | "bc_outside_metro"
-  | "outside_bc"
+  | "bc_other"
+  | "canada_other"
+  | "outside_canada"
   | "unresolved";
 
 export interface GeographyFacts {
   municipality?: string | null;
   region?: string | null;
-  postal_code?: string | null;
+  country?: string | null;
 }
 
 export interface GeographyVerdict {
-  scope: GeographyScope;
-  /** What the recorded region said, in the three states that matter. */
+  band: GeographyBandId;
   region: RegionVerdict;
+  country: CountryVerdict;
   /** The member jurisdictions the municipality resolved to. Empty unless `metro_vancouver`. */
   metro_canonicals: string[];
   /**
-   * True when a municipality alias or metro postal prefix DID match but the recorded region
-   * overruled it. Set for a CONTRARY region (Richmond, Virginia) and for an UNPARSED one, where
-   * the alias is suppressed for safety without the row being called out of area.
+   * True when a municipality alias DID match but a recorded province overruled it — the
+   * Richmond-Virginia case, kept visible rather than silent.
    */
   alias_suppressed_by_region: boolean;
-  /** What would let an `unresolved` verdict decide. Empty for every other scope. */
+  /** What would let an `unresolved` verdict decide. Empty for every other band. */
   missing_fields: string[];
 }
 
 /**
- * THE ONE GEOGRAPHY DECISION. Both src/lib/filter.ts and src/lib/scoring.ts consume this, with
- * the SAME full input set, and neither carries its own copy — two resolvers over the same data
- * drift, and so do two callers that feed one resolver different fields.
+ * THE ONE GEOGRAPHY DECISION. Both src/lib/filter.ts and src/lib/scoring.ts consume this with
+ * the SAME inputs and neither keeps its own copy — two resolvers over the same data drift, and
+ * so do two callers that feed one resolver different fields.
  *
- * TWO PRECONDITIONS, in this order:
+ * THREE RULES IT EXISTS TO HOLD:
  *
- *  1. A MUNICIPALITY ALIAS MAY ONLY BE TRUSTED WHEN THE REGION IS BC OR ABSENT.
+ *  1. COUNTRY IS CONSULTED FIRST. Province is only ever derived within Canada, so the ISO code
+ *     "CA" can never be read as California.
+ *
+ *  2. A MUNICIPALITY ALIAS IS ONLY TRUSTED WHEN THE PROVINCE IS BC OR ABSENT.
  *     metro-vancouver.csv ships BARE MUNICIPALITY NAMES, and richmond, vancouver, surrey,
- *     langley, delta and white rock all name real places outside BC — Vancouver, Washington is
- *     forty minutes from Portland. So the region is read BEFORE the alias, never after.
+ *     langley, delta and white rock all name real places elsewhere.
  *
- *  2. UNPARSEABLE IS NOT CONTRARY (§2.3). A region nobody recognised suppresses the alias, which
- *     is conservative, but it can never produce `outside_bc` — that would kill an in-scope
- *     account on a spelling, which is the invisible-forever failure this module exists to avoid.
+ *  3. UNRECOGNISED IS ABSENT, IN EVERY BRANCH (§2.3). A region nobody recognised takes exactly
+ *     the path a null region takes — same band, same weight, same outcome — because the
+ *     alternative is losing a real prospect to a spelling.
+ *
+ * POSTAL CODES ARE DELIBERATELY NOT AN INPUT. Report §8 rejected FSA-prefix geography in
+ * writing, and a coarse V3–V7 prefix set proved it: V3G and V4X are Abbotsford, V4S is Mission,
+ * V4T/V4V are Central Okanagan. The rule uses municipality names.
  */
 export function resolveGeography(
   facts: GeographyFacts,
   lists: Pick<QualificationLists, "metroVancouverAliases">,
 ): GeographyVerdict {
+  const country = classifyCountry(facts.country);
   const region = classifyRegion(facts.region);
+  const metro_canonicals = metroVancouverCanonicals(facts.municipality, lists);
+  const metroSignal = metro_canonicals.length > 0;
 
-  const canonicals = metroVancouverCanonicals(facts.municipality, lists);
-  const prefix = (facts.postal_code ?? "").trim().slice(0, 2).toUpperCase();
-  const postalMetro = prefix !== "" && METRO_POSTAL_PREFIXES.includes(prefix);
-  const metroSignal = canonicals.length > 0 || postalMetro;
+  const base = { region, country, alias_suppressed_by_region: false, missing_fields: [] as string[] };
 
-  if (region === "contrary") {
-    return {
-      scope: "outside_bc",
-      region,
-      metro_canonicals: [],
-      alias_suppressed_by_region: metroSignal,
-      missing_fields: [],
-    };
+  if (country === "outside_canada") {
+    return { ...base, band: "outside_canada", metro_canonicals: [], alias_suppressed_by_region: metroSignal };
   }
 
   if (region === "bc") {
     return metroSignal
-      ? {
-          scope: "metro_vancouver",
-          region,
-          metro_canonicals: canonicals,
-          alias_suppressed_by_region: false,
-          missing_fields: [],
-        }
-      : {
-          scope: "bc_outside_metro",
-          region,
-          metro_canonicals: [],
-          alias_suppressed_by_region: false,
-          missing_fields: [],
-        };
+      ? { ...base, band: "metro_vancouver", metro_canonicals }
+      : { ...base, band: "bc_other", metro_canonicals: [] };
   }
 
-  const regionRecorded = normalizeMunicipality(facts.region) !== "";
-  if (metroSignal && !regionRecorded) {
-    return {
-      scope: "metro_vancouver",
-      region,
-      metro_canonicals: canonicals,
-      alias_suppressed_by_region: false,
-      missing_fields: [],
-    };
+  if (region === "canada_other") {
+    return { ...base, band: "canada_other", metro_canonicals: [], alias_suppressed_by_region: metroSignal };
   }
 
-  const missing = ["region"];
+  // The province is absent or unrecognised — the same state — so the alias is trusted.
+  if (metroSignal) return { ...base, band: "metro_vancouver", metro_canonicals };
+
+  if (country === "canada") {
+    return { ...base, band: "canada_other", metro_canonicals: [] };
+  }
+
+  const missing = ["country", "region"];
   if (!normalizeMunicipality(facts.municipality)) missing.unshift("municipality");
-  if (prefix === "") missing.push("postal_code");
-  return {
-    scope: "unresolved",
-    region,
-    metro_canonicals: [],
-    alias_suppressed_by_region: metroSignal,
-    missing_fields: missing,
-  };
+  return { ...base, band: "unresolved", metro_canonicals: [], missing_fields: missing };
 }
 
 /** Look a record up by domain first, then by normalised name. */

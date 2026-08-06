@@ -96,7 +96,7 @@ export interface IcpConfig {
      * config/exclusions/metro-vancouver.csv, the maintained list, via `geographyBand()`.
      */
     core: string[];
-    bands: { core: number; metro: number; bc_outside_metro: number; elsewhere: number };
+    bands: Record<GeographyBandName, number>;
   };
   fit_score: {
     segment_match: number;
@@ -167,7 +167,22 @@ export const SCORE_BLOCKS = ["fit_score", "affinity_score", "access_score"] as c
 export const WEIGHT_SUM_TOLERANCE = 1e-6;
 
 /** Every band `scoreFit`'s geography term can resolve to. All four must carry a weight. */
-export const GEOGRAPHY_BANDS = ["core", "metro", "bc_outside_metro", "elsewhere"] as const;
+/**
+ * The weight bands, in the captain's ORDERING (2026-08-06): metro_vancouver > bc_other >
+ * canada_other. `core` splits the top band for the three campuses; `outside_canada` and
+ * `unresolved` exist so `geography.bands[band]` is never NaN, not because either is a prospect.
+ * The NUMBERS in config/icp.yaml are starting values a human retunes; the ordering is a ruling.
+ */
+export const GEOGRAPHY_BANDS = [
+  "core",
+  "metro_vancouver",
+  "bc_other",
+  "canada_other",
+  "outside_canada",
+  "unresolved",
+] as const;
+
+export type GeographyBandName = (typeof GEOGRAPHY_BANDS)[number];
 
 function sumWeights(block: Record<string, unknown>): number {
   return Object.values(block).reduce<number>(
