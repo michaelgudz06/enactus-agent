@@ -640,13 +640,35 @@ function stringList(value: unknown, field: string, defects: ValueDefect[]): stri
  * unusable -- no company name to put on a card. A defect in one lead never
  * touches another lead in the same response.
  */
+// The name is what decides whether this record can be put on a card at all, so
+// it is read on the same single-reading rule as every field behind it: a lone
+// name in a list of one is that name. A name with no single reading leaves the
+// field as it arrived, and the caller drops the lead naming what it got.
+function readCompany(raw: Record<string, unknown>, defects: ValueDefect[]): string {
+  const claimed = raw.company;
+  if (typeof claimed === "string" && claimed.trim()) return claimed.trim();
+
+  const recovered = recoverValue(LEAD_PROPERTIES.company, claimed);
+  if (!recovered || typeof recovered.value !== "string" || !recovered.value.trim()) return "";
+
+  defects.push({
+    subject: recovered.value.trim(),
+    field: "company",
+    detail: `read company ${describeValue(claimed)} as ${describeValue(recovered.value)}`,
+    action: "coerced",
+  });
+  raw.company = recovered.value;
+  return recovered.value.trim();
+}
+
 function reviewLeads(entries: unknown[], candidateCount: number): { leads: RawLead[]; defects: ValueDefect[] } {
   const leads: RawLead[] = [];
   const defects: ValueDefect[] = [];
 
   entries.forEach((entry, i) => {
     const position = `lead ${i + 1}`;
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    const raw = readEnvelope(entry, position, "lead", defects);
+    if (!raw) {
       defects.push({
         subject: position,
         field: "lead",
@@ -656,13 +678,13 @@ function reviewLeads(entries: unknown[], candidateCount: number): { leads: RawLe
       return;
     }
 
-    const raw = { ...(entry as Record<string, unknown>) };
-    const company = typeof raw.company === "string" ? raw.company.trim() : "";
+    const claimedCompany = raw.company;
+    const company = readCompany(raw, defects);
     if (!company) {
       defects.push({
         subject: position,
         field: "company",
-        detail: `no usable company name (got ${describeValue(raw.company)})`,
+        detail: `no usable company name (got ${describeValue(claimedCompany)})`,
         action: "dropped",
       });
       return;
