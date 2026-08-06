@@ -1,4 +1,5 @@
 import { AgentEvent, Lead } from "@/lib/types";
+import { validateAgainstSchema, type JsonSchemaSpec } from "@/lib/llm";
 import type { ExaResult } from "@/lib/exa";
 
 export function exaResult(url: string, title: string, text = "Some page text."): ExaResult {
@@ -40,6 +41,23 @@ export function rawLead(over: Record<string, unknown> = {}) {
     reasoning: "Renaissance Coffee has served SFU Burnaby for three decades.",
     source_index: 1,
     ...over,
+  };
+}
+
+/**
+ * Stands in for chatJSON with its real contract: coerce the raw payload, then
+ * check it against the schema the caller asked to be validated with. A test that
+ * answers through this exercises the same accept/reject boundary the live call
+ * does, so a schema that would discard a batch in production discards it here.
+ */
+export function respondsWith(raw: unknown) {
+  return async (
+    _messages: unknown,
+    opts: { schema?: JsonSchemaSpec; coerce?: (raw: unknown) => unknown } = {}
+  ): Promise<unknown> => {
+    const shaped = opts.coerce ? opts.coerce(raw) : raw;
+    if (opts.schema) validateAgainstSchema(shaped, opts.schema.validate ?? opts.schema.schema, opts.schema.name);
+    return shaped;
   };
 }
 

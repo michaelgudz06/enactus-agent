@@ -80,6 +80,12 @@ export default function LeadCard({
         </div>
       )}
 
+      {lead.website_status && (
+        <div className="mt-2 text-xs truncate" style={{ color: "var(--faint)" }} title={lead.website_status}>
+          ⚠ {lead.website_status}
+        </div>
+      )}
+
       {lead.reasoning && (
         <div className="mt-2">
           <button onClick={() => setShowReason((s) => !s)} className="flex items-center gap-1 text-[11px] font-medium" style={{ color: "var(--faint)" }}>

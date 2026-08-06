@@ -7,6 +7,9 @@ create table if not exists public.enactus_leads (
   id uuid primary key default gen_random_uuid(),
   company text not null,
   website text,
+  -- Set when the agent could not verify a model-claimed website. The claim is
+  -- kept here, visible but never presented as the company's site.
+  website_status text,
   industry text,
   description text,
   contact_name text,
@@ -60,6 +63,7 @@ create table if not exists public.enactus_email_drafts (
 -- Additive migrations for projects created before these columns existed.
 -- `create table if not exists` above will not add them to an existing table.
 alter table public.enactus_leads add column if not exists contact_email_status text;
+alter table public.enactus_leads add column if not exists website_status text;
 
 -- Lock the tables down. The app connects with the SECRET key (bypasses RLS),
 -- so no public policies are needed; the publishable key can read nothing.

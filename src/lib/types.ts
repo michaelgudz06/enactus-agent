@@ -13,6 +13,9 @@ export interface Lead {
   id: string;
   company: string;
   website: string | null;
+  // Set when the model claimed a website that failed verification. The claim is
+  // kept here, visible but never presented as the company's site.
+  website_status: string | null;
   industry: string | null;
   description: string | null;
   contact_name: string | null;

@@ -180,6 +180,66 @@ describe("schema-enforced structured output", () => {
     ).rejects.toThrow(/fit_score/);
   });
 
+  // Strict structured output requires every property in `required`. Enforcing
+  // that locally would let one omitted optional field discard a whole batch, so
+  // the schema that is sent and the schema that is checked may differ.
+  test("sends the strict schema but checks the response against the lenient one", async () => {
+    const fn = mockFetch(reply({ leads: [{ company: "Renaissance Coffee" }] }));
+
+    const out = await chatJSON<{ leads: unknown[] }>([{ role: "user", content: "go" }], {
+      schema: {
+        name: "leads",
+        schema: LEAD_SCHEMA.schema,
+        validate: {
+          type: "object",
+          required: ["leads"],
+          properties: {
+            leads: {
+              type: "array",
+              items: {
+                type: "object",
+                required: ["company"],
+                properties: { company: { type: "string" }, fit_score: { type: ["number", "null"] } },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(out.leads).toHaveLength(1);
+    expect((bodyOf(fn).response_format as { json_schema: { schema: unknown } }).json_schema.schema).toEqual(
+      LEAD_SCHEMA.schema
+    );
+  });
+
+  test("still rejects a wrong type through the lenient schema", async () => {
+    mockFetch(reply({ leads: [{ company: "Renaissance Coffee", fit_score: "ninety-five" }] }));
+
+    await expect(
+      chatJSON([{ role: "user", content: "go" }], {
+        schema: {
+          name: "leads",
+          schema: LEAD_SCHEMA.schema,
+          validate: {
+            type: "object",
+            required: ["leads"],
+            properties: {
+              leads: {
+                type: "array",
+                items: {
+                  type: "object",
+                  required: ["company"],
+                  properties: { company: { type: "string" }, fit_score: { type: ["number", "null"] } },
+                },
+              },
+            },
+          },
+        },
+      })
+    ).rejects.toThrow(/fit_score/);
+  });
+
   test("does not retry a genuine provider error", async () => {
     const fn = mockFetch(reply("rate limited", 429));
 

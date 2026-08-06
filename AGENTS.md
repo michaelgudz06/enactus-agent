@@ -25,8 +25,11 @@ recorded on the lead as `contact_email_status` and is never presented as a
 contact — and the lead itself is kept, because the company may still be worth
 pursuing even when the address is not usable.
 
-The same applies to company websites. Never synthesise one from an aggregator or
-social URL: a LinkedIn post about a bakery is evidence, not the bakery's website.
+Company websites go through the same gate, whichever route they arrive by —
+claimed by the model or derived from a search result. Never synthesise one from
+an aggregator or social URL: a LinkedIn post about a bakery is evidence, not the
+bakery's website. A claim that fails is recorded as `website_status` and the lead
+is kept, exactly as with an address.
 
 This is not hypothetical. Live testing caught the agent inventing
 `momentenergy.co` (no A record, no MX) for a company whose real domain is
@@ -67,8 +70,11 @@ send, which is where CASL liability belongs. **Do not add a send path.**
 - `npm test` runs the vitest suite. Tests must never reach the live Supabase
   project: with `SUPABASE_SERVICE_ROLE_KEY` unset the agent falls back to an
   in-memory lead, which is what the suite relies on.
-- `src/lib/llm.ts` pins exact dated model IDs, never a floating `-latest` alias,
-  so a quality regression can be attributed to a model change. The reasoning /
+- `src/lib/llm.ts` pins the exact published model ID — dated where the provider
+  publishes a dated variant, undated where it does not — and never a floating
+  `-latest` alias, so a quality regression can be attributed to a model change.
+  The reasoner is undated because OpenRouter publishes no dated variant of it;
+  that is not a violation, do not "correct" it. The reasoning /
   structured split is load-bearing: **never ask a reasoning model for JSON** — it
   answers in the reasoning channel and leaves `content` empty. `chatJSON`
   enforces this and will throw.

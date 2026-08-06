@@ -3,7 +3,7 @@ import { AgentEvent, ConnectionType, Lead, Mode } from "./types";
 import { chatJSON, streamReasoner, REASONER } from "./llm";
 import { exaSearch, dedupeByDomain, ExaResult } from "./exa";
 import { supabaseAdmin, LEADS, SEARCHES, hasServiceKey } from "./supabase";
-import { createContactEmailVerifier, EmailCheck } from "./contact";
+import { createVerifiers, isAggregatorHost, EmailCheck, WebsiteCheck } from "./contact";
 import { ENACTUS_ORG, ENACTUS_PROJECTS, ENACTUS_VENTURES } from "./enactus";
 
 type Emit = (e: AgentEvent) => void;
@@ -17,57 +17,77 @@ interface Plan {
   location: string;
 }
 
-// Schemas the provider is asked to honour and the response is checked against.
-// `required` lists only what the run genuinely cannot proceed without; every
-// other field is type-checked when present, so a wrong type is rejected instead
-// of being coerced into the database.
+// Two views of one shape.
+//
+// The provider is sent a *complete* schema, because that is what strict
+// structured output means: every property listed in `required`, no extras, and
+// optionality expressed as a nullable union so "present" is satisfiable by null.
+//
+// The local check is deliberately more lenient. Strictness belongs on a field,
+// never on a batch: one malformed or missing optional field must cost that one
+// field, not the other leads. So the local check requires only what the run
+// genuinely cannot proceed without and type-checks the rest when present, which
+// still keeps wrong types out of the database.
 const NULLABLE_STRING = { type: ["string", "null"] };
+const NULLABLE_STRING_ARRAY = { type: ["array", "null"], items: { type: "string" } };
+
+const CONNECTION_TYPES: ConnectionType[] = ["alum", "past_sponsor", "ecosystem", "none"];
+
+function strictObject(properties: Record<string, unknown>): Record<string, unknown> {
+  return { type: "object", additionalProperties: false, required: Object.keys(properties), properties };
+}
+
+const PLAN_PROPERTIES = {
+  needClarification: { type: ["boolean", "null"] },
+  questions: NULLABLE_STRING_ARRAY,
+  searchQueries: { type: "array", items: { type: "string" } },
+  criteria: { type: "string" },
+  altAngle: NULLABLE_STRING,
+  location: NULLABLE_STRING,
+};
 
 const PLAN_SCHEMA = {
   name: "search_plan",
-  schema: {
-    type: "object",
-    required: ["searchQueries", "criteria"],
-    properties: {
-      needClarification: { type: ["boolean", "null"] },
-      questions: { type: ["array", "null"], items: { type: "string" } },
-      searchQueries: { type: "array", items: { type: "string" } },
-      criteria: { type: "string" },
-      altAngle: NULLABLE_STRING,
-      location: NULLABLE_STRING,
-    },
-  },
+  schema: strictObject(PLAN_PROPERTIES),
+  validate: { type: "object", required: ["searchQueries", "criteria"], properties: PLAN_PROPERTIES },
+};
+
+const LEAD_PROPERTIES = {
+  company: { type: "string" },
+  website: NULLABLE_STRING,
+  industry: NULLABLE_STRING,
+  location: NULLABLE_STRING,
+  description: NULLABLE_STRING,
+  contact_name: NULLABLE_STRING,
+  contact_role: NULLABLE_STRING,
+  contact_email: NULLABLE_STRING,
+  // Not an enum in the local check on purpose: an unrecognised value costs this
+  // one field -- persistLead normalises it to "none" -- never the whole batch.
+  connection_type: NULLABLE_STRING,
+  connection_note: NULLABLE_STRING,
+  sponsorship_type: NULLABLE_STRING_ARRAY,
+  fit_score: { type: ["number", "null"] },
+  why_fit: NULLABLE_STRING,
+  reasoning: NULLABLE_STRING,
+  source_index: { type: ["number", "null"] },
+};
+
+// The provider is still asked for the four literals; only the local check is lenient.
+const REQUEST_LEAD_PROPERTIES = {
+  ...LEAD_PROPERTIES,
+  connection_type: { enum: [...CONNECTION_TYPES, null] },
 };
 
 const LEADS_SCHEMA = {
   name: "leads",
-  schema: {
+  schema: strictObject({ leads: { type: "array", items: strictObject(REQUEST_LEAD_PROPERTIES) } }),
+  validate: {
     type: "object",
     required: ["leads"],
     properties: {
       leads: {
         type: "array",
-        items: {
-          type: "object",
-          required: ["company"],
-          properties: {
-            company: { type: "string" },
-            website: NULLABLE_STRING,
-            industry: NULLABLE_STRING,
-            location: NULLABLE_STRING,
-            description: NULLABLE_STRING,
-            contact_name: NULLABLE_STRING,
-            contact_role: NULLABLE_STRING,
-            contact_email: NULLABLE_STRING,
-            connection_type: { enum: ["alum", "past_sponsor", "ecosystem", "none"] },
-            connection_note: NULLABLE_STRING,
-            sponsorship_type: { type: ["array", "null"], items: { type: "string" } },
-            fit_score: { type: ["number", "null"] },
-            why_fit: NULLABLE_STRING,
-            reasoning: NULLABLE_STRING,
-            source_index: { type: ["number", "null"] },
-          },
-        },
+        items: { type: "object", required: ["company"], properties: LEAD_PROPERTIES },
       },
     },
   },
@@ -293,34 +313,56 @@ Rules:
 - fit_score is 0-100. description is one tight sentence. why_fit is one or two sentences, concrete${mode === "sales" ? "" : ", and should name the specific Enactus SFU project this sponsor best aligns with (e.g. Nourish, Alara, Unify, SKYES, NextSpark, Renovo, SensMS, Second Savour)"}.
 - reasoning: 3 to 5 sentences about THIS company ONLY. Never mention, compare, or rank other candidates in it. Explain the concrete evidence from the research for the fit, the SFU/alumni/past-sponsor angle if any${mode === "sales" ? "" : ", which specific Enactus SFU project they should fund and why it matches them"}, how winnable the ask looks, and a suggested first ask.
 - contact_email only if visible in the text; otherwise null. source_index is the [n] you used.
+- website is the company's own domain, exactly as it appears in the research. Never a LinkedIn/Facebook/directory page, never a guess or an example, and never annotated — null if the research does not show one.
 ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student club, university club/association, or anything requiring Enactus to pay a membership/fee. Only real companies, businesses, or grant-making foundations."}`;
 
+  // chatJSON already normalises the known shape variance through `coerce`, so
+  // whatever comes back is the envelope or nothing.
   let parsed: { leads: RawLead[] } | null = null;
+  let structuringError = "";
   try {
-    const p = await chatJSON<{ leads: RawLead[] }>(
-      [
-        { role: "system", content: `${scoreSystem} Output only the JSON described, nothing else.` },
-        { role: "user", content: structureUser },
-      ],
-      { maxTokens: 2800, schema: LEADS_SCHEMA, coerce: coerceLeadsPayload }
-    );
-    parsed = coerceLeadsPayload(p);
-  } catch {
-    // fall through
+    parsed =
+      (await chatJSON<{ leads: RawLead[] } | null>(
+        [
+          { role: "system", content: `${scoreSystem} Output only the JSON described, nothing else.` },
+          { role: "user", content: structureUser },
+        ],
+        { maxTokens: 2800, schema: LEADS_SCHEMA, coerce: coerceLeadsPayload }
+      )) ?? null;
+  } catch (e) {
+    // Say what actually went wrong. A schema rejection, a rate limit and an
+    // unparseable body used to be indistinguishable to the person waiting.
+    structuringError = (e as Error).message;
   }
   if (!parsed) {
-    emit({ type: "error", message: "The model did not return usable results. Try again or rephrase." });
+    emit({
+      type: "error",
+      message: structuringError
+        ? `The model did not return usable results: ${structuringError}`
+        : "The model did not return usable results. Try again or rephrase.",
+    });
     return;
   }
 
   // One verifier for the whole run: each domain costs at most one DNS query.
-  const verifyEmail = createContactEmailVerifier();
+  // Every model-supplied detail is checked up front and concurrently, so a batch
+  // of leads on dead domains costs one timeout window rather than one each --
+  // this runs inside the same 60s serverless budget as the reasoning step.
+  const verify = createVerifiers();
+  const checked = await Promise.all(
+    (parsed.leads ?? []).map(async (raw) => {
+      const [contact, site] = await Promise.all([
+        raw.contact_email ? verify.email(raw.contact_email) : null,
+        raw.website ? verify.website(raw.website) : null,
+      ]);
+      return { raw, src: resolveSource(candidates, raw.source_index), contact, site };
+    })
+  );
+
   const finalized: Lead[] = [];
-  for (const raw of parsed.leads ?? []) {
-    const src = resolveSource(candidates, raw.source_index);
-    const website = websiteFor(raw.website, src);
-    const contact = raw.contact_email ? await verifyEmail(raw.contact_email) : null;
-    const lead = await persistLead(raw, { website, src, mode, userName, contact });
+  for (const { raw, src, contact, site } of checked) {
+    const { website, websiteStatus } = websiteFor(site, src);
+    const lead = await persistLead(raw, { website, websiteStatus, src, mode, userName, contact });
     finalized.push(lead);
     emit({ type: "lead", lead });
   }
@@ -343,12 +385,6 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
   emit({ type: "done", count: finalized.length, searchId });
 }
 
-// Platforms that host pages *about* a company rather than the company's own
-// site. A source on one of these is legitimate evidence, but its hostname is
-// never the company's website.
-const AGGREGATOR_HOST =
-  /(^|\.)(linkedin\.com|facebook\.com|instagram\.com|twitter\.com|x\.com|threads\.net|tiktok\.com|youtube\.com|medium\.com|substack\.com|crunchbase\.com|yelp\.[a-z.]+|tripadvisor\.[a-z.]+|bbb\.org|eventbrite\.[a-z.]+)$/i;
-
 // `source_index` is the model's claim about which candidate it used. Trust it
 // only when it actually indexes a candidate we researched: an out-of-range or
 // absent index used to silently attribute a lead to another company's page.
@@ -358,14 +394,40 @@ export function resolveSource(candidates: ExaResult[], sourceIndex: unknown): Ex
   return candidates[sourceIndex - 1];
 }
 
-// A company website is either the model's own claim or the source's hostname --
-// never an aggregator's hostname, which belongs to the platform, not the lead.
-export function websiteFor(claimed: string | null | undefined, src?: ExaResult): string | null {
-  if (claimed) return claimed;
+// A company website is either the model's own claim or the source's hostname,
+// and both routes into the field carry the same guard: never an aggregator's
+// hostname, which belongs to the platform rather than the lead, and never a
+// domain code could not resolve. A claim that fails is recorded as unverified
+// instead of being trusted or thrown away -- the lead is always kept, because
+// the company may still be worth pursuing.
+export function websiteFor(
+  claimed: WebsiteCheck | null,
+  src?: ExaResult
+): { website: string | null; websiteStatus: string | null } {
+  const fromSource = sourceWebsite(src);
+  if (!claimed) return { website: fromSource, websiteStatus: null };
+  if (claimed.ok) return { website: claimed.url, websiteStatus: null };
+  return { website: fromSource, websiteStatus: unverifiedWebsiteNote(claimed) };
+}
+
+// The search engine actually returned this URL, so its hostname is evidence
+// rather than a model claim -- but it is still only the company's own site when
+// it is not a platform that hosts pages about companies.
+function sourceWebsite(src?: ExaResult): string | null {
   if (!src) return null;
   const host = domainOf(src.url);
-  if (!host || AGGREGATOR_HOST.test(host)) return null;
+  if (!host || isAggregatorHost(host)) return null;
   return `https://${host}`;
+}
+
+function unverifiedWebsiteNote(check: Exclude<WebsiteCheck, { ok: true }>): string {
+  const why =
+    check.reason === "format"
+      ? "not a usable web address"
+      : check.reason === "aggregator"
+        ? "a social or directory page, not the company's own site"
+        : "domain does not resolve";
+  return `unverified website (${why}): ${check.url}`;
 }
 
 // The structuring model returns `{"leads":[...]}` most of the time and a bare
@@ -410,19 +472,22 @@ async function persistLead(
   raw: RawLead,
   ctx: {
     website: string | null;
+    websiteStatus: string | null;
     src?: ExaResult;
     mode: Mode;
     userName: string;
     contact: EmailCheck | null;
   }
 ): Promise<Lead> {
-  const conn = (["alum", "past_sponsor", "ecosystem", "none"].includes(raw.connection_type ?? "")
-    ? raw.connection_type
-    : "none") as ConnectionType;
+  // An unrecognised connection_type costs this field and nothing else.
+  const conn = (CONNECTION_TYPES as string[]).includes(raw.connection_type ?? "")
+    ? (raw.connection_type as ConnectionType)
+    : "none";
 
   const row = {
     company: raw.company || "Unknown",
     website: ctx.website,
+    website_status: ctx.websiteStatus,
     industry: raw.industry ?? null,
     description: raw.description ?? null,
     contact_name: raw.contact_name ?? null,

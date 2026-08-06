@@ -7,6 +7,7 @@ const stub = vi.hoisted(() => ({
   exaSearch: vi.fn(),
 }));
 
+vi.mock("node:dns", async () => (await import("./helpers/dns")).dnsModule());
 vi.mock("@/lib/llm", async (orig) => ({
   ...(await orig<typeof import("@/lib/llm")>()),
   chatJSON: stub.chatJSON,

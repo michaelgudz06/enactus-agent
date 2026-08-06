@@ -62,7 +62,16 @@ export async function chatText(
 
 export interface JsonSchemaSpec {
   name: string;
+  /** The complete strict schema the provider is asked to honour. */
   schema: Record<string, unknown>;
+  /**
+   * The schema the response is checked against locally, when it must be more
+   * lenient than the one sent. Strict structured output requires every property
+   * to be listed in `required`; enforcing that locally would let one omitted
+   * optional field discard an entire batch, so the two are allowed to differ.
+   * Defaults to `schema`.
+   */
+  validate?: Record<string, unknown>;
 }
 
 // Non-streaming JSON completion (used for planning + scoring synthesis when we
@@ -119,7 +128,7 @@ export async function chatJSON<T = unknown>(
   const content: string = data?.choices?.[0]?.message?.content ?? "";
   const parsed = extractJSON<unknown>(content);
   const shaped = opts.coerce ? opts.coerce(parsed) : parsed;
-  if (opts.schema) validateAgainstSchema(shaped, opts.schema.schema, opts.schema.name);
+  if (opts.schema) validateAgainstSchema(shaped, opts.schema.validate ?? opts.schema.schema, opts.schema.name);
   return shaped as T;
 }
 

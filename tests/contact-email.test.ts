@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, afterEach } from "vitest";
-import { createContactEmailVerifier } from "@/lib/contact";
+import { createContactEmailVerifier, createVerifiers } from "@/lib/contact";
 
 const deliverable = new Set(["renaissancecoffeesfu.com", "gabiandjules.com"]);
 const resolver = async (domain: string) => deliverable.has(domain);
@@ -96,5 +96,76 @@ describe("contact email verification", () => {
       email: "hello@renaissancecoffeesfu.com",
       reason: "domain",
     });
+  });
+});
+
+describe("company website verification", () => {
+  test("accepts a website whose domain resolves", async () => {
+    const { website } = createVerifiers({ resolve: resolver });
+
+    expect(await website("https://renaissancecoffeesfu.com/")).toEqual({
+      ok: true,
+      url: "https://renaissancecoffeesfu.com/",
+    });
+  });
+
+  test("completes a bare domain into a URL", async () => {
+    const { website } = createVerifiers({ resolve: resolver });
+
+    expect(await website("gabiandjules.com")).toEqual({ ok: true, url: "https://gabiandjules.com/" });
+  });
+
+  test("rejects a domain that does not resolve", async () => {
+    const { website } = createVerifiers({ resolve: resolver });
+
+    expect(await website("https://momentenergy.co")).toEqual({
+      ok: false,
+      url: "https://momentenergy.co",
+      reason: "domain",
+    });
+  });
+
+  test("rejects an aggregator or social host without spending a lookup", async () => {
+    const resolve = vi.fn(resolver);
+    const { website } = createVerifiers({ resolve });
+
+    expect(await website("https://www.linkedin.com/company/bakd")).toEqual({
+      ok: false,
+      url: "https://www.linkedin.com/company/bakd",
+      reason: "aggregator",
+    });
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  test("rejects a hedged or narrated answer without spending a lookup", async () => {
+    const resolve = vi.fn(resolver);
+    const { website } = createVerifiers({ resolve });
+
+    const result = await website("https://renaissancecoffee.ca/ (example website)");
+
+    expect(result).toEqual({
+      ok: false,
+      url: "https://renaissancecoffee.ca/ (example website)",
+      reason: "format",
+    });
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  test("rejects a non-web scheme and an empty value", async () => {
+    const { website } = createVerifiers({ resolve: resolver });
+
+    expect((await website("javascript:alert(1)")).ok).toBe(false);
+    expect((await website("their storefront")).ok).toBe(false);
+    expect((await website("")).ok).toBe(false);
+    expect((await website(null)).ok).toBe(false);
+  });
+
+  test("shares one lookup between an address and a website on the same domain", async () => {
+    const resolve = vi.fn(resolver);
+    const { email, website } = createVerifiers({ resolve });
+
+    await Promise.all([email("hello@gabiandjules.com"), website("https://gabiandjules.com/about")]);
+
+    expect(resolve).toHaveBeenCalledTimes(1);
   });
 });

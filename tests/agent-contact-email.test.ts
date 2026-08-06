@@ -70,8 +70,10 @@ describe("contact email persistence", () => {
     expect(out.leads[0].contact_email_status).toMatch(/unverified/i);
   });
 
+  // These three assert the exact lookups an email costs, so their leads claim no
+  // website: a website claim is verified through the same shared resolver.
   test("keeps the lead but not the address when the format is wrong", async () => {
-    const out = await runWithLeads([rawLead({ contact_email: "contact page on their website" })]);
+    const out = await runWithLeads([rawLead({ contact_email: "contact page on their website", website: null })]);
 
     expect(out.leads).toHaveLength(1);
     expect(out.leads[0].contact_email).toBeNull();
@@ -80,7 +82,7 @@ describe("contact email persistence", () => {
   });
 
   test("leaves a lead with no address alone and spends no lookup", async () => {
-    const out = await runWithLeads([rawLead({ contact_email: null })]);
+    const out = await runWithLeads([rawLead({ contact_email: null, website: null })]);
 
     expect(out.leads[0].contact_email).toBeNull();
     expect(out.leads[0].contact_email_status).toBeNull();
@@ -89,8 +91,8 @@ describe("contact email persistence", () => {
 
   test("looks a repeated domain up only once across a run", async () => {
     await runWithLeads([
-      rawLead({ company: "A", contact_email: "a@gabiandjules.com", source_index: 2 }),
-      rawLead({ company: "B", contact_email: "b@gabiandjules.com", source_index: 2 }),
+      rawLead({ company: "A", contact_email: "a@gabiandjules.com", source_index: 2, website: null }),
+      rawLead({ company: "B", contact_email: "b@gabiandjules.com", source_index: 2, website: null }),
     ]);
 
     expect(stub.mxLookups).toEqual(["gabiandjules.com"]);
