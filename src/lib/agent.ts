@@ -630,16 +630,6 @@ function stringList(value: unknown, field: string, defects: ValueDefect[]): stri
   return kept;
 }
 
-/**
- * Checks each lead on its own, field by field.
- *
- * One bad field costs that field and nothing else. A wrong type with a single
- * possible reading is recovered; anything else is removed so persistLead's
- * existing normalisation supplies the default. Either way the model's slip is
- * reported rather than swallowed. A record is dropped only when it is genuinely
- * unusable -- no company name to put on a card. A defect in one lead never
- * touches another lead in the same response.
- */
 // The name is what decides whether this record can be put on a card at all, so
 // it is read on the same single-reading rule as every field behind it: a lone
 // name in a list of one is that name. A name with no single reading leaves the
@@ -661,6 +651,17 @@ function readCompany(raw: Record<string, unknown>, defects: ValueDefect[]): stri
   return recovered.value.trim();
 }
 
+/**
+ * Checks each lead on its own, field by field, through the shared mechanism in
+ * `src/lib/review.ts`.
+ *
+ * One bad field costs that field and nothing else. A wrong type with a single
+ * possible reading is recovered; anything else is removed so persistLead's
+ * existing normalisation supplies the default. Either way the model's slip is
+ * reported rather than swallowed. A record is dropped only when it is genuinely
+ * unusable -- no company name to put on a card. A defect in one lead never
+ * touches another lead in the same response.
+ */
 function reviewLeads(entries: unknown[], candidateCount: number): { leads: RawLead[]; defects: ValueDefect[] } {
   const leads: RawLead[] = [];
   const defects: ValueDefect[] = [];
