@@ -33,7 +33,12 @@ geography:
   # aliases. A second, shorter copy in this file used to gate the G_GEO block, so businesses in
   # Anmore, Belcarra, Bowen Island, Lions Bay, Tsawwassen First Nation and Electoral Area A were
   # killed as `out_of_area`. Add a jurisdiction to the CSV, never here.
-  postal_prefixes: [V3, V4, V5, V6, V7]
+  #
+  # THE METRO POSTAL PREFIXES ARE NOT HERE EITHER, for the same reason: they decide MEMBERSHIP,
+  # not weight. They live with the alias map in src/lib/qualification-lists.ts, which is also
+  # what lets the disqualifier filter — which deliberately never reads this file — and the
+  # scorer reach the same verdict for the same address.
+  #
   # Points awarded by the `geography` term of fit_score.
   bands:
     core: 20

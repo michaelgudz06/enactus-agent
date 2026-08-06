@@ -96,7 +96,6 @@ export interface IcpConfig {
      * config/exclusions/metro-vancouver.csv, the maintained list, via `geographyBand()`.
      */
     core: string[];
-    postal_prefixes: string[];
     bands: { core: number; metro: number; bc_outside_metro: number; elsewhere: number };
   };
   fit_score: {
@@ -225,7 +224,7 @@ export function validateIcpConfig(raw: unknown): string[] {
   if (typeof geography !== "object" || geography === null) {
     problems.push("geography is missing");
   } else {
-    for (const key of ["core", "postal_prefixes"] as const) {
+    for (const key of ["core"] as const) {
       const value = geography[key];
       if (!Array.isArray(value)) {
         problems.push(`geography.${key} is missing or not a list`);

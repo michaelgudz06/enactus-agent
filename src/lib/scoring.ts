@@ -150,6 +150,16 @@ export interface CompanyFacts {
   suppressed?: boolean;
   /** S8 / S10 / S14: published eligibility requires charity status the club does not have. */
   eligibility_requires_charity?: boolean;
+  /**
+   * The non-email route the filter decided this row takes, if any.
+   *
+   * G_LAWFUL_BASIS asks one question: MAY THIS LEAD BE EMAILED. Every `RequiredChannel` value is
+   * a route that is not email — a web form, a phone call, a walk-in, another organisation — and
+   * none of them is a commercial electronic message, so the CASL basis is NOT APPLICABLE rather
+   * than failing. Without this the P-08 walk-list route would close the email channel and then
+   * block the row anyway, one layer down.
+   */
+  required_channel?: string | null;
 }
 
 export interface SegmentResult {
@@ -427,7 +437,7 @@ export function evaluateGates(
   // The SAME verdict the filter's K-GEO rules read. `outside_bc` is the only contrary scope, and
   // it is decided before any municipality alias is trusted, so "Richmond, VA" cannot pass here
   // on the strength of a bare municipality name that also exists in British Columbia.
-  const geo = geographyScope(c, config, opts.lists);
+  const geo = geographyScope(c, opts.lists);
   const geoBand = geographyBand(c, config, opts.lists);
   if (seg === "S6") {
     out.push({
@@ -561,16 +571,25 @@ export function evaluateGates(
           : "killed: undeliverable",
   });
 
-  // G_LAWFUL_BASIS
-  out.push({
-    gate: "G_LAWFUL_BASIS",
-    verdict: c.lawful_basis_strength === "none" ? "fail" : "pass",
-    effect: "block",
-    message:
-      c.lawful_basis_strength === "none"
-        ? "no CASL basis is recorded, so this lead cannot enter CONTACTABLE"
-        : `CASL basis: ${c.lawful_basis_strength}`,
-  });
+  // G_LAWFUL_BASIS — the email gate, and ONLY the email gate.
+  if (c.required_channel) {
+    out.push({
+      gate: "G_LAWFUL_BASIS",
+      verdict: "not_applicable",
+      effect: "none",
+      message: `this lead is routed to ${c.required_channel}, which is not a commercial electronic message, so no CASL sending basis is required`,
+    });
+  } else {
+    out.push({
+      gate: "G_LAWFUL_BASIS",
+      verdict: c.lawful_basis_strength === "none" ? "fail" : "pass",
+      effect: "block",
+      message:
+        c.lawful_basis_strength === "none"
+          ? "no CASL basis is recorded, so this lead cannot enter CONTACTABLE"
+          : `CASL basis: ${c.lawful_basis_strength}`,
+    });
+  }
 
   // G_NO_SOLICIT
   out.push({
@@ -710,15 +729,10 @@ export type GeographyBand = "core" | "metro" | "bc_outside_metro" | "elsewhere";
  * for both this module and the filter, so a place cannot be in scope for one and out for the
  * other. This function only maps that one verdict onto a WEIGHT band.
  */
-export function geographyScope(
-  c: CompanyFacts,
-  config: IcpConfig,
-  lists: QualificationLists,
-): GeographyVerdict {
+export function geographyScope(c: CompanyFacts, lists: QualificationLists): GeographyVerdict {
   return resolveGeography(
     { municipality: c.municipality, region: c.region, postal_code: c.postal_code },
     lists,
-    { metro_postal_prefixes: config.geography.postal_prefixes },
   );
 }
 
@@ -727,7 +741,7 @@ export function geographyBand(
   config: IcpConfig,
   lists: QualificationLists,
 ): GeographyBand {
-  const geo = geographyScope(c, config, lists);
+  const geo = geographyScope(c, lists);
 
   if (geo.scope === "metro_vancouver") {
     const muni = normalizeMunicipality(c.municipality);
@@ -1311,7 +1325,12 @@ export function gateInputsFromFilterResult(
   result: FilterResult,
 ): Pick<
   CompanyFacts,
-  "is_excluded" | "exclusion_reason" | "suppressed" | "no_solicitation_found" | "deliverable_contact"
+  | "is_excluded"
+  | "exclusion_reason"
+  | "suppressed"
+  | "no_solicitation_found"
+  | "deliverable_contact"
+  | "required_channel"
 > &
   Partial<Pick<CompanyFacts, "lawful_basis_strength">> {
   const suppressed = result.kills.some(
@@ -1346,6 +1365,11 @@ export function gateInputsFromFilterResult(
     suppressed,
     no_solicitation_found: noSolicit,
     deliverable_contact: deliverabilityKilled ? false : deliverabilityUnknown ? undefined : true,
+    // A non-email route makes G_LAWFUL_BASIS NOT APPLICABLE rather than failed. P-08's forbid
+    // closes the EMAIL channel and sends the row to the walk list; treating that as "no basis"
+    // would block every cold role-account lead in the corpus, which is precisely the
+    // pipeline-emptying outcome §9.4's measurement exists to prevent.
+    required_channel: result.required_channel,
     // Every email-scoped terminal is a CASL finding that destroys the basis for sending: L-02
     // because s.10(9)(b) withdraws implied consent where the publication carries a
     // no-solicitation notice, L-04 because a third-party directory is not conspicuous

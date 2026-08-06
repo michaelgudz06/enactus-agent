@@ -197,7 +197,6 @@ describe("config/icp.yaml", () => {
       ["a negative band", { bands: { ...config.geography.bands, core: -5 } }, "negative"],
       ["an empty core list", { core: [] }, "geography.core is empty"],
       ["a missing core list", { core: undefined }, "geography.core is missing or not a list"],
-      ["a blank postal prefix", { postal_prefixes: ["V5", " "] }, "non-string or blank entry"],
     ])("rejects %s", (_label, over, expected) => {
       const problems = validateIcpConfig({ ...config, geography: { ...config.geography, ...over } });
       expect(problems.join(" ")).toContain(expected);
@@ -914,6 +913,30 @@ describe("filter and scoring never disagree about where a company is", () => {
     { municipality: "Saskatoon", region: "SK" },
     { municipality: "Nowheresville" },
     {},
+    // Postal codes: the field the two callers used to disagree about, because only one of them
+    // passed it. Yaletown is a real Vancouver neighbourhood absent from the alias set, so the
+    // prefix is the ONLY metro signal on the row.
+    { municipality: "Yaletown", region: "BC", postal: "V6B 1A1" },
+    { municipality: "Yaletown", postal: "V6B 1A1" },
+    { postal: "V6B 1A1" },
+    { postal: "V6B 1A1", region: "BC" },
+    { postal: "M5V 2T6", region: "ON" },
+    { postal: "M5V 2T6" },
+    { municipality: "Richmond", region: "VA", postal: "23219" },
+    { municipality: "Vancouver", region: "WA", postal: "98660" },
+    // Every BC spelling, including the one that used to kill an in-scope row.
+    { municipality: "Burnaby", region: "B.C." },
+    { municipality: "Burnaby", region: "B.C" },
+    { municipality: "Burnaby", region: "British Columbia, Canada" },
+    { municipality: "Burnaby", region: "Colombie-Britannique" },
+    { municipality: "Burnaby", region: "Colombie Britannique" },
+    // An unrecognised region: unparsed, therefore absent, therefore never a kill.
+    { municipality: "Burnaby", region: "Freedonia" },
+    { region: "Freedonia" },
+    // Each field independently null.
+    { municipality: "Burnaby", region: undefined, postal: undefined },
+    { municipality: undefined, region: "BC", postal: undefined },
+    { municipality: undefined, region: undefined, postal: "V5A 1S6" },
   ];
 
   it.each(ROWS.map((r) => [JSON.stringify(r), r] as const))(
@@ -926,7 +949,6 @@ describe("filter and scoring never disagree about where a company is", () => {
           region: row.region ?? null,
           postal_code: row.postal ?? null,
         }),
-        config,
         lists,
       ).scope;
 
@@ -969,6 +991,118 @@ describe("filter and scoring never disagree about where a company is", () => {
       }
     },
   );
+
+  it("never lets an unrecognised region drop a row in either module", () => {
+    for (const region of ["B.C.", "B.C", "British Columbia, Canada", "Freedonia", "Canada"]) {
+      const facts = company({
+        legal_name: "Crema Artisan Bakers",
+        municipality: "Burnaby",
+        region,
+        has_consumer_storefront: true,
+        lawful_basis_strength: "express",
+      });
+      expect(scoreCompany(facts, config, { lists, now: NOW }).blocking_gates, region).not.toContain(
+        "G_GEO",
+      );
+      expect(
+        runFilter(
+          { legal_name: "Crema Artisan Bakers", address_municipality: "Burnaby", address_region: region },
+          lists,
+          { now: NOW },
+        ).kills,
+        region,
+      ).toHaveLength(0);
+    }
+  });
+});
+
+// ===========================================================================
+// P-08's forbid closes the EMAIL channel. It must never empty the board: conspicuous publication
+// is the only basis a cold prospect can carry, and §9.4 measured 25 of 25 seeded addresses as
+// role accounts.
+// ===========================================================================
+
+describe("a role-account board does not empty", () => {
+  // The four conventional shapes §9.4 measured. `makegoodnow@` is deliberately NOT here: it is
+  // a branded programme mailbox with no conventional shape, and §3.5 records that missing one
+  // costs a -15 rather than producing a wrong kill. It is covered separately below.
+  const ROLE_LOCALS = ["info", "hello", "sponsorship", "mediarelations"];
+
+  function roleAccount(local: string) {
+    return {
+      legal_name: `${local} Co`,
+      registrable_domain: `${local}co.ca`,
+      email: `${local}@${local}co.ca`,
+      address_municipality: "Burnaby",
+      address_region: "BC",
+      address_country: "CA",
+      lawful_basis: "conspicuous_pub" as const,
+      lawful_basis_url: `https://${local}co.ca/contact`,
+    };
+  }
+
+  it.each(ROLE_LOCALS)("keeps %s@ on the board, routed to the walk list", (local) => {
+    const filtered = runFilter(roleAccount(local), lists, { now: NOW });
+    expect(filtered.kills).toHaveLength(0);
+    expect(filtered.email_channel_open).toBe(false);
+    expect(filtered.required_channel).toBe("in_person");
+    expect(filtered.penalties.find((p) => p.rule_id === "P-08")?.delta).toBe(-15);
+
+    const scored = scoreCompany(
+      company({
+        legal_name: `${local} Co`,
+        municipality: "Burnaby",
+        region: "BC",
+        relationship_tier: "cold",
+        has_consumer_storefront: true,
+        ...gateInputsFromFilterResult(filtered),
+      }),
+      config,
+      { lists, now: NOW },
+    );
+    expect(scored.blocked).toBe(false);
+    expect(scored.blocking_gates).not.toContain("G_LAWFUL_BASIS");
+    expect(scored.gates.find((g) => g.gate === "G_LAWFUL_BASIS")?.verdict).toBe("not_applicable");
+  });
+
+  it("does not block the whole corpus — the failure §9.4's measurement exists to prevent", () => {
+    const board = ROLE_LOCALS.map((local) => {
+      const filtered = runFilter(roleAccount(local), lists, { now: NOW });
+      return scoreCompany(
+        company({
+          legal_name: `${local} Co`,
+          municipality: "Burnaby",
+          region: "BC",
+          relationship_tier: "cold",
+          has_consumer_storefront: true,
+          ...gateInputsFromFilterResult(filtered),
+        }),
+        config,
+        { lists, now: NOW },
+      );
+    });
+    expect(board.filter((r) => !r.blocked)).toHaveLength(ROLE_LOCALS.length);
+  });
+
+  it("leaves an unrecognised branded mailbox emailable rather than guessing", () => {
+    const filtered = runFilter(roleAccount("makegoodnow"), lists, { now: NOW });
+    expect(filtered.kills).toHaveLength(0);
+    // Not detected as a role account, so P-08 does not fire at all — §3.5's stated safe
+    // direction to fail in.
+    expect(filtered.email_channel_open).toBe(true);
+    expect(filtered.penalties.map((p) => p.rule_id)).not.toContain("P-08");
+  });
+
+  it("still fails G_LAWFUL_BASIS when there is no basis AND no alternative route", () => {
+    const g = evaluateGates(
+      company({ legal_name: "X", lawful_basis_strength: "none" }),
+      "S2",
+      config,
+      { lists, now: NOW },
+    ).find((x) => x.gate === "G_LAWFUL_BASIS");
+    expect(g?.verdict).toBe("fail");
+    expect(g?.effect).toBe("block");
+  });
 });
 
 describe("the three scores", () => {
@@ -1542,7 +1676,12 @@ describe("gateInputsFromFilterResult", () => {
     const result = runFilter(
       {
         ...base,
-        email: "info@example.ca",
+        // A NAMED person, so L-04 is isolated: a role account would also trip P-08's forbid,
+        // which routes to the walk list and makes the CASL gate not applicable. Abbotsford
+        // instead of Burnaby so the row still carries a penalty, proving the penalty pass runs
+        // under an email-scoped terminal.
+        address_municipality: "Abbotsford",
+        email: "priya.patel@example.ca",
         lawful_basis: "conspicuous_pub",
         lawful_basis_url: "https://some-directory.example.org/listing/123",
       },

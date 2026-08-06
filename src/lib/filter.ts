@@ -93,13 +93,27 @@
 //      thin-web-presence local operators are precisely the population the ICP research ranks
 //      highest-converting.
 //
-//  A2. P-08's PAIRED CONSTRAINT IS A PREDICATE, NOT A SENTENCE. §4 specifies P-08 as
-//      "-15 AND forbid `lawful_basis = conspicuous_pub`". The forbid half is enforced by
-//      `p08RoleAccountCannotClaimConspicuousPub`, an email-scoped terminal that closes the email
-//      channel exactly as L-04 does, so `gateInputsFromFilterResult` reports
-//      `lawful_basis_strength: "none"` and G_LAWFUL_BASIS fails. A constraint described only in a
-//      rendered sentence is a comment, and this is the CASL surface where the club carries the
-//      burden of proof.
+//  A2. P-08's PAIRED CONSTRAINT CLOSES THE EMAIL CHANNEL AND ROUTES TO THE WALK LIST. It never
+//      blocks the lead. §4 specifies P-08 as "-15 AND forbid `lawful_basis = conspicuous_pub`",
+//      and a constraint described only in a rendered sentence is a comment — so
+//      `p08RoleAccountCannotClaimConspicuousPub` enforces it.
+//
+//      HOW it enforces it is the part the report had to settle, because the obvious reading
+//      empties the board. Conspicuous publication is the ONLY basis a COLD prospect can carry
+//      (the other three all require a prior relationship), and §9.4 measured 25 OF 25 seeded
+//      addresses as role accounts. So a forbid implemented as "no lawful basis" would fail
+//      G_LAWFUL_BASIS on essentially every cold lead in the corpus — the pipeline-emptying
+//      outcome §9.4 exists to prevent, and flatly against §3.5's "a penalty plus a constraint on
+//      the lawful basis, NEVER A KILL".
+//
+//      The ICP report answers it directly for exactly these segments (S2/S3/S4/S13): a generic
+//      `info@` is weak ground, and "this is an argument for the WALK LIST rather than the email
+//      list — an in-person ask is not a CEM at all". So the rule emits TWO outcomes: an
+//      email-scoped terminal that closes the email channel, and a CHANNEL routing the row to
+//      `in_person`. The account stays on the board, keeps its -15, and is never killed or
+//      blocked. `gateInputsFromFilterResult` carries the route to G_LAWFUL_BASIS, which reports
+//      NOT_APPLICABLE for any non-email route — otherwise the corpus-wide block simply moves one
+//      layer down into the scorer.
 //
 //  A3. §7.2 `LIST_national_flag` IS NOT §7.1 `LIST_national_partner`. §7.2 is headed "review, do
 //      not kill" with "Kill mode: none — `human_review` only". It therefore emits a FLAG and
@@ -112,8 +126,15 @@
 //      rock all name real places outside BC. The report never says which wins when a row records
 //      both, so: a recorded CONTRARY region is consulted FIRST, and the alias never overturns
 //      it. `resolveGeography` in qualification-lists.ts is the single implementation — this
-//      module and src/lib/scoring.ts both consume it and neither keeps its own copy, because
-//      two resolvers over the same data drifted in OPPOSITE directions within one review round.
+//      module and src/lib/scoring.ts both consume it, with the SAME full input set, because two
+//      resolvers over the same data drifted in OPPOSITE directions within one review round, and
+//      then two CALLERS of one resolver drifted again by passing it different fields.
+//
+//      AND UNPARSEABLE IS NOT CONTRARY. `RegionVerdict` is `bc | contrary | unparsed`, and only
+//      `contrary` may overrule an alias or kill. Reading "not one of the BC spellings I know" as
+//      "somewhere else" terminalled a Burnaby bakery whose region was recorded as "B.C.". A
+//      longer spelling list is not the fix — there is always another spelling — so the guarantee
+//      is structural: `unparsed` is treated exactly as absent, which is §2.3 as a type.
 //
 //  A5. AN EFFECT A RULE DESCRIBES IS PART OF ITS RETURN TYPE. Four rules in a row were found
 //      narrating an outcome nothing emitted (K-REL-08's sibling −40, L-04's email channel,
@@ -130,6 +151,7 @@ import {
   type GeographyVerdict,
   type KeyedList,
   type QualificationLists,
+  classifyRegion,
   resolveGeography,
   isDomainOrSubdomainOf,
   lookupDomainOrSubdomain,
@@ -1323,7 +1345,11 @@ export function kChan02IneligibleRequiresCharity(a: Account, now: Date): Predica
  */
 function geographyOf(a: Account, lists: QualificationLists): GeographyVerdict {
   return resolveGeography(
-    { municipality: a.address_municipality, region: a.address_region },
+    {
+      municipality: a.address_municipality,
+      region: a.address_region,
+      postal_code: a.postal_code,
+    },
     lists,
   );
 }
@@ -1345,8 +1371,9 @@ export function isInMetroVancouver(
   municipality: string | null | undefined,
   lists: QualificationLists,
   region?: string | null,
+  postal_code?: string | null,
 ): boolean {
-  return resolveGeography({ municipality, region }, lists).scope === "metro_vancouver";
+  return resolveGeography({ municipality, region, postal_code }, lists).scope === "metro_vancouver";
 }
 
 /**
@@ -1438,18 +1465,25 @@ export function kGeo02OutsideBc(
   lists: QualificationLists,
   now: Date,
 ): PredicateResult {
-  if (!a.address_region) {
+  const geo = geographyOf(a, lists);
+  if (geo.region === "bc") return pass("K-GEO-02");
+  // UNPARSED IS NOT CONTRARY (§2.3). An absent region and a region nobody recognised are the
+  // same evidential state, and neither may kill: "B.C." is simply the first spelling that
+  // surfaced, and there will be another one.
+  if (geo.region === "unparsed") {
     return cannotEvaluate(
       "K-GEO-02",
       ["address_region"],
-      "no province or state is recorded; a missing region is never a kill (§2.3)",
+      a.address_region
+        ? `the recorded region "${a.address_region}" matches no known province or state, so it is not evidence this account is outside BC; an unrecognised region is never a kill (§2.3)`
+        : "no province or state is recorded; a missing region is never a kill (§2.3)",
     );
   }
-  if (geographyOf(a, lists).region_is_bc === true) return pass("K-GEO-02");
   if (a.observations?.bc_branch_confirmed) return pass("K-GEO-02");
   if (localityBasis(a, lists).in_scope) return pass("K-GEO-02");
 
-  const where = a.address_municipality ? `${a.address_municipality}, ${a.address_region}` : a.address_region;
+  const region = a.address_region ?? "";
+  const where = a.address_municipality ? `${a.address_municipality}, ${region}` : region;
   const evidence = a.website_url ?? domainKey(a);
   return {
     kind: "terminal",
@@ -1482,7 +1516,7 @@ export function kGeo03OutsideMetroVancouver(
   lists: QualificationLists,
   now: Date,
 ): PredicateResult {
-  if (resolveGeography({ region: a.address_region }, lists).region_is_bc !== true) return pass("K-GEO-03");
+  if (classifyRegion(a.address_region) !== "bc") return pass("K-GEO-03");
   if (!a.address_municipality) {
     return cannotEvaluate(
       "K-GEO-03",
@@ -1490,7 +1524,7 @@ export function kGeo03OutsideMetroVancouver(
       "the account is in BC but no municipality is recorded, so Metro Vancouver membership cannot be resolved",
     );
   }
-  if (isInMetroVancouver(a.address_municipality, lists, a.address_region)) return pass("K-GEO-03");
+  if (geographyOf(a, lists).scope === "metro_vancouver") return pass("K-GEO-03");
 
   return {
     kind: "penalty",
@@ -2382,32 +2416,55 @@ export function l04NotConspicuouslyPublished(a: Account, now: Date): PredicateRe
  * The remedy for a human is to record a basis this address can actually carry, so the duration
  * is `until_human_clears` rather than `forever`.
  */
-export function p08RoleAccountCannotClaimConspicuousPub(a: Account, now: Date): PredicateResult {
-  if (a.lawful_basis !== "conspicuous_pub") return pass("P-08-CONSTRAINT");
-  if (!isRoleAccount(a)) return pass("P-08-CONSTRAINT");
+export function p08RoleAccountCannotClaimConspicuousPub(a: Account, now: Date): PredicateResult[] {
+  if (a.lawful_basis !== "conspicuous_pub") return [pass("P-08-CONSTRAINT")];
+  if (!isRoleAccount(a)) return [pass("P-08-CONSTRAINT")];
   const local = emailLocal(a);
   const evidence = a.lawful_basis_url ?? "lawful_basis";
-  return {
-    kind: "terminal",
-    scope: "email",
-    rule_id: "P-08-CONSTRAINT",
-    reason: "role_account_cannot_claim_conspicuous_pub",
-    detail: `${local}@ with lawful_basis=conspicuous_pub`,
-    evidence_url: evidence,
-    duration: { kind: "until_human_clears" },
-    message: sentence("role_account_cannot_claim_conspicuous_pub", {
-      account: a,
+  return [
+    {
+      kind: "terminal",
+      scope: "email",
       rule_id: "P-08-CONSTRAINT",
-      verb: "rejected for email",
-      because:
-        `${local}@ is a shared role mailbox and the basis claimed for it is conspicuous ` +
-        `publication. CASL requires the message to be relevant to the recipient's role, which ` +
-        `cannot be established for a mailbox that names no person, so §4 forbids this basis for ` +
-        `this address. The account is untouched and stays reachable by form, phone or a human`,
+      reason: "role_account_cannot_claim_conspicuous_pub",
+      detail: `${local}@ with lawful_basis=conspicuous_pub`,
       evidence_url: evidence,
-      now,
-    }),
-  };
+      duration: { kind: "until_human_clears" },
+      message: sentence("role_account_cannot_claim_conspicuous_pub", {
+        account: a,
+        rule_id: "P-08-CONSTRAINT",
+        verb: "rejected for email",
+        because:
+          `${local}@ is a shared role mailbox and the basis claimed for it is conspicuous ` +
+          `publication. CASL requires the message to be relevant to the recipient's role, which ` +
+          `cannot be established for a mailbox that names no person, so §4 forbids this basis ` +
+          `for this address. The EMAIL is barred, not the account`,
+        evidence_url: evidence,
+        now,
+      }),
+    },
+    {
+      kind: "channel",
+      rule_id: "P-08-CONSTRAINT",
+      reason: "role_account_belongs_on_the_walk_list",
+      detail: `${local}@`,
+      evidence_url: evidence,
+      required_channel: "in_person",
+      message: sentence("role_account_belongs_on_the_walk_list", {
+        account: a,
+        rule_id: "P-08-CONSTRAINT",
+        verb: "routed to the walk list",
+        because:
+          `the only CASL basis a cold prospect can carry is conspicuous publication, and that ` +
+          `basis is unsound for the shared mailbox ${local}@. The ICP report's own answer for ` +
+          `these segments is the walk list rather than the email list: an in-person ask is not ` +
+          `a commercial electronic message at all, and it is the highest-converting motion the ` +
+          `club has. The row stays on the board and keeps its -15`,
+        evidence_url: evidence,
+        now,
+      }),
+    },
+  ];
 }
 
 /** L-05 · No lawful basis recorded → HOLD. Re-qualify, do not drop. */
@@ -2679,6 +2736,21 @@ export interface FranchiseOptions {
   application_path_found?: string | null;
 }
 
+/**
+ * The channel K-CHAN-01 identified, if any.
+ *
+ * Asking K-CHAN-01 itself rather than re-reading `application_path_found` is the point: K-CHAN-01
+ * ALSO recognises a published channel from `source_page_text` via APPLICATION_GATE_RE. Reading
+ * only the probed path let a row carry a published web_form channel and, beside it, a flag
+ * saying no channel was found.
+ */
+function publishedChannel(a: Account, now: Date, opts: FranchiseOptions): ChannelResult | null {
+  const r = kChan01ApplicationChannel(a, now, {
+    application_path_found: opts.application_path_found,
+  });
+  return r.kind === "channel" ? r : null;
+}
+
 export function franchiseOrBranchCarveOut(a: Account, opts: FranchiseOptions = {}): FranchiseReport {
   const o = a.observations ?? {};
   const now = opts.now ?? new Date();
@@ -2727,7 +2799,7 @@ export function franchiseOrBranchCarveOut(a: Account, opts: FranchiseOptions = {
       status: "HEAD_OFFICE",
       signals: [...positive, ...negative],
       message: `Head office holds the decision (${negative.join(", ")}). The ask belongs to whatever channel head office publishes, so the row is REROUTED, not dropped.`,
-      reroute: headOfficeReroute(a, negative, opts.application_path_found ?? null, now),
+      reroute: headOfficeReroute(a, negative, publishedChannel(a, now, opts), now),
     };
   }
 
@@ -2766,27 +2838,27 @@ export interface PenaltyContext {
 function headOfficeReroute(
   a: Account,
   negative: string[],
-  applicationPath: string | null,
+  published: ChannelResult | null,
   now: Date,
 ): ChannelResult | FlagResult {
   const detail = negative.join(", ");
-  if (applicationPath) {
+  if (published) {
     return {
       kind: "channel",
       rule_id: "FRANCHISE-HEAD-OFFICE",
       reason: "head_office_holds_the_decision",
-      detail: `${detail}; head office publishes ${applicationPath}`,
-      evidence_url: applicationPath,
-      required_channel: "web_form",
+      detail: `${detail}; head office publishes ${published.detail}`,
+      evidence_url: published.evidence_url,
+      required_channel: published.required_channel,
       message: sentence("head_office_holds_the_decision", {
         account: a,
         rule_id: "FRANCHISE-HEAD-OFFICE",
         verb: "rerouted to the channel head office publishes",
         because:
           `§5 signal(s) ${detail} show the decision sits with head office rather than this ` +
-          `location, and head office publishes ${applicationPath}. The row is rerouted, not ` +
-          `dropped: emailing the local branch asks someone who cannot say yes`,
-        evidence_url: applicationPath,
+          `location, and K-CHAN-01 found a published channel (${published.detail}). The row is ` +
+          `rerouted, not dropped: emailing the local branch asks someone who cannot say yes`,
+        evidence_url: published.evidence_url,
         now,
       }),
     };
@@ -2837,8 +2909,8 @@ export function franchiseReroute(report: FranchiseReport): PredicateResult {
 
 /** P-04 clause 1: the account's registered head office is somewhere other than BC. */
 function headOfficeOutsideBc(a: Account, lists: QualificationLists): boolean {
-  const regionIsBc = resolveGeography({ region: a.address_region }, lists).region_is_bc;
-  if (regionIsBc !== null) return !regionIsBc;
+  const region = classifyRegion(a.address_region);
+  if (region !== "unparsed") return region === "contrary";
   if (a.address_country) return a.address_country.trim().toUpperCase() !== "CA";
   return false;
 }
@@ -3124,6 +3196,11 @@ export interface FilterOptions {
   current_cycle?: string | null;
   /** A path found by the K-CHAN-01 HTTP HEAD probe, e.g. "/donation-requests". */
   application_path_found?: string | null;
+  /**
+   * §5's verdict, computed once by `runFilter` and threaded in so the report on `FilterResult`
+   * and the reroute the sequence emits are the SAME object.
+   */
+  franchise?: FranchiseReport;
 }
 
 export interface OverriddenKill {
@@ -3208,10 +3285,12 @@ export function killPredicateSequence(
   opts: FilterOptions = {},
 ): (() => PredicateResult | PredicateResult[])[] {
   const now = opts.now ?? new Date();
-  const franchise = franchiseOrBranchCarveOut(a, {
-    now,
-    application_path_found: opts.application_path_found,
-  });
+  // Computed ONCE per run and threaded in. Two call sites over the same inputs are value-equal
+  // only until one of them is passed a different clock, and then the verdict reported on
+  // `FilterResult.franchise` and the reroute actually emitted disagree with nothing to catch it.
+  const franchise =
+    opts.franchise ??
+    franchiseOrBranchCarveOut(a, { now, application_path_found: opts.application_path_found });
 
   return [
     // 1. suppression
@@ -3341,7 +3420,7 @@ export function runFilter(
 
   // §2.4: cheapest and most certain first, short-circuiting on the first TERMINAL. The sequence
   // is lazy, so nothing after the decision is evaluated at all.
-  outer: for (const run of killPredicateSequence(account, lists, { ...opts, now })) {
+  outer: for (const run of killPredicateSequence(account, lists, { ...opts, now, franchise })) {
     const produced = run();
     for (const r of Array.isArray(produced) ? produced : [produced]) {
       evaluated.push(r.rule_id);
@@ -3380,8 +3459,10 @@ export function runFilter(
         }
         case "channel":
           // A channel is not a kill, so the never-kill allowlist has nothing to suppress: the
-          // routing information is exactly what keeps the row usable.
-          channels.push(r);
+          // routing information is exactly what keeps the row usable. Two rules reaching the
+          // same route from the same evidence (K-CHAN-01 and §5's head-office reroute) is one
+          // instruction, not two, so the route is recorded once.
+          if (!channels.some((c) => c.required_channel === r.required_channel)) channels.push(r);
           break;
         case "penalty":
           inlinePenalties.push(r);

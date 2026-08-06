@@ -444,6 +444,56 @@ describe("K-GEO · geography", () => {
     expect(r.detail).toBe("Saskatoon, SK");
   });
 
+  // UNPARSEABLE IS NOT CONTRARY (§2.3). A region spelling nobody recognised is the same
+  // evidential state as no region at all, and neither may drop the row. "B.C." was simply the
+  // first spelling to surface; the guarantee has to hold for the next one too.
+  describe("an unrecognised region is treated as absent, never as contrary", () => {
+    const burnaby = {
+      legal_name: "Crema Artisan Bakers",
+      registrable_domain: "crema.ca",
+      address_municipality: "Burnaby",
+      address_country: "CA",
+    };
+
+    it.each([
+      "BC",
+      "bc",
+      "B.C.",
+      "B.C",
+      "British Columbia",
+      "British Columbia, Canada",
+      "Colombie-Britannique",
+      "Colombie Britannique",
+      "Freedonia",
+      "Canada",
+    ])("does not terminal a Burnaby account recorded as %j", (region) => {
+      const r = kGeo02OutsideBc(account({ ...burnaby, address_region: region }), lists, NOW);
+      expect(r.kind).not.toBe("terminal");
+      expect(run(account({ ...burnaby, address_region: region })).kills).toHaveLength(0);
+    });
+
+    it.each(["VA", "Virginia", "ON", "Ontario", "WA", "Washington", "SK"])(
+      "still terminals on the genuinely contrary region %j",
+      (region) => {
+        const r = kGeo02OutsideBc(
+          account({ legal_name: "Acme", address_municipality: "Springfield", address_region: region }),
+          lists,
+          NOW,
+        );
+        expect(r.kind).toBe("terminal");
+        if (r.kind !== "terminal") return;
+        expect(r.reason).toBe("outside_bc");
+      },
+    );
+
+    it("cannot evaluate rather than passing silently when the region is unrecognised", () => {
+      const r = kGeo02OutsideBc(account({ ...burnaby, address_region: "Freedonia" }), lists, NOW);
+      expect(r.kind).toBe("cannot_evaluate");
+      if (r.kind !== "cannot_evaluate") return;
+      expect(r.missing_fields).toContain("address_region");
+    });
+  });
+
   it("never kills on a MISSING region — absence of evidence is not evidence", () => {
     const r = kGeo02OutsideBc(account({ legal_name: "Unknown Co" }), lists, NOW);
     expect(r.kind).toBe("cannot_evaluate");
@@ -950,13 +1000,26 @@ describe("P-08's paired hard constraint · a role account may not claim conspicu
   });
 
   it("rejects the combination for email, leaving the account and the address intact", () => {
-    const r = p08RoleAccountCannotClaimConspicuousPub(roleClaimingConspicuousPub, NOW);
-    expect(r.kind).toBe("terminal");
-    if (r.kind !== "terminal") return;
-    expect(r.reason).toBe("role_account_cannot_claim_conspicuous_pub");
-    expect(r.scope).toBe("email");
-    expect(r.duration.kind).toBe("until_human_clears");
-    expect(isReversible(r)).toBe(true);
+    const [terminal] = p08RoleAccountCannotClaimConspicuousPub(roleClaimingConspicuousPub, NOW);
+    expect(terminal.kind).toBe("terminal");
+    if (terminal.kind !== "terminal") return;
+    expect(terminal.reason).toBe("role_account_cannot_claim_conspicuous_pub");
+    expect(terminal.scope).toBe("email");
+    expect(terminal.duration.kind).toBe("until_human_clears");
+    expect(isReversible(terminal)).toBe(true);
+  });
+
+  // §3.5: the treatment for a role account is a penalty plus a constraint, NEVER a kill. The ICP
+  // report names the alternative route for exactly these segments: the walk list, because an
+  // in-person ask is not a CEM at all.
+  it("routes the row to the walk list rather than leaving it with nowhere to go", () => {
+    const channel = p08RoleAccountCannotClaimConspicuousPub(roleClaimingConspicuousPub, NOW).find(
+      (r) => r.kind === "channel",
+    );
+    expect(channel).toBeDefined();
+    if (channel?.kind !== "channel") return;
+    expect(channel.required_channel).toBe("in_person");
+    expect(channel.reason).toBe("role_account_belongs_on_the_walk_list");
   });
 
   it.each([
@@ -964,9 +1027,11 @@ describe("P-08's paired hard constraint · a role account may not claim conspicu
     ["a role account on a different basis", { lawful_basis: "express" as const }],
     ["a role account with no basis recorded", { lawful_basis: null }],
   ])("does not fire for %s", (_label, over) => {
-    expect(
-      p08RoleAccountCannotClaimConspicuousPub({ ...roleClaimingConspicuousPub, ...over }, NOW).kind,
-    ).toBe("pass");
+    const out = p08RoleAccountCannotClaimConspicuousPub(
+      { ...roleClaimingConspicuousPub, ...over },
+      NOW,
+    );
+    expect(out.every((r) => r.kind === "pass")).toBe(true);
   });
 
   it("closes the email channel through runFilter without dropping the row", () => {
@@ -975,6 +1040,7 @@ describe("P-08's paired hard constraint · a role account may not claim conspicu
     expect(result.kills).toHaveLength(0);
     expect(result.email_channel_open).toBe(false);
     expect(result.field_terminals.map((t) => t.rule_id)).toContain("P-08-CONSTRAINT");
+    expect(result.required_channel).toBe("in_person");
     // The address survives: the SEND is barred, not the contact.
     expect(result.account.email).toBe("info@example.ca");
     // And the -15 half still lands, because both halves of P-08 fire together.
@@ -985,6 +1051,7 @@ describe("P-08's paired hard constraint · a role account may not claim conspicu
     const result = run({ ...roleClaimingConspicuousPub, lawful_basis: "express" });
     expect(result.email_channel_open).toBe(true);
     expect(result.field_terminals.map((t) => t.rule_id)).not.toContain("P-08-CONSTRAINT");
+    expect(result.required_channel).toBeNull();
   });
 });
 
@@ -1641,10 +1708,33 @@ describe("§5 · franchise or branch — test the LOCATION, not the brand", () =
     it("routes to web_form through runFilter when head office publishes a path", () => {
       const result = run(account(headOfficeOnly), { application_path_found: "/donation-requests" });
       expect(result.decision).toBe("channel");
-      expect(
-        result.channels.filter((c) => c.rule_id === "FRANCHISE-HEAD-OFFICE").map((c) => c.required_channel),
-      ).toEqual(["web_form"]);
+      expect(result.required_channel).toBe("web_form");
       expect(result.kills).toHaveLength(0);
+      // §5 reaches the same route from the same evidence as K-CHAN-01, so the row carries the
+      // instruction once rather than twice.
+      expect(result.channels.filter((c) => c.required_channel === "web_form")).toHaveLength(1);
+      // The head-office finding itself is still on the row.
+      expect(result.franchise.status).toBe("HEAD_OFFICE");
+    });
+
+    // K-CHAN-01 recognises a published channel from the PAGE TEXT as well as from a probed path.
+    // Reading only the probed path left a row carrying a web_form channel beside a flag saying
+    // no channel existed.
+    it("routes to web_form on a page-text hit with no probed path", () => {
+      const result = run(
+        account({
+          ...headOfficeOnly,
+          source_page_text: "All donation requests must be submitted through our online form.",
+        }),
+      );
+      expect(result.decision).toBe("channel");
+      expect(result.required_channel).toBe("web_form");
+      expect(result.flags.map((f) => f.rule_id)).not.toContain("FRANCHISE-HEAD-OFFICE");
+    });
+
+    it("records the route once when K-CHAN-01 and §5 reach it from the same evidence", () => {
+      const result = run(account(headOfficeOnly), { application_path_found: "/donation-requests" });
+      expect(result.channels.filter((c) => c.required_channel === "web_form")).toHaveLength(1);
     });
 
     it("flags for human review when head office publishes NO channel, rather than inventing one", () => {
