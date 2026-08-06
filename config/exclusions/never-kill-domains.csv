@@ -1,0 +1,4 @@
+kind,value,entity,reason,added_by,added_at,source_url
+domain,varshneycapital.com,Varshney Capital Corp,Hosts BOTH Varshney Capital Corp (a current Enactus SFU partner) AND the Varshney Family Foundation (a national Enactus Canada donor at /vff). A domain-level exclusion would destroy a converted relationship. The foundation is excluded by NAME only,enactus-disqualifiers/report.md 7.7,2026-08-06,https://varshneycapital.com/
+domain,modoyogavancouver.com,Modo Yoga Vancouver,Converted Enactus SFU partner. Own registrable domain with its own Google Workspace MX - the franchise carve-out proof case,enactus-disqualifiers/report.md 9.6,2026-08-06,https://modoyoga.com/
+domain,cactusclubcafe.com,Cactus Club Cafe,Past Enactus SFU partner. Publishes /donation-requests/ (HTTP 200) so it is a CHANNEL not a kill,enactus-disqualifiers/report.md 9.6,2026-08-06,https://www.cactusclubcafe.com/donation-requests/

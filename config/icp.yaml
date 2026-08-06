@@ -1,0 +1,426 @@
+# config/icp.yaml — Enactus SFU sponsor scoring
+#
+# THIS FILE IS THE BRAIN. src/lib/scoring.ts is only arithmetic over it.
+#
+# Every weight below is a STARTING ESTIMATE derived from the reasoning in
+# enactus-icp/report.md §5. None of them is a measured value. They are meant to be moved.
+# Change the numbers, not the code.
+#
+# Re-scoring the whole corpus after a change costs $0 and milliseconds, because no model is
+# involved anywhere in scoring. A new VP External can retune the ICP in September without a
+# developer.
+#
+# HARD RULE, enforced by loadIcpConfig() and by a test:
+#   the weights inside fit_score, affinity_score and access_score must EACH sum to 100.
+#
+# Owner: the role of VP / Director of External Relations. A role, never a person.
+
+# ---------------------------------------------------------------------------
+# Geography. Metro Vancouver = the 23 member jurisdictions of the Metro Vancouver
+# Regional District. The canonical list with aliases lives in
+# config/exclusions/metro-vancouver.csv; this section only names the weighting bands.
+# ---------------------------------------------------------------------------
+geography:
+  # The three places events actually happen: SFU Burnaby, SFU Harbour Centre, SFU Surrey.
+  core: [Burnaby, Vancouver, Surrey]
+  metro:
+    [
+      Richmond,
+      Coquitlam,
+      Burnaby,
+      New Westminster,
+      North Vancouver,
+      West Vancouver,
+      Delta,
+      Langley,
+      Port Moody,
+      Port Coquitlam,
+      Maple Ridge,
+      White Rock,
+      Pitt Meadows,
+    ]
+  postal_prefixes: [V3, V4, V5, V6, V7]
+  # Points awarded by the `geography` term of fit_score.
+  bands:
+    core: 20
+    metro: 12
+    bc_outside_metro: 4
+    elsewhere: 0
+
+# ---------------------------------------------------------------------------
+# The three scores. NEVER summed on the card — see report §6.1. Three different failures
+# produce the same low blended score and require three opposite actions.
+# ---------------------------------------------------------------------------
+
+fit_score: # "is this the right kind of organisation?"
+  segment_match: 40 # matched a segment predicate cleanly
+  size_band: 20 # inside the segment's IDEAL band, not just under the ceiling
+  geography: 20 # core 20 / metro 12 / BC-outside-metro 4 / elsewhere 0
+  industry_specificity: 10 # a named sub-vertical beats a generic category match
+  entity_signals: 10 # OrgBook ACT; entity_type SP/GP; age > 2 years
+
+affinity_score: # "why would THEY say yes to US?"
+  relationship_tier: 35
+  alumni_evidence: 30
+  project_values_match: 15 # HUMAN-CONFIRMED match to one of the 8 projects
+  local_proximity: 10 # within 2 km of a campus or a booked venue
+  giving_posture: 10 # a published donation-request / community / sponsorship page exists
+
+access_score: # "how cheaply can we reach someone who can say yes?"
+  named_approver: 30 # a real person, real title, on the segment's seniority allowlist
+  approver_collapse: 25 # the motive-feeler and the approver are the same person (SMB owner)
+  deliverable_contact: 20 # passed all deliverability gates
+  lawful_basis_strength: 15
+  channel_available: 10 # in-person walkable, or a published request form
+
+# Sub-scales for the graded terms above. Each value is the fraction of that term's weight
+# awarded, expressed as points out of the term's own maximum.
+scales:
+  relationship_tier:
+    active_partner: 35
+    lapsed_partner: 30
+    engaged_non_monetary: 22
+    prospected: 6
+    cold: 0
+  alumni_evidence:
+    enactus_alum_led: 30
+    sfu_alum_led: 16
+    sfu_ecosystem: 6
+    none: 0
+  project_values_match:
+    human_confirmed: 15
+    keyword_only: 5 # a keyword match between "sustainability" and "bioplastics" is not a reason
+    none: 0
+  lawful_basis_strength:
+    ebr_2y: 15
+    express: 15
+    conspicuous_pub_named_person: 10
+    role_inbox: 4
+    none: 0
+
+# ---------------------------------------------------------------------------
+# Trigger bonus. ADDITIVE, applied AFTER the three scores, and capped.
+# max_age_days is a GATE on the bonus, not a decay — an expired trigger parks the lead,
+# it never kills it.
+# ---------------------------------------------------------------------------
+trigger_bonus:
+  max_bonus: 25
+  max_age_days:
+    funding_round: 180 # S11 — recency is a gate, not a bonus
+    new_location: 365
+    job_posting: 60 # S7, S8 — a stale posting is not a trigger
+    press_award: 180
+    grant_window: 90 # S10, S14 — BEFORE the deadline, not after
+    club_national_win: 365 # expires 2027-05-07
+  values:
+    grant_window_open: 25
+    student_job_posting: 20
+    funding_round: 18
+    new_location: 15
+    donation_page_found: 15
+    press_award: 10
+    club_national_win: 8 # applies to every lead: a rising tide, not a differentiator
+
+# ---------------------------------------------------------------------------
+# p_yes — ESTIMATE midpoints from report §5. REPLACE WITH MEASURED RATES as outcomes
+# accumulate. At ~30 replies a year the sample is far too small for auto-tuning; a human
+# moves these numbers after reading a weekly calibration report.
+# ---------------------------------------------------------------------------
+p_yes:
+  S1_renewal_in_kind: 0.40
+  S1_renewal_cash: 0.15
+  S2_local_consumer: 0.055
+  S3_trial_service: 0.115
+  S4_local_cpg: 0.085
+  S5_club_vendor: 0.275
+  S6_alumni_led: 0.45
+  S7_talent_recruiter: 0.075
+  S8_brand_programme: 0.20
+  S9_project_aligned: 0.075
+  S10_credit_union: 0.15
+  S11_funded_startup: 0.06
+  S12_family_office: 0.15
+  S13_b2b_trade: 0.02
+  S14_grantmaker: 0.055
+  # Tier B is measured in relationships, never in dollars. p_yes here is the probability of
+  # the NON-MONETARY ask landing (a judge slot, a free venue), not of a cheque.
+  S15_corporate_talent: 0.40 # warm re-ask of someone who already gave time
+  S16_civic_host: 0.50 # a well-matched free-venue request
+
+# ---------------------------------------------------------------------------
+# ask_ladder — the club's REAL published tiers. DO NOT INVENT NUMBERS.
+# The failure mode this prevents: a $10,000 partnership deck landing on a cafe owner's counter.
+# ---------------------------------------------------------------------------
+ask_ladder:
+  in_kind: { amount_low: 0, amount_high: 0, imputed_low: 25, imputed_high: 150 }
+  bronze: { amount_low: 100, amount_high: 250 }
+  silver: { amount_low: 250, amount_high: 500 }
+  gold: { amount_low: 500, amount_high: 1000 }
+  diamond: { amount_low: 1000, amount_high: 5000 }
+  # Not a sponsorship tier. A foundation is not buying a logo and offering one signals a
+  # category error. Anchored on report §5 S10/S14.
+  grant: { amount_low: 1000, amount_high: 10000 }
+  # No tier. The ask is time, space or co-programming.
+  none: { amount_low: 0, amount_high: 0 }
+
+# ---------------------------------------------------------------------------
+# effort_minutes — research + draft + follow-up, per lead. Drives ev_per_hour.
+# A volunteer team's binding constraint is hours, not leads.
+# ---------------------------------------------------------------------------
+effort_minutes:
+  S1: 12 # the contact already exists
+  S2: 20
+  S3: 20
+  S4: 30
+  S5: 15
+  S6: 90 # affiliation verification dominates
+  S7: 45
+  S8: 35 # reading the programme rules is most of it
+  S9: 50
+  S10: 180 # a grant application
+  S11: 40
+  S12: 120 # a personal, researched approach
+  S13: 35
+  S14: 300 # a full application
+  S15: 20 # a warm re-ask for time
+  S16: 25 # a room booking
+  # S17 never enters the automated pipeline (objective: excluded). Present only so the config
+  # stays complete and the loader can validate every segment; nothing reads this number.
+  S17: 1
+
+# ---------------------------------------------------------------------------
+# Segments. `objective` decides which of the two objectives a segment can serve.
+#   cash_and_relationship — Tier A. Both objectives apply.
+#   relationship_only     — Tier B (S15, S16). The cash objective is NOT APPLICABLE, not zero.
+#                           Scoring them on dollars makes a successful relationship look
+#                           like a failed sale. Report §11 point 2.
+#   excluded              — Tier C (S17). Never enters the automated pipeline.
+#
+# headcount_ceiling is the G_SIZE hard gate. ideal_low/ideal_high is the band that earns the
+# full size_band weight; inside the ceiling but outside the ideal band earns half.
+# ---------------------------------------------------------------------------
+segments:
+  S1:
+    key: LAPSED_PARTNER_RENEWAL
+    objective: cash_and_relationship
+    headcount_ceiling: null # inherited from underlying_segment; no independent gate
+    ideal_low: null
+    ideal_high: null
+  S2:
+    key: LOCAL_CONSUMER_SMB
+    objective: cash_and_relationship
+    headcount_ceiling: 99
+    ideal_low: 1
+    ideal_high: 49
+  S3:
+    key: TRIAL_SERVICE_SMB
+    objective: cash_and_relationship
+    headcount_ceiling: 99
+    ideal_low: 5
+    ideal_high: 19
+  S4:
+    key: LOCAL_CPG_BRAND
+    objective: cash_and_relationship
+    headcount_ceiling: 99
+    ideal_low: 2
+    ideal_high: 15
+  S5:
+    key: CLUB_VENDOR
+    objective: cash_and_relationship
+    headcount_ceiling: 99
+    ideal_low: 1
+    ideal_high: 49
+  S6:
+    key: ALUMNI_LED_COMPANY
+    objective: cash_and_relationship
+    headcount_ceiling: 200
+    ideal_low: 1
+    ideal_high: 200
+  S7:
+    key: TALENT_RECRUITER
+    objective: cash_and_relationship
+    headcount_ceiling: 250
+    ideal_low: 10
+    ideal_high: 250
+  S8:
+    key: BRAND_FIELD_MARKETING
+    objective: cash_and_relationship
+    headcount_ceiling: null # the relevant unit is the local field-marketing territory
+    ideal_low: null
+    ideal_high: null
+  S9:
+    key: PROJECT_ALIGNED_OPERATOR
+    objective: cash_and_relationship
+    headcount_ceiling: 200
+    ideal_low: 5
+    ideal_high: 200
+  S10:
+    key: CREDIT_UNION_COMMUNITY
+    objective: cash_and_relationship
+    headcount_ceiling: null
+    ideal_low: null
+    ideal_high: null
+  S11:
+    key: FUNDED_STARTUP
+    objective: cash_and_relationship
+    headcount_ceiling: 200
+    ideal_low: 5
+    ideal_high: 100
+  S12:
+    key: FAMILY_OFFICE_PRINCIPAL
+    objective: cash_and_relationship
+    headcount_ceiling: 20
+    ideal_low: 2
+    ideal_high: 20
+  S13:
+    key: LOCAL_B2B_TRADE
+    objective: cash_and_relationship
+    headcount_ceiling: 99
+    ideal_low: 5
+    ideal_high: 99
+  S14:
+    key: GRANTMAKER
+    objective: cash_and_relationship
+    headcount_ceiling: null
+    ideal_low: null
+    ideal_high: null
+  S15:
+    key: CORPORATE_TALENT_PARTNER
+    objective: relationship_only # no ceiling, but NON-MONETARY ONLY
+    headcount_ceiling: null
+    ideal_low: 500
+    ideal_high: null
+  S16:
+    key: CIVIC_INSTITUTIONAL_HOST
+    objective: relationship_only
+    headcount_ceiling: null
+    ideal_low: null
+    ideal_high: null
+  S17:
+    key: INDIVIDUAL_SUPPORTER
+    objective: excluded
+    headcount_ceiling: null
+    ideal_low: null
+    ideal_high: null
+
+# ---------------------------------------------------------------------------
+# ask_rules — `ask` is DERIVED, never scored, and never invented by a student.
+# ask = f(segment, size_band, relationship_tier). Anchored on the tiers above.
+# ---------------------------------------------------------------------------
+ask_rules:
+  S1: { class: cash_bronze, tier: bronze } # overridden by s1_escalation below
+  S2: { class: in_kind_prize, tier: in_kind, imputed_low: 25, imputed_high: 75 }
+  S3: { class: in_kind_service, tier: in_kind, imputed_low: 30, imputed_high: 150 }
+  S4: { class: in_kind_product, tier: in_kind, imputed_low: 40, imputed_high: 120 }
+  S5: { class: in_kind_service, tier: in_kind, imputed_low: 25, imputed_high: 150 }
+  S6: { class: cash_gold, tier: gold }
+  S7: { class: cash_gold, tier: gold }
+  S8: { class: in_kind_product, tier: in_kind, imputed_low: 25, imputed_high: 150 }
+  S9: { class: cash_silver, tier: silver }
+  S10: { class: grant_application, tier: grant }
+  S11: { class: cash_silver, tier: silver }
+  S12: { class: cash_diamond, tier: diamond }
+  S13: { class: cash_bronze, tier: bronze }
+  S14: { class: grant_application, tier: grant }
+  S15: { class: non_monetary_time, tier: none }
+  S16: { class: in_kind_venue, tier: none }
+  S17: { class: non_monetary_time, tier: none }
+
+  # S6 tiers by AFFINITY, not by company size — the decision is personal, not budgetary.
+  s6_by_affinity:
+    enactus_alum_led: { class: cash_diamond, tier: diamond }
+    sfu_alum_led: { class: cash_silver, tier: silver }
+
+  # S1 is ESCALATION, not repetition. "You gave us X last year; here is what the next tier adds."
+  # Keyed on the PRIOR ask_class. A venue host or judge escalates into a tier listing,
+  # which costs them nothing and converts the relationship into something with a renewal date.
+  s1_escalation:
+    in_kind_prize: { class: cash_bronze, tier: bronze }
+    in_kind_product: { class: cash_bronze, tier: bronze }
+    in_kind_service: { class: cash_bronze, tier: bronze }
+    in_kind_venue: { class: in_kind_venue, tier: none }
+    cash_bronze: { class: cash_silver, tier: silver }
+    cash_silver: { class: cash_gold, tier: gold }
+    cash_gold: { class: cash_diamond, tier: diamond }
+    cash_diamond: { class: cash_diamond, tier: diamond }
+    non_monetary_time: { class: in_kind_prize, tier: in_kind, imputed_low: 25, imputed_high: 150 }
+    grant_application: { class: grant_application, tier: grant }
+
+# ---------------------------------------------------------------------------
+# approver_titles — the G_NAMED_PERSON seniority allowlist. "Is this title senior enough to
+# approve?" is a CODE decision against this list, never a model judgement.
+# Matched case-insensitively as a substring of the normalised contact title.
+# ---------------------------------------------------------------------------
+approver_titles:
+  default:
+    [
+      owner,
+      founder,
+      co-founder,
+      proprietor,
+      president,
+      principal,
+      partner,
+      managing partner,
+      ceo,
+      coo,
+      chief,
+      director,
+      vp,
+      vice president,
+      head of,
+      general manager,
+      studio manager,
+      store manager,
+      branch manager,
+      marketing manager,
+      brand manager,
+    ]
+  # Where report §5 names a different person for a segment, it goes here and wins.
+  by_segment:
+    S7:
+      [
+        campus recruiting lead,
+        talent acquisition,
+        early careers,
+        hr manager,
+        director of hr,
+        managing partner,
+        partner,
+        marketing director,
+      ]
+    S8:
+      [
+        student marketeer,
+        brand ambassador,
+        field marketing,
+        brand activation,
+        regional marketing manager,
+        store manager,
+      ]
+    S9: [head of sustainability, r&d manager, product director, founder, ceo, corporate affairs]
+    S10: [branch manager, community investment manager, community investment]
+    S12: [principal, managing director, founder, chair]
+    S14: [programme officer, program officer, executive director, trustee]
+    S15: [manager, director, senior manager, head of]
+    S16:
+      [
+        branch manager,
+        community programmer,
+        programming coordinator,
+        recreation programmer,
+        community engagement,
+      ]
+
+# ---------------------------------------------------------------------------
+# Affiliation evidence, the G_AFFILIATION_EVIDENCE gate. S6 only.
+# One tier-1 source, OR two independent tier-2/3 sources on DIFFERENT domains, AND the
+# literal string present in retrieved text. Semantic search cannot enforce an institutional
+# affiliation — a "Simon Fraser" people query returned Sim / Simon / Simran / Harsimrat.
+# ---------------------------------------------------------------------------
+affiliation_evidence:
+  tier1_domains: [sfu.ca, enactussfu.ca, enactussfu.com, enactus.ca]
+  tier2_domains: [bcbusiness.ca, techcouver.com, dailyhive.com, vancouverisawesome.com, betakit.com]
+  min_tier1_sources: 1
+  min_tier2_sources: 2 # and they must be on different registrable domains
+  require_literal_substring: true
