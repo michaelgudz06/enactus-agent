@@ -68,10 +68,21 @@ export default function LeadCard({
         </p>
       )}
 
-      {(lead.contact_name || lead.contact_email) && (
+      {(lead.contact_name || lead.contact_email || lead.contact_email_status) && (
         <div className="mt-2 text-xs" style={{ color: "var(--muted)" }}>
           {lead.contact_name && <div className="font-medium" style={{ color: "var(--text)" }}>{lead.contact_name}{lead.contact_role ? <span style={{ color: "var(--faint)" }}> · {lead.contact_role}</span> : null}</div>}
           {lead.contact_email && <div className="truncate">{lead.contact_email}</div>}
+          {!lead.contact_email && lead.contact_email_status && (
+            <div className="truncate" style={{ color: "var(--faint)" }} title={lead.contact_email_status}>
+              ⚠ {lead.contact_email_status}
+            </div>
+          )}
+        </div>
+      )}
+
+      {lead.website_status && (
+        <div className="mt-2 text-xs truncate" style={{ color: "var(--faint)" }} title={lead.website_status}>
+          ⚠ {lead.website_status}
         </div>
       )}
 

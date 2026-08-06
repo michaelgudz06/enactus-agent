@@ -1,17 +1,33 @@
 -- ══════════════════════════════════════════════════════════════════
 -- Enactus Lead Agent — one-time setup for the dedicated Supabase project
 -- Paste this whole file into: Supabase → SQL Editor → New query → Run
+--
+-- ⚠ DEPLOYING TO A PROJECT THAT ALREADY HAS THESE TABLES? RUN THIS FIRST.
+-- `create table if not exists` does nothing to an existing table, so a new
+-- column never appears and EVERY lead insert fails. The agent now says so
+-- loudly instead of showing leads it did not save, but the fix is here:
+--
+--   alter table public.enactus_leads add column if not exists contact_email_status text;
+--   alter table public.enactus_leads add column if not exists website_status text;
+--
+-- Both are idempotent and repeated below with the rest of the migrations.
 -- ══════════════════════════════════════════════════════════════════
 
 create table if not exists public.enactus_leads (
   id uuid primary key default gen_random_uuid(),
   company text not null,
   website text,
+  -- Set when the agent could not verify a model-claimed website. The claim is
+  -- kept here, visible but never presented as the company's site.
+  website_status text,
   industry text,
   description text,
   contact_name text,
   contact_role text,
   contact_email text,
+  -- Set when the agent could not verify a model-supplied address. The address is
+  -- kept here, unusable but visible, instead of being presented as a contact.
+  contact_email_status text,
   location text,
   connection_type text default 'none',
   connection_note text,
@@ -53,6 +69,11 @@ create table if not exists public.enactus_email_drafts (
   created_at timestamptz default now(),
   created_by_name text
 );
+
+-- Additive migrations for projects created before these columns existed.
+-- `create table if not exists` above will not add them to an existing table.
+alter table public.enactus_leads add column if not exists contact_email_status text;
+alter table public.enactus_leads add column if not exists website_status text;
 
 -- Lock the tables down. The app connects with the SECRET key (bypasses RLS),
 -- so no public policies are needed; the publishable key can read nothing.

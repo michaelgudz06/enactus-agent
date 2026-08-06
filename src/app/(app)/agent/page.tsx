@@ -32,6 +32,7 @@ export default function AgentPage() {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [error, setError] = useState("");
   const [done, setDone] = useState(false);
+  const [saved, setSaved] = useState(0);
   const [history, setHistory] = useState<SearchRow[]>([]);
   const [emailLead, setEmailLead] = useState<Lead | null>(null);
   const reasonRef = useRef<HTMLDivElement>(null);
@@ -96,7 +97,7 @@ export default function AgentPage() {
       case "similar": setSimilar({ message: ev.message, suggestion: ev.suggestion }); break;
       case "clarify": setClarify(ev.questions); break;
       case "lead": setLeads((l) => [...l, ev.lead]); break;
-      case "done": setDone(true); break;
+      case "done": setSaved(ev.saved); setDone(true); break;
       case "error": setError(ev.message); break;
     }
   }
@@ -199,7 +200,14 @@ export default function AgentPage() {
             {leads.length > 0 && (
               <div className="flex items-center justify-between mb-2">
                 <div className="text-sm font-semibold">{leads.length} lead{leads.length !== 1 ? "s" : ""} found</div>
-                {done && <a href="/board" className="text-xs" style={{ color: "var(--gold)" }}>Added to Prospects → View board</a>}
+                {done && saved === leads.length && (
+                  <a href="/board" className="text-xs" style={{ color: "var(--gold)" }}>Added to Prospects → View board</a>
+                )}
+                {done && saved < leads.length && (
+                  <span className="text-xs" style={{ color: "var(--faint)" }}>
+                    {saved > 0 ? `Only ${saved} of ${leads.length} reached the board` : "Not saved to the board"}
+                  </span>
+                )}
               </div>
             )}
 
@@ -247,7 +255,7 @@ export default function AgentPage() {
               {reasoning && (
                 <div>
                   <div className="text-[11px] font-medium mb-1.5 flex items-center gap-1" style={{ color: "var(--faint)" }}>
-                    <Brain size={12} /> DeepSeek R1 reasoning
+                    <Brain size={12} /> Analyst reasoning
                   </div>
                   <div ref={reasonRef} className="text-[11px] leading-relaxed whitespace-pre-wrap max-h-72 overflow-y-auto reason-scroll p-2.5 rounded-lg" style={{ background: "var(--bg)", color: "var(--muted)" }}>
                     {reasoning}

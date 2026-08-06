@@ -8,6 +8,9 @@ const EDITABLE = new Set([
   "company", "website", "industry", "description", "contact_name", "contact_role",
   "contact_email", "location", "connection_type", "connection_note", "sponsorship_type",
   "fit_score", "why_fit", "status", "board_order",
+  // A human who has corrected the record can clear the note explaining what the
+  // model got wrong; without this the warning outlives the problem.
+  "contact_email_status", "website_status",
 ]);
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {

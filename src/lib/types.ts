@@ -13,11 +13,17 @@ export interface Lead {
   id: string;
   company: string;
   website: string | null;
+  // Set when the model claimed a website that failed verification. The claim is
+  // kept here, visible but never presented as the company's site.
+  website_status: string | null;
   industry: string | null;
   description: string | null;
   contact_name: string | null;
   contact_role: string | null;
   contact_email: string | null;
+  // Set when the model supplied an address that failed verification. The address
+  // is kept here, unusable but visible, instead of being presented as a contact.
+  contact_email_status: string | null;
   location: string | null;
   connection_type: ConnectionType;
   connection_note: string | null;
@@ -77,5 +83,8 @@ export type AgentEvent =
   | { type: "similar"; message: string; suggestion: string; pastPrompt: string }
   | { type: "clarify"; questions: string[] }
   | { type: "lead"; lead: Lead }
-  | { type: "done"; count: number; searchId: string | null }
+  // `count` is what was found, `saved` is what the database actually accepted.
+  // They differ when an insert fails, and the UI must never claim leads reached
+  // the board on the strength of `count` alone.
+  | { type: "done"; count: number; saved: number; searchId: string | null }
   | { type: "error"; message: string };

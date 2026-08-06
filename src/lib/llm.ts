@@ -1,8 +1,26 @@
-// DeepSeek via OpenRouter. R1 for visible reasoning, V3 (chat) for fast structured work.
+// DeepSeek via OpenRouter, current generation, exact IDs only.
+//
+// The split is load-bearing and must survive: REASONER writes prose that a human
+// reads, STRUCTURED produces JSON that code parses. Never ask a reasoning model
+// for JSON -- it streams its answer into the reasoning channel and leaves
+// `content` empty, which is how the structuring step used to come back
+// unparseable. `chatJSON` enforces that below.
+//
+// Prices verified live against GET https://openrouter.ai/api/v1/models on
+// 2026-08-06. The previous pins (deepseek-r1 / deepseek-chat) were the two
+// worst-value entries in that table: r1 cost 7.8x the input and 13.9x the output
+// of v4-flash on a 164k context instead of 1M.
+//
+// Pin exact published IDs, never a floating alias: OpenRouter also publishes
+// `~deepseek/deepseek-v4-flash-latest`, which would silently change model
+// underneath us and make a quality regression unattributable. OpenRouter
+// publishes no dated variant of v4-pro; if one appears, pin it here.
 const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
 
-export const REASONER = "deepseek/deepseek-r1";
-export const CHAT = "deepseek/deepseek-chat";
+/** Prose only. Streams a visible analysis for a human to read. $0.435/$0.87 per 1M. */
+export const REASONER = "deepseek/deepseek-v4-pro";
+/** Anything that must parse. Declares structured-output support. $0.09/$0.18 per 1M. */
+export const STRUCTURED = "deepseek/deepseek-v4-flash-0731";
 
 export function hasLLMKey() {
   const k = process.env.OPENROUTER_API_KEY;
@@ -31,7 +49,7 @@ export async function chatText(
     method: "POST",
     headers: headers(),
     body: JSON.stringify({
-      model: opts.model ?? CHAT,
+      model: opts.model ?? STRUCTURED,
       messages,
       max_tokens: opts.maxTokens ?? 900,
       temperature: opts.temperature ?? 0.6,
@@ -42,27 +60,116 @@ export async function chatText(
   return data?.choices?.[0]?.message?.content ?? "";
 }
 
+export interface JsonSchemaSpec {
+  name: string;
+  /** The complete strict schema the provider is asked to honour. */
+  schema: Record<string, unknown>;
+  /**
+   * The schema the response is checked against locally, when it must be more
+   * lenient than the one sent. Strict structured output requires every property
+   * to be listed in `required`; enforcing that locally would let one omitted
+   * optional field discard an entire batch, so the two are allowed to differ.
+   * Defaults to `schema`.
+   */
+  validate?: Record<string, unknown>;
+}
+
 // Non-streaming JSON completion (used for planning + scoring synthesis when we
-// don't need to show reasoning live).
+// don't need to show reasoning live). Pass a schema to have the provider enforce
+// the shape and to have the response rejected locally when it does not match.
 export async function chatJSON<T = unknown>(
   messages: Msg[],
-  opts: { model?: string; maxTokens?: number } = {}
+  opts: {
+    model?: string;
+    maxTokens?: number;
+    schema?: JsonSchemaSpec;
+    /** Normalise known-benign shape variance before the schema check. */
+    coerce?: (raw: unknown) => unknown;
+  } = {}
 ): Promise<T> {
-  const res = await fetch(OR_URL, {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify({
-      model: opts.model ?? CHAT,
-      messages,
-      max_tokens: opts.maxTokens ?? 1500,
-      temperature: 0.3,
-      response_format: { type: "json_object" },
-    }),
-  });
+  const model = opts.model ?? STRUCTURED;
+  if (model === REASONER) {
+    throw new Error(
+      `Refusing to ask the reasoning model (${REASONER}) for JSON: it answers in the reasoning channel and leaves content empty. Use ${STRUCTURED}.`
+    );
+  }
+
+  const send = async (format: Record<string, unknown>) =>
+    fetch(OR_URL, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({
+        model,
+        messages,
+        max_tokens: opts.maxTokens ?? 1500,
+        temperature: 0.3,
+        response_format: format,
+      }),
+    });
+
+  const strict = opts.schema
+    ? { type: "json_schema", json_schema: { name: opts.schema.name, strict: true, schema: opts.schema.schema } }
+    : { type: "json_object" };
+
+  let res = await send(strict);
+  // Not every provider behind OpenRouter honours json_schema. Degrade to plain
+  // JSON mode rather than failing the run; the local check below still applies.
+  if (!res.ok && opts.schema && res.status === 400) {
+    const detail = await res.text().catch(() => "");
+    if (/json_schema|response_format|structured/i.test(detail)) {
+      res = await send({ type: "json_object" });
+    } else {
+      throw new Error(`OpenRouter 400: ${detail.slice(0, 200)}`);
+    }
+  }
   if (!res.ok) throw new Error(`OpenRouter ${res.status}: ${(await res.text()).slice(0, 200)}`);
+
   const data = await res.json();
   const content: string = data?.choices?.[0]?.message?.content ?? "";
-  return extractJSON<T>(content);
+  const parsed = extractJSON<unknown>(content);
+  const shaped = opts.coerce ? opts.coerce(parsed) : parsed;
+  if (opts.schema) validateAgainstSchema(shaped, opts.schema.validate ?? opts.schema.schema, opts.schema.name);
+  return shaped as T;
+}
+
+// Minimal JSON Schema check: enough to reject the shapes that used to reach the
+// database as nulls and wrong types. Supports type (including unions and null),
+// properties, required, items, and enum.
+export function validateAgainstSchema(value: unknown, schema: Record<string, unknown>, path = "response"): void {
+  const fail = (msg: string): never => {
+    throw new Error(`Model response failed schema check at ${path}: ${msg}`);
+  };
+
+  const enumValues = schema.enum as unknown[] | undefined;
+  if (Array.isArray(enumValues)) {
+    if (!enumValues.includes(value as never)) fail(`expected one of ${JSON.stringify(enumValues)}, got ${JSON.stringify(value)}`);
+    return;
+  }
+
+  const declared = schema.type;
+  if (declared === undefined) return;
+  const allowed = Array.isArray(declared) ? (declared as string[]) : [declared as string];
+  const actual =
+    value === null ? "null" : Array.isArray(value) ? "array" : typeof value === "object" ? "object" : typeof value;
+  const matches = allowed.some((t) => (t === "integer" ? Number.isInteger(value) : t === actual));
+  if (!matches) fail(`expected ${allowed.join(" | ")}, got ${actual}`);
+  if (value === null) return;
+
+  if (actual === "object") {
+    const obj = value as Record<string, unknown>;
+    const properties = (schema.properties ?? {}) as Record<string, Record<string, unknown>>;
+    for (const key of (schema.required as string[] | undefined) ?? []) {
+      if (obj[key] === undefined) fail(`missing required property "${key}"`);
+    }
+    for (const [key, sub] of Object.entries(properties)) {
+      if (obj[key] !== undefined) validateAgainstSchema(obj[key], sub, `${path}.${key}`);
+    }
+  }
+
+  if (actual === "array" && schema.items) {
+    const items = schema.items as Record<string, unknown>;
+    (value as unknown[]).forEach((entry, i) => validateAgainstSchema(entry, items, `${path}[${i}]`));
+  }
 }
 
 // Streaming call that surfaces both the reasoning trace and the final content.
@@ -78,7 +185,7 @@ export async function streamReasoner(
     temperature: 0.4,
     stream: true,
   };
-  // Route to the highest-throughput provider so R1 finishes within our time budget.
+  // Route to the highest-throughput provider so reasoning finishes within budget.
   if (opts.fastProvider) body.provider = { sort: "throughput" };
 
   const res = await fetch(OR_URL, {
