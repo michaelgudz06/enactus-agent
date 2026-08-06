@@ -16,6 +16,7 @@ import {
   evaluateKillPredicates,
   evaluatePenalties,
   franchiseOrBranchCarveOut,
+  isReversible,
   isRoleAccount,
   kChan01ApplicationChannel,
   kChan02IneligibleRequiresCharity,
@@ -541,8 +542,9 @@ describe("K-REL · relationship state", () => {
     );
     expect(r.kind).toBe("terminal");
     if (r.kind !== "terminal") return;
-    expect(r.reversible).toBe(false);
-    expect(r.message).toContain("not overridden by any allowlist");
+    expect(r.duration.kind).toBe("forever");
+    expect(isReversible(r)).toBe(false);
+    expect(r.recheck).toBe("every_send");
   });
 
   it("K-REL-03 sends a current sponsor to the renewals motion, not to a cold email", () => {
@@ -607,7 +609,8 @@ describe("K-REL · relationship state", () => {
       );
       expect(r.kind).toBe("terminal");
       if (r.kind !== "terminal") return;
-      expect(r.reversible).toBe(false);
+      expect(r.duration.kind).toBe("forever");
+      expect(isReversible(r)).toBe(false);
     },
   );
 
@@ -1057,6 +1060,156 @@ describe("address-scoped terminals · the address dies, the account does not", (
     expect(result.kills[0].scope).toBe("account");
     expect(result.penalties).toEqual([]);
     expect(result.field_terminals).toEqual([]);
+  });
+
+  it("K-REL-08 emits the -40 for SIBLING rows as data, not as a sentence", () => {
+    const result = run(
+      account({ ...base, email: "info@example.ca", rel: { bounced_hard_at: "2026-05-01" } }),
+    );
+    expect(result.sibling_penalties).toEqual([
+      expect.objectContaining({
+        match_field: "email_domain",
+        match_value: "example.ca",
+        rule_id: "K-REL-08",
+        delta: -40,
+      }),
+    ]);
+    // It belongs to OTHER rows, so it must never be counted against this one.
+    expect(result.penalties.map((p) => p.tag)).not.toContain("sibling_domain_hard_bounced");
+    expect(result.penalty_total).toBe(result.penalties.reduce((a, p) => a + p.delta, 0));
+  });
+
+  it("emits no sibling penalty when there is no domain to match siblings on", () => {
+    const result = run(account({ ...base, rel: { bounced_hard_at: "2026-05-01" } }));
+    expect(result.sibling_penalties).toEqual([]);
+  });
+
+  it("a row with no hard bounce levies nothing on its siblings", () => {
+    expect(run(account({ ...base, email: "info@example.ca" })).sibling_penalties).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §3.6 — "TERMINAL for email": the SEND is barred, the account and the address are not.
+// ---------------------------------------------------------------------------
+
+describe("email-scoped terminals · the email channel closes, the account does not", () => {
+  const base = {
+    legal_name: "Some Local Business",
+    registrable_domain: "example.ca",
+    email: "info@example.ca",
+    address_region: "BC",
+    address_municipality: "Burnaby",
+    address_country: "CA",
+  } as const;
+
+  const CASES: { name: string; over: Partial<Account>; rule: string }[] = [
+    {
+      name: "L-02 no-solicitation notice at the source",
+      over: { source_page_text: "Please no unsolicited emails." },
+      rule: "L-02",
+    },
+    {
+      name: "L-04 address taken from a third-party directory",
+      over: {
+        lawful_basis: "conspicuous_pub",
+        lawful_basis_url: "https://some-directory.example.org/listing/123",
+      },
+      rule: "L-04",
+    },
+  ];
+
+  it.each(CASES)("$name keeps the account and closes email", ({ over, rule }) => {
+    const result = run(account({ ...base, ...over }));
+
+    expect(result.decision).not.toBe("terminal");
+    expect(result.kills).toEqual([]);
+    expect(result.field_terminals.map((t) => t.rule_id)).toContain(rule);
+    expect(result.field_terminals.find((t) => t.rule_id === rule)?.scope).toBe("email");
+
+    // The channel is shut...
+    expect(result.email_channel_open).toBe(false);
+    // ...but the address survives, because the business is still reachable another way.
+    expect(result.account.email).toBe("info@example.ca");
+    expect(result.cleared_fields).not.toContain("email");
+
+    // Evaluation continued and the penalty pass still ran.
+    expect(result.penalties.length).toBeGreaterThan(0);
+  });
+
+  it("leaves the email channel open when nothing bars the send", () => {
+    expect(run(account(base)).email_channel_open).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DURATION — orthogonal to scope, read off §3.4's "Suppression window" column.
+// ---------------------------------------------------------------------------
+
+describe("terminal duration", () => {
+  it("K-REL-05 is bounded by a 12-month window that carries its own clear date", () => {
+    const r = kRel05DeclinedRecently(
+      account({ legal_name: "X", rel: { declined_at: "2026-06-01", declined_reason: "no_budget" } }),
+      NOW,
+    );
+    expect(r.kind).toBe("terminal");
+    if (r.kind !== "terminal") return;
+    expect(r.scope).toBe("account");
+    expect(r.duration).toEqual({
+      kind: "until",
+      clears_at: "2027-06-01T00:00:00.000Z",
+      window: "12 months",
+    });
+    expect(isReversible(r)).toBe(true);
+  });
+
+  it("K-REL-05 actually CLEARS once its window has passed", () => {
+    const declined = account({
+      legal_name: "X",
+      rel: { declined_at: "2026-06-01", declined_reason: "no_budget" },
+    });
+    const suppressing = kRel05DeclinedRecently(declined, NOW);
+    expect(suppressing.kind).toBe("terminal");
+    if (suppressing.kind !== "terminal" || suppressing.duration.kind !== "until") return;
+
+    // One day after the date the terminal itself published, the same account passes.
+    const afterClear = new Date(Date.parse(suppressing.duration.clears_at) + 86_400_000);
+    expect(kRel05DeclinedRecently(declined, afterClear).kind).toBe("pass");
+  });
+
+  it("a forever terminal never clears, no matter how much time passes", () => {
+    const suppressed = account({ legal_name: "X", rel: { suppressed_at: "2020-01-01" } });
+    const later = new Date("2099-01-01T00:00:00.000Z");
+    const r = kRel01Suppressed(suppressed, later);
+    expect(r.kind).toBe("terminal");
+    if (r.kind !== "terminal") return;
+    expect(r.duration.kind).toBe("forever");
+    expect(isReversible(r)).toBe(false);
+  });
+
+  it("a forever suppression is not overridable by the never-kill allowlist", () => {
+    // varshneycapital.com is ON the never-kill allowlist, so every other kill is overridden.
+    const result = run(
+      account({
+        legal_name: "Varshney Capital Corp",
+        registrable_domain: "varshneycapital.com",
+        rel: { suppressed_at: "2025-01-01" },
+      }),
+    );
+    expect(result.decision).toBe("terminal");
+    expect(result.kills.map((k) => k.rule_id)).toContain("L-01");
+    expect(result.overridden_kills.map((k) => k.rule_id)).not.toContain("L-01");
+  });
+
+  it("every terminal the §2.4 order can emit carries a scope and a duration", () => {
+    const results = evaluateKillPredicates(FIXTURES.affinityCreditUnion, lists, { now: NOW });
+    const terminals = results.filter((r) => r.kind === "terminal");
+    expect(terminals.length).toBeGreaterThan(0);
+    for (const t of terminals) {
+      if (t.kind !== "terminal") continue;
+      expect(["account", "address", "email", "person"], t.rule_id).toContain(t.scope);
+      expect(["forever", "until_human_clears", "until"], t.rule_id).toContain(t.duration.kind);
+    }
   });
 });
 

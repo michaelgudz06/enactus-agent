@@ -167,6 +167,9 @@ export const SCORE_BLOCKS = ["fit_score", "affinity_score", "access_score"] as c
 /** Slack allowed on a weight sum, to absorb binary floating-point error on fractional weights. */
 export const WEIGHT_SUM_TOLERANCE = 1e-6;
 
+/** Every band `scoreFit`'s geography term can resolve to. All four must carry a weight. */
+export const GEOGRAPHY_BANDS = ["core", "metro", "bc_outside_metro", "elsewhere"] as const;
+
 function sumWeights(block: Record<string, unknown>): number {
   return Object.values(block).reduce<number>(
     (acc, v) => acc + (typeof v === "number" ? v : 0),
@@ -210,6 +213,45 @@ export function validateIcpConfig(raw: unknown): string[] {
         `${block} weights sum to ${total}, not 100 ` +
           `(${entries.map(([k, v]) => `${k}=${v}`).join(", ")})`,
       );
+    }
+  }
+
+  // The geography block. `scoreFit` reads `geography.bands[band]` straight into `clamp()`, so a
+  // deleted or renamed band key would produce NaN through the whole fit score with no error
+  // anywhere — the silent-deflation failure this validator exists to prevent, and the block is
+  // load-bearing now that membership comes from the maintained CSV and this file holds weights
+  // alone.
+  const geography = cfg.geography as Record<string, unknown> | undefined;
+  if (typeof geography !== "object" || geography === null) {
+    problems.push("geography is missing");
+  } else {
+    for (const key of ["core", "postal_prefixes"] as const) {
+      const value = geography[key];
+      if (!Array.isArray(value)) {
+        problems.push(`geography.${key} is missing or not a list`);
+      } else if (value.length === 0) {
+        problems.push(`geography.${key} is empty`);
+      } else if (value.some((v) => typeof v !== "string" || v.trim() === "")) {
+        problems.push(`geography.${key} contains a non-string or blank entry`);
+      }
+    }
+
+    const bands = geography.bands as Record<string, unknown> | undefined;
+    if (typeof bands !== "object" || bands === null) {
+      problems.push("geography.bands is missing");
+    } else {
+      for (const band of GEOGRAPHY_BANDS) {
+        const v = bands[band];
+        if (v === undefined) {
+          problems.push(
+            `geography.bands.${band} is missing; every band must be present or its score is NaN`,
+          );
+        } else if (typeof v !== "number" || !Number.isFinite(v)) {
+          problems.push(`geography.bands.${band} is not a number`);
+        } else if (v < 0) {
+          problems.push(`geography.bands.${band} is negative (${v}); weights are non-negative`);
+        }
+      }
     }
   }
 

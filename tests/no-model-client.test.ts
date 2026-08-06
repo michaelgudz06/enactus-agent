@@ -39,9 +39,11 @@ afterEach(() => {
 
 describe("the model boundary", () => {
   // The control. Without this, a broken trap would make every assertion below vacuously true:
-  // src/lib/agent.ts genuinely imports the model client, so it MUST trip the trap.
+  // tests/fixtures/reaches-model-client.ts genuinely imports the model client, so it MUST trip
+  // the trap. The fixture is owned by this suite, so a parallel rewrite of src/lib/agent.ts
+  // cannot break the control and tempt someone into deleting it.
   it("actually trips — a module that DOES reach a model client fails to import", async () => {
-    await expect(import("../src/lib/agent")).rejects.toThrow();
+    await expect(import("./fixtures/reaches-model-client")).rejects.toThrow();
     expect(loaded).toContain("../src/lib/llm");
   });
 

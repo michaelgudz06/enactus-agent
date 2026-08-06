@@ -25,6 +25,7 @@ import {
   isDomainOrSubdomainOf,
   lookupDomainOrSubdomain,
   lookupList,
+  metroVancouverCanonicals,
   normalizeDomain,
   normalizeMunicipality,
   normalizeName,
@@ -210,29 +211,88 @@ interface BaseResult {
 }
 
 /**
- * What a TERMINAL is terminal FOR. §3.4 and §3.5 scope four rules narrower than the account:
- * D-05, D-07 and K-REL-08 are "TERMINAL for the address", PLACEHOLDER is "TERMINAL for the
- * person, not the account … Never drop the account".
+ * WHAT a TERMINAL kills. Read verbatim off the qualifier in each rule's Outcome column, for
+ * every rule in the report rather than for the subset that happened to surface in review:
  *
- * Only `account` drops the row. `address` and `person` clear the offending field, leave the
- * account in the queue and let the remaining predicates and the whole penalty pass run — a
- * wrongly killed account is invisible forever, a wrongly cleared field is refetched.
+ *   "TERMINAL"                                    → account   (the §2.2 default)
+ *   "TERMINAL for the address"                    → address   (D-05, D-07, K-REL-08)
+ *   "TERMINAL for email"                          → email     (L-02, L-04)
+ *   "TERMINAL for the person, not the account"    → person    (PLACEHOLDER)
+ *
+ * Only `account` drops the row. Every other scope clears what it owns, leaves the account in
+ * the queue and lets the remaining predicates and the whole penalty pass run — a wrongly killed
+ * account is invisible forever, a wrongly cleared field is refetched.
  */
-export type TerminalScope = "account" | "address" | "person";
+export type TerminalScope = "account" | "address" | "email" | "person";
+
+/**
+ * HOW LONG a TERMINAL lasts. Orthogonal to scope, and taken from §3.4's own "Suppression
+ * window" column rather than invented: `forever` (K-REL-01, K-REL-06, K-REL-08, L-01), an
+ * explicit window that auto-clears (K-REL-05, "TERMINAL for this cycle, auto-clears", 12
+ * months), and otherwise the §2.2 default — reversible only by a human editing a maintained
+ * list.
+ *
+ * Modelling "for this cycle" as a scope rather than a duration is what produced the previous
+ * round's finding; the two dimensions do not collapse into one another.
+ */
+export type TerminalDuration =
+  | { kind: "forever" }
+  | { kind: "until_human_clears" }
+  | { kind: "until"; clears_at: string; window: string };
+
+/**
+ * A penalty this terminal levies on OTHER records, not on this one.
+ *
+ * K-REL-08's Outcome cell is a DUAL outcome: "TERMINAL for the address; PENALTY −40 on every
+ * other lead sharing `email_domain`". The cross-record half is expressible as neither a scope
+ * nor a duration, so it is emitted as data the caller applies to siblings. It is never summed
+ * into this row's `penalty_total` — it does not belong to this row.
+ */
+export interface SiblingPenalty {
+  /** The account field a sibling must match on to take this penalty. */
+  match_field: "email_domain";
+  match_value: string;
+  rule_id: string;
+  reason: string;
+  tag: string;
+  /** Negative. Applied to each matching sibling, which stays in the queue. */
+  delta: number;
+  message: string;
+}
 
 export interface TerminalResult extends BaseResult {
   kind: "terminal";
   /** Which entity this kills. `account` is the only scope that drops the row. */
   scope: TerminalScope;
-  /** False only for L-01 / K-REL-01 suppression and K-REL-06, which are permanent. */
-  reversible: boolean;
+  /** How long it lasts. `forever` is the only value that is never reversible. */
+  duration: TerminalDuration;
   /** Set on K-CHAN-02 so the SFU Advancement escalation is visible on the row, not lost. */
   required_channel?: RequiredChannel;
+  /** L-01: "checked before every send". A recurrence on top of the duration, not a duration. */
+  recheck?: "every_send";
+  /** K-REL-08's cross-record half. */
+  sibling_penalty?: SiblingPenalty;
 }
 
-/** The account fields a non-account-scoped terminal clears. */
+/**
+ * §2.2: "Reversible? No (except by a human editing a maintained list)". Derived from `duration`
+ * so the two can never disagree.
+ */
+export function isReversible(t: TerminalResult): boolean {
+  return t.duration.kind !== "forever";
+}
+
+/**
+ * What each non-account scope clears on the surviving record.
+ *
+ * `email` clears nothing: L-02 and L-04 bar the SEND, not the address. The address is still
+ * correct and the business is still reachable by web form, phone or a human — closing the email
+ * channel is recorded on the result as `email_channel_open`, and deleting a valid address here
+ * would throw away the routing the CHANNEL outcome exists to preserve.
+ */
 const SCOPE_FIELDS: Record<Exclude<TerminalScope, "account">, readonly (keyof Account)[]> = {
   address: ["email", "email_local", "email_domain"],
+  email: [],
   person: ["contact_name", "contact_title"],
 };
 
@@ -637,7 +697,7 @@ export function kOrg02StudentOrganisation(
     reason: "student_organisation",
     detail,
     evidence_url: evidence,
-    reversible: true,
+    duration: { kind: "until_human_clears" },
     message: sentence("student_organisation", {
       account: a,
       rule_id: "K-ORG-02",
@@ -665,7 +725,7 @@ export function kOrg03aPaidMembershipList(
     reason: "pay_to_join_body",
     detail: hit.entity || hit.value,
     evidence_url: evidence,
-    reversible: true,
+    duration: { kind: "until_human_clears" },
     message: sentence("pay_to_join_body", {
       account: a,
       rule_id: "K-ORG-03a",
@@ -692,7 +752,7 @@ export function kOrg03bPaidMembershipHighPrecision(a: Account, now: Date): Predi
     reason: "pay_to_join_body",
     detail: matched,
     evidence_url: "PAID_MEMBERSHIP_HIGH_PRECISION_RE",
-    reversible: true,
+    duration: { kind: "until_human_clears" },
     message: sentence("pay_to_join_body", {
       account: a,
       rule_id: "K-ORG-03b",
@@ -812,7 +872,7 @@ export function kOrg05RegisteredCharity(a: Account, now: Date): PredicateResult 
       reason: "competing_fundraiser",
       detail: a.cra_designation,
       evidence_url: evidence,
-      reversible: true,
+      duration: { kind: "until_human_clears" },
       message: sentence("competing_fundraiser", {
         account: a,
         rule_id: "K-ORG-05",
@@ -859,7 +919,7 @@ export function kOrg06SelfOrInternalUnit(
     reason: "self_or_internal_unit",
     detail: hit.entity || hit.value,
     evidence_url: evidence,
-    reversible: true,
+    duration: { kind: "until_human_clears" },
     message: sentence("self_or_internal_unit", {
       account: a,
       rule_id: "K-ORG-06",
@@ -944,7 +1004,7 @@ export function kSize01EnterpriseScale(a: Account, now: Date, franchise?: Franch
     reason: "enterprise_scale_no_local_authority",
     detail: `${detail} (headcount_basis=${basis})`,
     evidence_url: measuredLarge ? "headcount" : proxies.fired.join("+"),
-    reversible: true,
+    duration: { kind: "until_human_clears" },
     message: sentence("enterprise_scale_no_local_authority", {
       account: a,
       rule_id: "K-SIZE-01",
@@ -1043,7 +1103,7 @@ export function kChan02IneligibleRequiresCharity(a: Account, now: Date): Predica
         reason: "ineligible_requires_registered_charity",
         detail: match[0],
         evidence_url: evidence,
-        reversible: true,
+        duration: { kind: "until_human_clears" },
         required_channel: "sfu_advancement",
         message: sentence("ineligible_requires_registered_charity", {
           account: a,
@@ -1075,9 +1135,7 @@ export function metroVancouverJurisdictions(
   municipality: string | null | undefined,
   lists: QualificationLists,
 ): string[] {
-  const key = normalizeMunicipality(municipality);
-  if (!key) return [];
-  return lists.metroVancouverAliases.get(key) ?? [];
+  return metroVancouverCanonicals(municipality, lists);
 }
 
 export function isInMetroVancouver(
@@ -1150,7 +1208,7 @@ export function kGeo01OutsideCanada(
     reason: "outside_canada",
     detail,
     evidence_url: a.website_url ?? domainKey(a),
-    reversible: true,
+    duration: { kind: "until_human_clears" },
     message: sentence("outside_canada", {
       account: a,
       rule_id: "K-GEO-01",
@@ -1194,7 +1252,7 @@ export function kGeo02OutsideBc(
     reason: "outside_bc",
     detail: where,
     evidence_url: evidence,
-    reversible: true,
+    duration: { kind: "until_human_clears" },
     message: sentence("outside_bc", {
       account: a,
       rule_id: "K-GEO-02",
@@ -1298,7 +1356,8 @@ function suppressionTerminal(a: Account, at: string, rule_id: string, now: Date)
     reason: "suppressed_do_not_contact",
     detail: at,
     evidence_url: "suppression list",
-    reversible: false,
+    duration: { kind: "forever" },
+    recheck: "every_send",
     message: sentence("suppressed_do_not_contact", {
       account: a,
       rule_id,
@@ -1417,6 +1476,7 @@ export function kRel05DeclinedRecently(a: Account, now: Date): PredicateResult {
   if (reason === "timing" || reason === "budget_cycle") return pass("K-REL-05");
   const days = daysBetween(now, at);
   if (days > DECLINE_SUPPRESSION_MONTHS * 30.4375) return pass("K-REL-05");
+  const clearsAt = addMonthsUtc(at, DECLINE_SUPPRESSION_MONTHS);
   return {
     kind: "terminal",
     scope: "account",
@@ -1424,7 +1484,11 @@ export function kRel05DeclinedRecently(a: Account, now: Date): PredicateResult {
     reason: "declined_within_12_months",
     detail: `${a.rel?.declined_at} (${reason ?? "no reason recorded"})`,
     evidence_url: "rel.declined_at",
-    reversible: true,
+    duration: {
+      kind: "until",
+      clears_at: clearsAt.toISOString(),
+      window: `${DECLINE_SUPPRESSION_MONTHS} months`,
+    },
     message: sentence("declined_within_12_months", {
       account: a,
       rule_id: "K-REL-05",
@@ -1449,7 +1513,7 @@ export function kRel06DeclinedPermanently(a: Account, now: Date): PredicateResul
     reason: "declined_permanently",
     detail: reason,
     evidence_url: "rel.declined_reason",
-    reversible: false,
+    duration: { kind: "forever" },
     message: sentence("declined_permanently", {
       account: a,
       rule_id: "K-REL-06",
@@ -1486,10 +1550,30 @@ export function kRel07DeclinedOnTiming(a: Account, now: Date): PredicateResult {
   };
 }
 
-/** K-REL-08 · Hard bounce → TERMINAL for the address; -40 on every other lead on the domain. */
+/** §3.4 K-REL-08 · the cross-record half of the dual outcome. */
+export const HARD_BOUNCE_SIBLING_DELTA = -40;
+
+/**
+ * K-REL-08 · Hard bounce → TERMINAL for the address, forever; PENALTY −40 on every OTHER lead
+ * sharing `email_domain`.
+ *
+ * A dual outcome. The terminal half is address-scoped, so this account survives with its address
+ * cleared. The −40 half lands on DIFFERENT records, which is neither a scope nor a duration, so
+ * it is emitted as a `SiblingPenalty` the caller applies — describing it only in the rendered
+ * sentence would leave it permanently unenforced.
+ */
 export function kRel08HardBounced(a: Account, now: Date): PredicateResult {
   const at = a.rel?.bounced_hard_at;
   if (!at) return pass("K-REL-08");
+  const domain = emailDomain(a);
+  const message = sentence("undeliverable", {
+    account: a,
+    rule_id: "K-REL-08",
+    verb: "rejected at this address",
+    because: `mail to it hard-bounced on ${at}. The address is dead forever; every other lead sharing ${domain || "this email domain"} takes a ${HARD_BOUNCE_SIBLING_DELTA} penalty but stays in the queue`,
+    evidence_url: "rel.bounced_hard_at",
+    now,
+  });
   return {
     kind: "terminal",
     scope: "address",
@@ -1497,15 +1581,20 @@ export function kRel08HardBounced(a: Account, now: Date): PredicateResult {
     reason: "undeliverable",
     detail: at,
     evidence_url: "rel.bounced_hard_at",
-    reversible: false,
-    message: sentence("undeliverable", {
-      account: a,
-      rule_id: "K-REL-08",
-      verb: "rejected at this address",
-      because: `mail to it hard-bounced on ${at}. The address is dead forever; every other lead sharing ${emailDomain(a) || "this email domain"} takes a -40 penalty but stays in the queue`,
-      evidence_url: "rel.bounced_hard_at",
-      now,
-    }),
+    duration: { kind: "forever" },
+    message,
+    // No domain means nothing to match a sibling on, so there is no penalty to emit.
+    sibling_penalty: domain
+      ? {
+          match_field: "email_domain",
+          match_value: domain,
+          rule_id: "K-REL-08",
+          reason: "undeliverable",
+          tag: "sibling_domain_hard_bounced",
+          delta: HARD_BOUNCE_SIBLING_DELTA,
+          message,
+        }
+      : undefined,
   };
 }
 
@@ -1536,7 +1625,7 @@ export function d01DeadDomain(a: Account, now: Date): PredicateResult {
     reason: "dead_domain",
     detail: domain,
     evidence_url: domain,
-    reversible: true,
+    duration: { kind: "until_human_clears" },
     message: sentence("dead_domain", {
       account: a,
       rule_id: "D-01",
@@ -1565,7 +1654,7 @@ export function d02ParkedDomain(a: Account, lists: QualificationLists, now: Date
           reason: "parked_or_for_sale_domain",
           detail: h,
           evidence_url: entry.sourceUrl || listEvidence(lists.parkingNameservers, parked),
-          reversible: true,
+          duration: { kind: "until_human_clears" },
           message: sentence("parked_or_for_sale_domain", {
             account: a,
             rule_id: "D-02",
@@ -1600,7 +1689,7 @@ export function d03CannotReceiveMail(a: Account, now: Date): PredicateResult {
     reason: "domain_cannot_receive_mail",
     detail: domain,
     evidence_url: domain,
-    reversible: true,
+    duration: { kind: "until_human_clears" },
     message: sentence("domain_cannot_receive_mail", {
       account: a,
       rule_id: "D-03",
@@ -1667,7 +1756,7 @@ export function d05MalformedEmail(a: Account, now: Date): PredicateResult {
     reason: "malformed_email",
     detail: a.email,
     evidence_url: "email",
-    reversible: true,
+    duration: { kind: "until_human_clears" },
     message: sentence("malformed_email", {
       account: a,
       rule_id: "D-05",
@@ -1698,7 +1787,7 @@ export function d06DisposableEmailDomain(
     reason: "disposable_email_domain",
     detail: domain,
     evidence_url: hit.sourceUrl || listEvidence(lists.disposableDomains, domain),
-    reversible: true,
+    duration: { kind: "until_human_clears" },
     message: sentence("disposable_email_domain", {
       account: a,
       rule_id: "D-06",
@@ -1743,7 +1832,7 @@ export function d07EmailDomainMismatch(
     reason: "email_domain_mismatch",
     detail: `${mail} != ${site}`,
     evidence_url: "email_domain",
-    reversible: true,
+    duration: { kind: "until_human_clears" },
     message: sentence("email_domain_mismatch", {
       account: a,
       rule_id: "D-07",
@@ -1810,7 +1899,7 @@ export function placeholderContactName(a: Account, now: Date): PredicateResult {
     reason: "placeholder_contact_name",
     detail: name,
     evidence_url: "contact_name",
-    reversible: true,
+    duration: { kind: "until_human_clears" },
     message: sentence("placeholder_contact_name", {
       account: a,
       rule_id: "PLACEHOLDER",
@@ -1855,12 +1944,12 @@ export function l02NoSolicitationStatement(a: Account, now: Date): PredicateResu
   const evidence = a.lawful_basis_url ?? a.website_url ?? "source_page_text";
   return {
     kind: "terminal",
-    scope: "account",
+    scope: "email",
     rule_id: "L-02",
     reason: "no_solicitation_statement_at_source",
     detail: matched[0],
     evidence_url: evidence,
-    reversible: true,
+    duration: { kind: "until_human_clears" },
     message: sentence("no_solicitation_statement_at_source", {
       account: a,
       rule_id: "L-02",
@@ -1905,7 +1994,7 @@ export function l03HarvestedAddress(a: Account, now: Date): PredicateResult {
     reason: "harvested_address_prohibited",
     detail: method,
     evidence_url: "collection_method",
-    reversible: true,
+    duration: { kind: "until_human_clears" },
     message: sentence("harvested_address_prohibited", {
       account: a,
       rule_id: "L-03",
@@ -1950,12 +2039,12 @@ export function l04NotConspicuouslyPublished(a: Account, now: Date): PredicateRe
   }
   return {
     kind: "terminal",
-    scope: "account",
+    scope: "email",
     rule_id: "L-04",
     reason: "address_not_conspicuously_published",
     detail: `${published} is neither ${own || "the account's own domain"} nor a tier-1 source`,
     evidence_url: a.lawful_basis_url,
-    reversible: true,
+    duration: { kind: "until_human_clears" },
     message: sentence("address_not_conspicuously_published", {
       account: a,
       rule_id: "L-04",
@@ -2091,7 +2180,7 @@ export function kRep01StatutorySector(
     reason: "sponsorship_prohibited_by_statute",
     detail,
     evidence_url: statute,
-    reversible: true,
+    duration: { kind: "until_human_clears" },
     message: sentence("sponsorship_prohibited_by_statute", {
       account: a,
       rule_id: "K-REP-01",
@@ -2515,13 +2604,25 @@ export interface FilterResult {
    */
   kills: TerminalResult[];
   /**
-   * Terminals scoped to the address or the person (D-05, D-07, K-REL-08, PLACEHOLDER). The
-   * FIELD is unusable; the ACCOUNT survives, keeps being evaluated and keeps accruing penalties.
-   * Surfaced rather than discarded so a human still sees why the contact was cleared.
+   * Terminals scoped narrower than the account — address (D-05, D-07, K-REL-08), email (L-02,
+   * L-04) or person (PLACEHOLDER). What they name is unusable; the ACCOUNT survives, keeps being
+   * evaluated and keeps accruing penalties. Surfaced rather than discarded so a human still sees
+   * why the contact was cleared or the channel closed.
    */
   field_terminals: TerminalResult[];
   /** The account fields `field_terminals` cleared, e.g. `["contact_name", "contact_title"]`. */
   cleared_fields: string[];
+  /**
+   * False once an email-scoped terminal has fired: this account must not be sent a CEM. The
+   * address itself is untouched, because the business is still reachable by form, phone or a
+   * human — that routing is exactly what §2.2's CHANNEL outcome exists to preserve.
+   */
+  email_channel_open: boolean;
+  /**
+   * Penalties this row levies on OTHER rows (K-REL-08's −40 on every lead sharing the bounced
+   * `email_domain`). NEVER counted in `penalty_total`: they do not belong to this row.
+   */
+  sibling_penalties: SiblingPenalty[];
   /**
    * The account as it should be persisted after filtering: the input record with every field a
    * `field_terminals` entry invalidated cleared, ready to go back to discovery.
@@ -2664,6 +2765,8 @@ export function runFilter(
   const kills: TerminalResult[] = [];
   const fieldTerminals: TerminalResult[] = [];
   const clearedFields = new Set<string>();
+  const siblingPenalties: SiblingPenalty[] = [];
+  let emailChannelOpen = true;
   const channels: ChannelResult[] = [];
   const holds: HoldResult[] = [];
   const flags: FlagResult[] = [];
@@ -2685,15 +2788,18 @@ export function runFilter(
         case "pass":
           break;
         case "terminal": {
-          // §3.4 / §3.5: an address- or person-scoped terminal kills the FIELD, never the row.
-          // It clears the field, stays visible, and evaluation continues — including the whole
+          // A terminal scoped narrower than the account kills what it names, never the row. It
+          // clears what it owns, stays visible, and evaluation continues — including the whole
           // penalty pass. The never-kill allowlist has nothing to suppress here: it protects the
           // ACCOUNT, and an unusable address stays unusable for a past sponsor too.
           if (r.scope !== "account") {
             fieldTerminals.push(r);
             for (const field of SCOPE_FIELDS[r.scope]) clearedFields.add(field);
+            if (r.scope === "email") emailChannelOpen = false;
+            if (r.sibling_penalty) siblingPenalties.push(r.sibling_penalty);
             break;
           }
+          if (r.sibling_penalty) siblingPenalties.push(r.sibling_penalty);
           // L-01 / K-REL-01 suppression is never overridable, by anything.
           const suppressionRule = r.rule_id === "L-01" || r.rule_id === "K-REL-01";
           if (neverKill && !suppressionRule) {
@@ -2766,6 +2872,8 @@ export function runFilter(
     kills,
     field_terminals: fieldTerminals,
     cleared_fields: [...clearedFields],
+    email_channel_open: emailChannelOpen,
+    sibling_penalties: siblingPenalties,
     account: cleaned,
     channels,
     penalties,

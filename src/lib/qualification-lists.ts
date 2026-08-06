@@ -261,6 +261,23 @@ function buildKeyedList(name: string, rows: Record<string, string>[]): KeyedList
   return { name, domains, names, entries };
 }
 
+/**
+ * The canonical Metro Vancouver jurisdictions a municipality string resolves to.
+ *
+ * Lives here, next to `normalizeMunicipality` and the alias map it reads, because both the
+ * filter (`isInMetroVancouver`) and the scorer (`geographyBand`) need it and scoring.ts
+ * deliberately keeps no runtime dependency on filter.ts. An alias may be shared by two
+ * in-scope jurisdictions ("north vancouver" is both the City and the District).
+ */
+export function metroVancouverCanonicals(
+  municipality: string | null | undefined,
+  lists: Pick<QualificationLists, "metroVancouverAliases">,
+): string[] {
+  const key = normalizeMunicipality(municipality);
+  if (!key) return [];
+  return lists.metroVancouverAliases.get(key) ?? [];
+}
+
 /** Look a record up by domain first, then by normalised name. */
 export function lookupList(
   list: KeyedList,

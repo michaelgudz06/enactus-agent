@@ -166,6 +166,61 @@ describe("config/icp.yaml", () => {
     expect(problems.join(" ")).toContain("weights sum to 99.9, not 100");
   });
 
+  // The geography block is load-bearing: `scoreFit` reads bands[band] straight into clamp(), so
+  // a missing key used to produce NaN through the whole fit score with no error anywhere.
+  describe("the geography block is validated as loudly as the weights", () => {
+    it.each(["core", "metro", "bc_outside_metro", "elsewhere"])(
+      "rejects a config whose %s band was deleted, naming the key",
+      (band) => {
+        const bands = { ...config.geography.bands } as Record<string, number>;
+        delete bands[band];
+        const problems = validateIcpConfig({
+          ...config,
+          geography: { ...config.geography, bands },
+        });
+        expect(problems.join(" ")).toContain(`geography.bands.${band} is missing`);
+      },
+    );
+
+    it("rejects a renamed band rather than silently scoring NaN", () => {
+      const { bc_outside_metro, ...rest } = config.geography.bands;
+      const problems = validateIcpConfig({
+        ...config,
+        geography: { ...config.geography, bands: { ...rest, bc_outside_the_metro: bc_outside_metro } },
+      });
+      expect(problems.join(" ")).toContain("geography.bands.bc_outside_metro is missing");
+    });
+
+    it.each([
+      ["a non-numeric band", { bands: { ...config.geography.bands, core: "twenty" } }, "not a number"],
+      ["a negative band", { bands: { ...config.geography.bands, core: -5 } }, "negative"],
+      ["an empty core list", { core: [] }, "geography.core is empty"],
+      ["a missing core list", { core: undefined }, "geography.core is missing or not a list"],
+      ["a blank postal prefix", { postal_prefixes: ["V5", " "] }, "non-string or blank entry"],
+    ])("rejects %s", (_label, over, expected) => {
+      const problems = validateIcpConfig({ ...config, geography: { ...config.geography, ...over } });
+      expect(problems.join(" ")).toContain(expected);
+    });
+
+    it("rejects a config with no geography block at all", () => {
+      const withoutGeography: Record<string, unknown> = { ...config };
+      delete withoutGeography.geography;
+      expect(validateIcpConfig(withoutGeography).join(" ")).toContain("geography is missing");
+    });
+
+    it("accepts the shipped file, and every band actually scores a finite number", () => {
+      expect(validateIcpConfig(config).filter((p) => p.startsWith("geography"))).toEqual([]);
+      for (const municipality of ["Burnaby", "Richmond", "Kelowna", "Toronto"]) {
+        const r = scoreCompany(
+          company({ legal_name: "X", municipality, region: municipality === "Kelowna" ? "BC" : undefined }),
+          config,
+          { lists, now: NOW },
+        );
+        expect(Number.isFinite(r.fit.score), municipality).toBe(true);
+      }
+    });
+  });
+
   it("rejects a p_yes outside 0..1", () => {
     const problems = validateIcpConfig({ ...config, p_yes: { S2_local_consumer: 55 } });
     expect(problems.join(" ")).toContain("must be a probability between 0 and 1");
@@ -1198,6 +1253,69 @@ describe("gateInputsFromFilterResult", () => {
     const inputs = gateInputsFromFilterResult(result);
     expect(inputs.is_excluded).toBe(false);
     expect(inputs.suppressed).toBe(false);
+  });
+
+  // The linchpin of the whole scope model. Without these, reverting `is_excluded` to
+  // `result.decision === "terminal"` would leave every filter test green.
+  const base = {
+    legal_name: "Some Local Business",
+    registrable_domain: "example.ca",
+    address_region: "BC",
+    address_municipality: "Burnaby",
+    address_country: "CA",
+  };
+
+  it("an ADDRESS-scoped terminal marks the contact undeliverable WITHOUT excluding the account", () => {
+    const result = runFilter({ ...base, email: "someone@othercompany.ca" }, lists, { now: NOW });
+
+    expect(result.kills).toEqual([]);
+    const inputs = gateInputsFromFilterResult(result);
+    expect(inputs.is_excluded).toBe(false);
+    expect(inputs.deliverable_contact).toBe(false);
+
+    // And the gate that follows from it: G_EXCLUDED must not block, G_DELIVERABLE must.
+    const scored = scoreCompany({ ...company({ legal_name: base.legal_name }), ...inputs }, config, {
+      lists,
+      now: NOW,
+    });
+    expect(scored.segment).not.toBe("EXCLUDED");
+    expect(scored.blocking_gates).not.toContain("G_EXCLUDED");
+    expect(scored.blocking_gates).toContain("G_DELIVERABLE");
+  });
+
+  it("an EMAIL-scoped terminal reaches G_NO_SOLICIT and never G_EXCLUDED", () => {
+    const result = runFilter(
+      { ...base, email: "info@example.ca", source_page_text: "Please no unsolicited emails." },
+      lists,
+      { now: NOW },
+    );
+
+    expect(result.kills).toEqual([]);
+    const inputs = gateInputsFromFilterResult(result);
+    expect(inputs.is_excluded).toBe(false);
+    expect(inputs.no_solicitation_found).toBe(true);
+
+    const scored = scoreCompany({ ...company({ legal_name: base.legal_name }), ...inputs }, config, {
+      lists,
+      now: NOW,
+    });
+    expect(scored.segment).not.toBe("EXCLUDED");
+    expect(scored.blocking_gates).not.toContain("G_EXCLUDED");
+  });
+
+  it("a PERSON-scoped terminal never excludes the account", () => {
+    const result = runFilter(
+      { ...base, email: "info@example.ca", contact_name: "Owner / GM" },
+      lists,
+      { now: NOW },
+    );
+    expect(gateInputsFromFilterResult(result).is_excluded).toBe(false);
+  });
+
+  it("only an ACCOUNT-scoped terminal excludes", () => {
+    const result = runFilter({ ...base, legal_name: "Enactus UBC" }, lists, { now: NOW });
+    expect(result.kills.every((k) => k.scope === "account")).toBe(true);
+    expect(gateInputsFromFilterResult(result).is_excluded).toBe(true);
   });
 });
 

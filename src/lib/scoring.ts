@@ -36,7 +36,12 @@ import type {
   SegmentId,
 } from "./icp-config";
 import type { FilterResult } from "./filter";
-import { type QualificationLists, normalizeDomain, normalizeMunicipality } from "./qualification-lists";
+import {
+  type QualificationLists,
+  metroVancouverCanonicals,
+  normalizeDomain,
+  normalizeMunicipality,
+} from "./qualification-lists";
 
 export type { SegmentId, RelationshipTier, AlumniEvidence, AskClass, AskTier };
 
@@ -638,16 +643,6 @@ function triggerAgeKey(kind: string): string {
 
 export type GeographyBand = "core" | "metro" | "bc_outside_metro" | "elsewhere";
 
-/** The canonical Metro Vancouver jurisdictions a municipality string resolves to, via the CSV. */
-function metroCanonicals(
-  municipality: string | null | undefined,
-  lists: QualificationLists,
-): string[] {
-  const key = normalizeMunicipality(municipality);
-  if (!key) return [];
-  return lists.metroVancouverAliases.get(key) ?? [];
-}
-
 /**
  * ONE SOURCE OF TRUTH PER CONCERN.
  *
@@ -670,11 +665,11 @@ export function geographyBand(
     const coreNames = config.geography.core.map((m) => normalizeMunicipality(m));
     if (coreNames.includes(muni)) return "core";
 
-    const canonicals = metroCanonicals(muni, lists);
+    const canonicals = metroVancouverCanonicals(muni, lists);
     if (canonicals.length > 0) {
       // A core name resolved through the same alias map, so "Kitsilano" lands on core rather
       // than on plain metro.
-      const coreCanonicals = new Set(config.geography.core.flatMap((m) => metroCanonicals(m, lists)));
+      const coreCanonicals = new Set(config.geography.core.flatMap((m) => metroVancouverCanonicals(m, lists)));
       if (canonicals.some((canonical) => coreCanonicals.has(canonical))) return "core";
       return "metro";
     }
@@ -1260,7 +1255,11 @@ export function gateInputsFromFilterResult(
   const suppressed = result.kills.some(
     (k) => k.reason === "suppressed_do_not_contact" || k.reason === "declined_permanently",
   );
-  const noSolicit = result.kills.some((k) => k.reason === "no_solicitation_statement_at_source");
+  // L-02 is email-scoped, so it lands in `field_terminals`, not `kills`. G_NO_SOLICIT is the
+  // gate that exists to carry it; reading only `kills` would drop the finding entirely.
+  const noSolicit = [...result.kills, ...result.field_terminals].some(
+    (k) => k.reason === "no_solicitation_statement_at_source",
+  );
   const deliverabilityRules = new Set(["D-01", "D-02", "D-03", "D-05", "D-06", "D-07", "K-REL-08"]);
   // An address-scoped terminal (D-05, D-07, K-REL-08) does NOT exclude the account, but it does
   // mean the recorded contact is undeliverable — so it feeds G_DELIVERABLE, not G_EXCLUDED.
