@@ -44,7 +44,10 @@ They can. There is no threshold to meet, no form, and no reason required.
    with no explanation and no other detail about them. `build.ts` drops every
    sighting of a name on that list, so the removal survives regeneration — this
    is the step that makes it permanent. Deleting the row on its own would not:
-   the next person to rebuild the roster would put them straight back.
+   the next person to rebuild the roster would put them straight back. The file
+   itself is not optional: `build.ts` refuses to write a roster at all if
+   `removed.txt` is missing, and prints how many names it read on every run,
+   including zero. A list nobody is on is an empty file, never a deleted one.
 2. **Delete their row from `past-executives.csv` and commit both changes that
    day.** Do not wait for a batch, a sprint, or a meeting. (Rebuilding also
    produces the correct file, but you do not need a working cache to honour a
@@ -119,11 +122,20 @@ bodies, so this is 32 requests it does not make against a service that
 rate-limits. It is resumable, so a page already in the cache is not re-fetched,
 and a page that will not download costs that page and nothing else: the run
 carries on, lists the failures at the end, and exits non-zero. Re-run to fill
-them.
+them. An HTTP error is a failed download like any other — every request is made
+with `curl -f`, so a 404 or a rate-limit response leaves no file in the cache
+rather than a cached error page that would never be re-fetched.
 
 It writes `manifest.tsv` recording the URL each cached file came from, and
 `build.ts` **drops any cached page that is not in the manifest** rather than
-guessing a URL for it. A row without real provenance is not a row.
+guessing a URL for it. A row without real provenance is not a row. The manifest
+**accumulates across runs** and is never rebuilt from scratch, because a re-run
+whose archive query is rate-limited does not re-enumerate that source: throwing
+the old manifest away would strip the provenance from pages already cached, and
+the roster would quietly come out short. For the same reason `build.ts` **stops
+without writing** if it finds a cached page the manifest does not know about,
+and exits non-zero if a source parsed to no names at all. It leaves the
+committed CSV alone rather than replacing it with a smaller one.
 
 `.cache/alumni-roster/` is gitignored, and must stay that way: the raw pages
 carry the role email addresses, phone numbers and employer detail that this file
@@ -132,7 +144,22 @@ exists to leave behind.
 The build is deterministic apart from `captured_at`, which defaults to today. Set
 `ROSTER_CAPTURED_AT=YYYY-MM-DD` to reproduce an earlier build exactly.
 
-## The columns
+## The file's shape
+
+The CSV opens with a comment block: **every line before the header starts with
+`#`, and the first line that does not is the header row**, `name,role,...`. A
+reader has to skip those lines — a stock CSV parser will not. Python's `csv`
+module does not skip them either; filter them, or use a reader that takes a
+comment character (`pandas.read_csv(..., comment="#")`). No data line can begin
+with `#`, because the first column is always a person's name.
+
+The block is there because a CSV travels: it gets opened in a spreadsheet,
+pasted into a chat, mailed to next year's exec. It restates the privacy rules
+and the removal promise so they arrive with the data. Whatever ends up consuming
+this file, that block is part of the contract and is not to be dropped from the
+generator.
+
+Then six columns:
 
 | Column | Meaning |
 |---|---|
@@ -208,14 +235,23 @@ contact detail the real pages carried.
 ## Gaps in the record
 
 A gap is a gap. This is what the file covers, by academic year — 199 people,
-across 15 of the 36 years since the chapter was founded:
+across 16 of the 36 years since the chapter was founded:
 
 ```
-2004-05  1     2013-14  28    2017-18  30    2023-24  14
-2008-09  1     2014-15  14    2018-19  16    2024-25  11  ← coaches only
-2009-10  1     2015-16  35    2022-23   6    2025-26  38
-2012-13  14    2016-17  36                   2026-27  33
+1991      1    2012-13  14    2016-17  37    2023-24  14
+2004-05   1    2013-14  28    2017-18  32    2024-25  12  ← coaches only
+2008-09   1    2014-15  17    2018-19  16    2025-26  38
+2009-10   1    2015-16  36    2022-23   6    2026-27  33
 ```
+
+Six more people carry no year at all — the Community Spotlight names, whose
+posts state none — so they appear in no column above. A person counts once in
+every year their `years_active` spans, including the years inside a `..` run, so
+the columns sum to more than 199.
+
+**This table is generated, not maintained.** `build.ts` prints exactly these
+counts on its `coverage:` line at the end of every run; transcribe them rather
+than editing a number here, or the file's own gap report drifts from the file.
 
 These are the gaps we know about:
 
@@ -223,7 +259,7 @@ These are the gaps we know about:
   being captured after May 2019 and the next site's earliest capture is March
   2023. No archived page names those three cohorts. That is a real hole in the
   club's institutional memory, not a shortfall in the retrieval.
-- **2024-25 has no executive roster** — the eleven names are competition coaches
+- **2024-25 has no executive roster** — all twelve names are competition coaches
   only. `/the-team` was last captured in April 2024 and `/team` first in January
   2026, so no roster page from that year survives.
 - **2022-23 is only its six executives.** The Wix page's "LEADERSHIP TEAM",
@@ -234,11 +270,13 @@ These are the gaps we know about:
   are not on any club web page, so there is no page URL to cite, and a row
   without provenance is not a row. Recovering them means parsing that PDF and
   citing it, which this task did not do.
-- **1991 to 2003, 2005-2007 and 2010-2011 are unrecoverable.** The 2012 alumni
-  page is the only source reaching before 2012 and it names four people, in an
-  "Alumni Business Owners" list rather than a roster. The rest of that page, in
-  every one of its 55 captures, is a call to action asking alumni to write in:
-  **no public alumni roster ever existed.**
+- **1992 to 2003, 2005-2007 and 2010-2011 are unrecoverable.** The 2012 alumni
+  page is the only source reaching before 2012, and it names four people in an
+  "Alumni Business Owners" list rather than a roster: the founder, against the
+  1991 the page states in prose, and three presidents with their terms. That is
+  the whole of the pre-2012 record. The rest of that page, in every one of its
+  55 captures, is a call to action asking alumni to write in: **no public alumni
+  roster ever existed.**
 
 ## Known source inconsistencies
 

@@ -27,13 +27,27 @@ ua='enactus-alumni-roster/1.0 (Enactus SFU past-executive reconstruction)'
 # Every cached page records where it came from. build.ts reads this rather than
 # reconstructing a URL from a filename, and drops any page missing from it, so a
 # row's source_url is always the URL that was actually retrieved.
+#
+# The manifest accumulates across runs rather than being rebuilt from scratch: a
+# re-run whose CDX query is rate-limited never re-enumerates that source, and
+# starting from an empty manifest would strip the provenance from pages already
+# in the cache — which build.ts would then drop, shrinking the roster silently.
 manifest="$cache/manifest.tsv"
 failures="$cache/.failures"
-: > "$manifest"
+touch "$manifest"
 : > "$failures"
 
+note_source() { # note_source <local-name> <url>
+  awk -F'\t' -v name="$1" '$1 == name { hit = 1 } END { exit !hit }' "$manifest" \
+    || printf '%s\t%s\n' "$1" "$2" >> "$manifest"
+}
+
+# -f on every request: without it curl exits 0 on a 404, a 429 or a 503 and the
+# error page is written to the cache as if it were a snapshot, where it is never
+# re-fetched and parses to no roster at all. An error response has to leave no
+# file behind and land in $failures, the same as a connection that never opened.
 cdx() { # cdx <url-pattern> -> "timestamp status digest" rows
-  curl -sS --max-time 120 --retry 4 --retry-delay 5 --retry-connrefused \
+  curl -fsS --max-time 120 --retry 4 --retry-delay 5 --retry-connrefused \
     "http://web.archive.org/cdx/search/cdx?url=$1&output=text&fl=timestamp,statuscode,digest" \
     || { echo "  ! CDX query failed for $1" >&2; echo "cdx:$1" >> "$failures"; }
 }
@@ -41,12 +55,12 @@ cdx() { # cdx <url-pattern> -> "timestamp status digest" rows
 grab() { # grab <local-name> <wayback-timestamp> <original-url>
   local out="$cache/$1" url="https://web.archive.org/web/$2id_/$3"
   if [ ! -s "$out" ]; then
-    curl -sS --max-time 90 --retry 4 --retry-delay 5 --retry-connrefused -A "$ua" \
-      "$url" -o "$out" 2>/dev/null
+    curl -fsS --max-time 90 --retry 4 --retry-delay 5 --retry-connrefused -A "$ua" \
+      "$url" -o "$out" 2>/dev/null || rm -f "$out"
     sleep 1
   fi
   if [ -s "$out" ]; then
-    printf '%s\t%s\n' "$1" "$url" >> "$manifest"
+    note_source "$1" "$url"
   else
     rm -f "$out"
     echo "  ! could not fetch $1" >&2
@@ -81,26 +95,35 @@ archived competition 'www.enactussfu.ca/competition'    'https://www.enactussfu.
 # --- "Community Spotlight" posts, which name alumni in their titles ---------
 # This sweep needs the CDX `original` column to recover each post's own URL, so
 # it does not go through cdx()/archived().
+# The index goes to a file first so a rate-limited response is a failed query
+# rather than an empty result set piped into grep.
 echo "== spotlight"
-curl -sS --max-time 180 --retry 4 --retry-delay 5 --retry-connrefused \
+index="$cache/.spotlight-cdx"
+if curl -fsS --max-time 180 --retry 4 --retry-delay 5 --retry-connrefused \
   "http://web.archive.org/cdx/search/cdx?url=enactussfu.com*&output=text&fl=timestamp,original,statuscode&limit=20000" \
-  | grep 'community-spotlight' \
-  | grep -v 'wc-ajax\|/feed\|wp-json\|category/\|replytocom' \
-  | awk '$3==200 && !seen[$2]++ {print $1, $2}' \
-  | while read -r ts url; do
-      slug="$(printf '%s' "$url" | grep -oE 'community-spotlight-[a-z0-9-]+')"
-      [ -n "$slug" ] || continue
-      grab "spotlight-$ts-$slug.html" "$ts" "$url"
-    done
+  -o "$index"; then
+  grep 'community-spotlight' "$index" \
+    | grep -v 'wc-ajax\|/feed\|wp-json\|category/\|replytocom' \
+    | awk '$3==200 && !seen[$2]++ {print $1, $2}' \
+    | while read -r ts url; do
+        slug="$(printf '%s' "$url" | grep -oE 'community-spotlight-[a-z0-9-]+')"
+        [ -n "$slug" ] || continue
+        grab "spotlight-$ts-$slug.html" "$ts" "$url"
+      done
+else
+  echo "  ! CDX query failed for the community-spotlight sweep" >&2
+  echo "cdx:enactussfu.com* (community-spotlight)" >> "$failures"
+fi
+rm -f "$index"
 
 # --- the live site, for the roster the club publishes today -----------------
 echo "== live"
 for page in team competition; do
   out="$cache/live-$page.html"
   url="https://www.enactussfu.ca/$page"
-  if curl -sS --max-time 60 --retry 4 --retry-connrefused -A "$ua" -L "$url" -o "$out" 2>/dev/null \
+  if curl -fsS --max-time 60 --retry 4 --retry-connrefused -A "$ua" -L "$url" -o "$out" 2>/dev/null \
     && [ -s "$out" ]; then
-    printf '%s\t%s\n' "live-$page.html" "$url" >> "$manifest"
+    note_source "live-$page.html" "$url"
   else
     rm -f "$out"
     echo "  ! could not fetch live-$page.html" >&2
@@ -108,7 +131,7 @@ for page in team competition; do
   fi
 done
 
-cached=$(grep -c . "$manifest")
+cached=$(awk -F'\t' '$1 != "" && !seen[$1]++ { n += 1 } END { print n + 0 }' "$manifest")
 missed=$(grep -c . "$failures")
 echo "cached $cached pages in $cache"
 if [ "$missed" -gt 0 ]; then

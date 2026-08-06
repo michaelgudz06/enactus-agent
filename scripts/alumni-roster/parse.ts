@@ -459,6 +459,47 @@ export function compressYears(years: string[]): string {
   return runs.map((run) => (run.length > 1 ? `${run[0]}..${run.at(-1)}` : run[0])).join(";");
 }
 
+/** "2015-16..2016-17;2018-19" -> ["2015-16", "2016-17", "2018-19"] */
+export function expandYears(span: string): string[] {
+  const years: string[] = [];
+  for (const part of span.split(";")) {
+    if (!part) continue;
+    const [from, to] = part.split("..");
+    if (!to) {
+      years.push(from);
+      continue;
+    }
+    // A run states a sighting in every year it spans, which is what makes it a
+    // run: compressYears only collapses years that are actually consecutive.
+    for (let year = Number(from.slice(0, 4)); year <= Number(to.slice(0, 4)); year += 1) {
+      years.push(`${year}-${String(year + 1).slice(2)}`);
+    }
+  }
+  return years;
+}
+
+/**
+ * How many people the roster covers in each academic year, and how many it
+ * names with no year at all. The coverage report in config/alumni/README.md is
+ * this, printed: a hand-maintained one drifts from the file it describes.
+ */
+export function coverageByYear(rows: RosterRow[]): {
+  years: Array<[string, number]>;
+  undated: number;
+} {
+  const counts = new Map<string, number>();
+  let undated = 0;
+  for (const row of rows) {
+    const years = expandYears(row.yearsActive);
+    if (!years.length) {
+      undated += 1;
+      continue;
+    }
+    for (const year of new Set(years)) counts.set(year, (counts.get(year) ?? 0) + 1);
+  }
+  return { years: [...counts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)), undated };
+}
+
 /**
  * One row per person, not one per snapshot.
  *
@@ -491,13 +532,17 @@ export function mergeSightings(sightings: Sighting[]): RosterRow[] {
       else byRole.set(sighting.role, [sighting]);
     }
 
+    // Both orderings below are total: ties fall through to the order the
+    // sightings were read in, which is the sorted cache listing. Leaving a tie
+    // to the engine's sort would make the file's bytes a Node version detail.
     const roles = [...byRole.entries()]
-      .map(([role, seen]) => ({
+      .map(([role, seen], order) => ({
         role,
+        order,
         years: compressYears(seen.map((s) => s.year)),
-        earliest: [...seen].sort((a, b) => (a.year < b.year ? -1 : 1))[0],
+        earliest: seen.reduce((best, next) => (next.year < best.year ? next : best)),
       }))
-      .sort((a, b) => (a.years < b.years ? -1 : 1));
+      .sort((a, b) => (a.years < b.years ? -1 : a.years > b.years ? 1 : a.order - b.order));
 
     // One provenance entry per role, in role order — but a single distinct value
     // is written once rather than repeated, so the common case stays readable.

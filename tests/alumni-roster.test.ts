@@ -1,3 +1,8 @@
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, test, expect } from "vitest";
 import {
   academicYearOfCapture,
@@ -6,7 +11,9 @@ import {
   applyRemovals,
   carriesContactDetail,
   compressYears,
+  coverageByYear,
   csvCell,
+  expandYears,
   findNearDuplicates,
   isPlausiblePersonName,
   isPlausibleRole,
@@ -34,6 +41,46 @@ import {
  * detail the original carried, because the point of most of these tests is that
  * the parser leaves it behind.
  */
+
+/**
+ * The build script, run the way a student runs it, against a two-name cache.
+ * `removals: null` means the removal list is not there at all — the case a
+ * deleted or renamed `removed.txt` produces, which must never pass silently.
+ */
+const BUILD_SCRIPT = fileURLToPath(new URL("../scripts/alumni-roster/build.ts", import.meta.url));
+const CACHED_PAGE = "team-20260114044549.html";
+const CACHED_URL = "https://web.archive.org/web/20260114044549id_/https://www.enactussfu.ca/team";
+const CACHED_HTML = `
+  <h3> <!-- -->Naia Wong<!-- --> </h3><p class="text-white opacity-[70%]">President</p>
+  <h3> <!-- -->Caleb Wu<!-- --> </h3><p class="text-white opacity-[70%]">Director of Web &amp; Tech</p>`;
+
+function runBuild({
+  removals = "# nobody yet\n",
+  unrecordedPage = false,
+  seed = null,
+}: { removals?: string | null; unrecordedPage?: boolean; seed?: string | null } = {}) {
+  const root = mkdtempSync(path.join(tmpdir(), "alumni-roster-"));
+  const cacheDir = path.join(root, "cache");
+  const outDir = path.join(root, "alumni");
+  mkdirSync(cacheDir);
+  mkdirSync(outDir);
+
+  writeFileSync(path.join(cacheDir, CACHED_PAGE), CACHED_HTML);
+  writeFileSync(path.join(cacheDir, "manifest.tsv"), `${CACHED_PAGE}\t${CACHED_URL}\n`);
+  if (unrecordedPage) writeFileSync(path.join(cacheDir, "team-20260301000000.html"), CACHED_HTML);
+  if (removals !== null) writeFileSync(path.join(outDir, "removed.txt"), removals);
+
+  const outFile = path.join(outDir, "past-executives.csv");
+  if (seed !== null) writeFileSync(outFile, seed);
+
+  const run = spawnSync(
+    process.execPath,
+    ["--experimental-strip-types", BUILD_SCRIPT, cacheDir, outFile],
+    { encoding: "utf8", env: { ...process.env, ROSTER_CAPTURED_AT: "2026-08-06" } },
+  );
+
+  return { ...run, outFile };
+}
 
 const sighting = (over: Partial<Sighting> = {}): Sighting => ({
   name: "Rajin Shokar",
@@ -416,6 +463,53 @@ describe("year spans", () => {
     expect(compressYears(["", "2016-17", ""])).toBe("2016-17");
     expect(compressYears(["", ""])).toBe("");
   });
+
+  test("a run expands back to every year it spans, including the ones inside it", () => {
+    expect(expandYears("2015-16..2017-18")).toEqual(["2015-16", "2016-17", "2017-18"]);
+    expect(expandYears("2022-23;2025-26..2026-27")).toEqual(["2022-23", "2025-26", "2026-27"]);
+    expect(expandYears("1991")).toEqual(["1991"]);
+    expect(expandYears("")).toEqual([]);
+  });
+});
+
+describe("coverage by year", () => {
+  test("a person counts in every year of their span, not just its ends", () => {
+    const rows = mergeSightings([
+      sighting({ name: "Gurleen Battu", year: "2016-17" }),
+      sighting({ name: "Gurleen Battu", year: "2017-18" }),
+      sighting({ name: "Gurleen Battu", year: "2018-19" }),
+      sighting({ name: "Rajin Shokar", year: "2016-17" }),
+    ]);
+
+    expect(coverageByYear(rows).years).toEqual([
+      ["2016-17", 2],
+      ["2017-18", 1],
+      ["2018-19", 1],
+    ]);
+  });
+
+  test("a person the source dated with no year is counted as undated, not as a year", () => {
+    const rows = mergeSightings([
+      sighting({ name: "Ivy So", role: "", year: "", confidence: "low" }),
+      sighting({ name: "Rajin Shokar", year: "2016-17" }),
+    ]);
+
+    expect(coverageByYear(rows)).toEqual({ years: [["2016-17", 1]], undated: 1 });
+  });
+
+  test("years come out in order regardless of the order the rows were seen in", () => {
+    const rows = mergeSightings([
+      sighting({ name: "Naia Wong", year: "2026-27" }),
+      sighting({ name: "Jade Bourelle", year: "1991" }),
+      sighting({ name: "Minna Van", year: "2004-05" }),
+    ]);
+
+    expect(coverageByYear(rows).years.map(([year]) => year)).toEqual([
+      "1991",
+      "2004-05",
+      "2026-27",
+    ]);
+  });
 });
 
 describe("merging sightings into people", () => {
@@ -480,6 +574,31 @@ describe("merging sightings into people", () => {
 
   test("names differing only in case or accent are the same person", () => {
     expect(mergeSightings([sighting({ name: "ANDREW MA" }), sighting({ name: "Andrew Ma" })])).toHaveLength(1);
+  });
+
+  test("two roles observed in the same years keep the order they were read in", () => {
+    const asRead = [
+      sighting({ name: "Vanessa Lee", role: "Director of Internal Operations", year: "2013-14", sourceUrl: "u-internal" }),
+      sighting({ name: "Vanessa Lee", role: "President", year: "2013-14", sourceUrl: "u-president" }),
+    ];
+
+    const [row] = mergeSightings(asRead);
+    expect(row.role).toBe("Director of Internal Operations (2013-14); President (2013-14)");
+    expect(row.sourceUrl).toBe("u-internal | u-president");
+
+    const [reversed] = mergeSightings([...asRead].reverse());
+    expect(reversed.role).toBe("President (2013-14); Director of Internal Operations (2013-14)");
+    expect(reversed.sourceUrl).toBe("u-president | u-internal");
+  });
+
+  test("the earliest sighting of a role supplies its URL, and a tie takes the first read", () => {
+    const [row] = mergeSightings([
+      sighting({ role: "President", year: "2016-17", sourceUrl: "first" }),
+      sighting({ role: "President", year: "2016-17", sourceUrl: "second" }),
+      sighting({ role: "President", year: "2015-16", sourceUrl: "earliest" }),
+    ]);
+
+    expect(row.sourceUrl).toBe("earliest");
   });
 
   test("rows come out sorted by name", () => {
@@ -555,6 +674,19 @@ describe("csv", () => {
     expect(csv.split("\n")[0]).toBe("name,role,years_active,source_url,captured_at,confidence");
   });
 
+  test("a reader that skips leading # lines lands on the header, then the rows", () => {
+    const built = runBuild();
+    const lines = readFileSync(built.outFile, "utf8").split("\n");
+    const body = lines.slice(lines.findIndex((line) => !line.startsWith("#")));
+
+    expect(lines[0].startsWith("#")).toBe(true);
+    expect(body[0]).toBe("name,role,years_active,source_url,captured_at,confidence");
+    expect(body.slice(1).filter(Boolean).map((line) => line.split(",")[0])).toEqual([
+      "Caleb Wu",
+      "Naia Wong",
+    ]);
+  });
+
   test("every row carries a source URL and a capture date", () => {
     const csv = toCsv(mergeSightings([sighting(), sighting({ name: "Ivy So", role: "", year: "" })]));
     for (const line of csv.trim().split("\n").slice(1)) {
@@ -562,5 +694,50 @@ describe("csv", () => {
       expect(cells[3]).toMatch(/^http/);
       expect(cells[4]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     }
+  });
+});
+
+describe("building the roster from a cache", () => {
+  test("the run reports how many names the removal list held, including none", () => {
+    const run = runBuild();
+
+    expect(run.status).toBe(0);
+    expect(run.stdout).toMatch(/removed:\s+0 name\(s\)/);
+    expect(readFileSync(run.outFile, "utf8")).toContain("Naia Wong");
+  });
+
+  test("a name on the removal list reaches no row, and the run says so", () => {
+    const run = runBuild({ removals: "Naia Wong\n" });
+
+    expect(run.status).toBe(0);
+    expect(run.stdout).toMatch(/removed:\s+1 name\(s\)/);
+    const csv = readFileSync(run.outFile, "utf8");
+    expect(csv).not.toContain("Naia Wong");
+    expect(csv).toContain("Caleb Wu");
+  });
+
+  test("a missing removal list stops the build instead of reinstating everyone on it", () => {
+    const run = runBuild({ removals: null });
+
+    expect(run.status).not.toBe(0);
+    expect(existsSync(run.outFile)).toBe(false);
+  });
+
+  test("a missing removal list leaves the roster that is already there alone", () => {
+    const run = runBuild({ removals: null, seed: "the roster from the last good build\n" });
+
+    expect(run.status).not.toBe(0);
+    expect(readFileSync(run.outFile, "utf8")).toBe("the roster from the last good build\n");
+  });
+
+  test("a cached page the manifest never recorded stops the build rather than shrinking it", () => {
+    const run = runBuild({ unrecordedPage: true, seed: "the roster from the last good build\n" });
+
+    expect(run.status).not.toBe(0);
+    expect(readFileSync(run.outFile, "utf8")).toBe("the roster from the last good build\n");
+  });
+
+  test("the coverage report the README quotes is printed by the run itself", () => {
+    expect(runBuild().stdout).toMatch(/coverage:\s+2025-26=2/);
   });
 });
