@@ -411,15 +411,197 @@ export function parseSpotlightName(html: string): string | null {
 // --- removal --------------------------------------------------------------
 
 /**
+ * The names on the removal list as they were written, before they become keys.
+ * A message to the student has to quote what they typed rather than the
+ * lower-cased, de-punctuated key it was matched on.
+ */
+export function parseRemovalNames(contents: string): string[] {
+  const names: string[] = [];
+  for (const line of contents.split("\n")) {
+    const name = line.split("#")[0].trim();
+    if (name) names.push(name);
+  }
+  return names;
+}
+
+/**
  * Names a person has asked be kept out of the roster, one per line, `#` for a
  * comment. Matched on `nameKey`, so a request written in a different case or
  * with different punctuation still lands.
  */
 export function parseRemovalList(contents: string): Set<string> {
+  return new Set(parseRemovalNames(contents).map(nameKey));
+}
+
+/**
+ * A name on the removal list that is one character away from a name still in
+ * the file — the shape of a removal that only half landed.
+ *
+ * The club's own pages spell some names two ways, so a person can hold two
+ * rows. Register one spelling, delete both rows, and every exact check passes
+ * while the unregistered spelling comes back at the next rebuild, because
+ * `applyRemovals` matches on `nameKey` exactly. This names the other spelling
+ * to the student. It does not merge anything and does not choose a spelling:
+ * one character apart is evidence, not proof, and two people really can be
+ * `Ann Lee` and `Anna Lee`. So it reports and the student decides — which is
+ * also why it can never refuse a removal it has misread.
+ */
+export function nearMissesOnRemovalList(
+  listed: string[],
+  surviving: string[],
+): Array<[string, string]> {
+  const pairs: Array<[string, string]> = [];
+  for (const name of listed) {
+    const a = nameKey(name);
+    for (const other of surviving) {
+      const b = nameKey(other);
+      if (a !== b && editDistanceAtMostOne(a, b)) pairs.push([name, other]);
+    }
+  }
+  return pairs;
+}
+
+// --- spellings a human has confirmed ---------------------------------------
+
+/**
+ * One correction: the spelling the club published, the spelling a human
+ * confirmed is right, and who said so.
+ */
+export type ConfirmedSpelling = {
+  /** The spelling on the club's own page. Sightings carrying it are renamed. */
+  published: string;
+  /** The spelling that reaches the roster. */
+  confirmed: string;
+  /** The snapshot the published spelling was read from — the evidence it exists. */
+  sourceUrl: string;
+  /** Who confirmed it: a role, never a person's contact detail. */
+  confirmedBy: string;
+  /** The day they confirmed it, `YYYY-MM-DD`. */
+  confirmedOn: string;
+};
+
+const CONFIRMED_ON = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * `config/alumni/confirmed-spellings.tsv`: the club's pages spell some names two
+ * ways, and the roster records both rather than guessing, because choosing one
+ * would be inventing a name. A human who knows the person can settle it, and
+ * this is where that settlement lives — so it survives the next rebuild, which
+ * a hand-merged row would not.
+ *
+ * Every row carries its own provenance, because the spelling is not derived from
+ * anything: the club page is the thing that was wrong, so attributing the
+ * correction to it would be a lie about where the fact came from.
+ *
+ * A malformed row throws rather than being skipped: a correction silently
+ * dropped splits one person back into two rows, which is the trap this file
+ * exists to close.
+ */
+export function parseConfirmedSpellings(contents: string): ConfirmedSpelling[] {
+  const spellings: ConfirmedSpelling[] = [];
+  const published = new Set<string>();
+  const confirmed = new Set<string>();
+
+  let line = 0;
+  for (const raw of contents.split("\n")) {
+    line += 1;
+    if (raw.trim() === "" || raw.trim().startsWith("#")) continue;
+
+    const fields = raw.split("\t").map((field) => field.trim());
+    if (fields.length !== 5) {
+      throw new Error(`line ${line}: expected 5 tab-separated fields, found ${fields.length}`);
+    }
+
+    const [publishedName, confirmedName, sourceUrl, confirmedBy, confirmedOn] = fields;
+    // Both spellings go through the same gate every parsed name goes through:
+    // a human confirming a name is still not licence to write anything into the
+    // roster that a club page could not have said.
+    if (!isPlausiblePersonName(publishedName)) {
+      throw new Error(`line ${line}: "${publishedName}" is not a published personal name`);
+    }
+    if (!isPlausiblePersonName(confirmedName)) {
+      throw new Error(`line ${line}: "${confirmedName}" is not a personal name`);
+    }
+    if (publishedName === confirmedName) {
+      throw new Error(`line ${line}: "${publishedName}" is corrected to itself, so it corrects nothing`);
+    }
+    if (!/^https?:\/\//.test(sourceUrl)) {
+      throw new Error(`line ${line}: "${sourceUrl}" is not the URL the published spelling was read from`);
+    }
+    if (!confirmedBy || carriesContactDetail(confirmedBy)) {
+      throw new Error(`line ${line}: name the role that confirmed it, and no contact detail`);
+    }
+    if (!CONFIRMED_ON.test(confirmedOn)) {
+      throw new Error(`line ${line}: "${confirmedOn}" is not a date, which every confirmation needs`);
+    }
+
+    const publishedKey = nameKey(publishedName);
+    if (published.has(publishedKey)) {
+      throw new Error(`line ${line}: "${publishedName}" is corrected twice, so the two rows disagree`);
+    }
+    // One hop, never a chain: A→B and B→C would make the result depend on the
+    // order the rows happen to be applied in.
+    if (confirmed.has(publishedKey)) {
+      throw new Error(`line ${line}: "${publishedName}" is corrected to and from, which is a chain`);
+    }
+    if (published.has(nameKey(confirmedName))) {
+      throw new Error(`line ${line}: "${confirmedName}" is corrected elsewhere, which is a chain`);
+    }
+
+    published.add(publishedKey);
+    confirmed.add(nameKey(confirmedName));
+    spellings.push({
+      published: publishedName,
+      confirmed: confirmedName,
+      sourceUrl,
+      confirmedBy,
+      confirmedOn,
+    });
+  }
+
+  return spellings;
+}
+
+/** Published spelling (as a key) to the spelling a human confirmed. */
+export function confirmedSpellingMap(spellings: ConfirmedSpelling[]): Map<string, string> {
+  return new Map(spellings.map((spelling) => [nameKey(spelling.published), spelling.confirmed]));
+}
+
+/** The confirmed spelling of a name, or the name itself where none was confirmed. */
+export function canonicalName(name: string, spellings: Map<string, string>): string {
+  return spellings.get(nameKey(name)) ?? name;
+}
+
+/**
+ * Applied to sightings, before removals and before the merge, so the two
+ * spellings become one person everywhere downstream rather than in the written
+ * file alone.
+ */
+export function applyConfirmedSpellings(
+  sightings: Sighting[],
+  spellings: Map<string, string>,
+): Sighting[] {
+  if (!spellings.size) return sightings;
+  return sightings.map((sighting) => {
+    const confirmed = canonicalName(sighting.name, spellings);
+    return confirmed === sighting.name ? sighting : { ...sighting, name: confirmed };
+  });
+}
+
+/**
+ * A removal written under either spelling has to land. Someone asking to be
+ * taken off a list does not know which of the club's spellings the file settled
+ * on, and being asked to guess is not a burden to put on them.
+ */
+export function canonicaliseRemovals(
+  removed: Set<string>,
+  spellings: Map<string, string>,
+): Set<string> {
+  if (!spellings.size) return removed;
   const keys = new Set<string>();
-  for (const line of contents.split("\n")) {
-    const name = line.split("#")[0].trim();
-    if (name) keys.add(nameKey(name));
+  for (const key of removed) {
+    const confirmed = spellings.get(key);
+    keys.add(confirmed ? nameKey(confirmed) : key);
   }
   return keys;
 }
@@ -481,8 +663,25 @@ export function parseSourceRegistry(contents: string): Source[] {
         `line ${line}: a spotlight source needs a post filter of letters, digits and dashes, not "${postFilter}"`,
       );
     }
+    // The prefix names files on disk and `sourceOfCacheFile` claims them with a
+    // startsWith, so it is checked like a filename component rather than only
+    // for emptiness.
+    if (!/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(prefix)) {
+      throw new Error(`line ${line}: a cache prefix is letters, digits and dashes, not "${prefix}"`);
+    }
     if (keys.has(key)) throw new Error(`line ${line}: duplicate source key "${key}"`);
     if (prefixes.has(prefix)) throw new Error(`line ${line}: duplicate cache prefix "${prefix}"`);
+    // A prefix that is another prefix plus a dash claims that source's archived
+    // pages as well as its own, and the first row wins: a row prefixed `live`
+    // would take `live-team.html` and `live-competition.html` from the sources
+    // that fetched them. Two sources cannot own one page.
+    for (const seen of prefixes) {
+      if (prefix.startsWith(`${seen}-`) || seen.startsWith(`${prefix}-`)) {
+        throw new Error(
+          `line ${line}: cache prefix "${prefix}" and "${seen}" would claim each other's pages`,
+        );
+      }
+    }
 
     keys.add(key);
     prefixes.add(prefix);

@@ -23,13 +23,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   academicYearOfCapture,
+  applyConfirmedSpellings,
   applyRemovals,
+  canonicaliseRemovals,
+  canonicalName,
   capturedAcademicYear,
+  confirmedSpellingMap,
   coverageByYear,
   findNearDuplicates,
   mergeSightings,
   nameKey,
+  nearMissesOnRemovalList,
+  parseConfirmedSpellings,
   parseRemovalList,
+  parseRemovalNames,
   parseRosterCsv,
   refreshCoverageClaims,
   parseSourceList,
@@ -45,10 +52,65 @@ import {
   parseWordpressRoster,
   toCsv,
   type Confidence,
+  type ConfirmedSpelling,
   type RosterRow,
   type Sighting,
   type Source,
 } from "./parse.ts";
+
+/**
+ * The spellings a human has settled, read from beside the roster. Both entry
+ * points read it, because both of them decide whether a name on `removed.txt`
+ * has been honoured, and a person whose two spellings became one must be
+ * findable under either.
+ *
+ * A missing file means nobody has confirmed anything, which is the strictest
+ * reading and the one that keeps both rows — unlike `removed.txt`, whose
+ * absence could silently reinstate someone, so that one has to fail loudly.
+ * A malformed file does stop the run: a correction skipped is a person split
+ * back into two rows, and that is the failure this file exists to prevent.
+ */
+function loadConfirmedSpellings(directory: string): ConfirmedSpelling[] {
+  const file = path.join(directory, "confirmed-spellings.tsv");
+  if (!existsSync(file)) return [];
+  try {
+    return parseConfirmedSpellings(readFileSync(file, "utf8"));
+  } catch (error) {
+    console.error(
+      `cannot read ${file}: ${error instanceof Error ? error.message : String(error)}\n` +
+        `It says which spelling a human confirmed where the club published two, and a row\n` +
+        `skipped is one person back as two rows. Fix the row or delete it — an empty file\n` +
+        `means nothing has been confirmed, which is the safe reading.`,
+    );
+    process.exit(1);
+  }
+}
+
+/**
+ * A name on the removal list one character from a name still in the roster.
+ *
+ * The exact checks either side of this one are the ones that decide anything;
+ * this only says what they cannot see. A removal request lands on `nameKey`
+ * exactly, so where the club published two spellings of one person, registering
+ * one of them and deleting both rows passes every exact check and the
+ * unregistered spelling returns at the next rebuild. Reported, never refused:
+ * one character apart is evidence and not proof, and refusing on a misread
+ * would stop a removal the student is trying to honour — the one thing this
+ * must never do.
+ */
+function reportNearMissRemovals(listed: string[], surviving: string[], removalPath: string): void {
+  const pairs = nearMissesOnRemovalList(listed, surviving);
+  if (!pairs.length) return;
+
+  console.warn(
+    `\npossibly unfinished removal: a name on ${removalPath} is one character from a name\n` +
+      `still in the roster. The club's pages spell some names two ways, so if these are one\n` +
+      `person the removal has only half landed — the spelling that is not on the list comes\n` +
+      `back at the next rebuild. Add that spelling to the list too if it is them; if they\n` +
+      `are two people, nothing needs doing.`,
+  );
+  for (const [name, row] of pairs) console.warn(`  on the list: ${name}  /  still in the file: ${row}`);
+}
 
 /**
  * Recompute what config/alumni/README.md says about the roster from the roster
@@ -65,25 +127,40 @@ import {
  * roster it also reads the list beside it, and stops if it finds a name on both.
  *
  * It fails on that and nothing else: no list, an empty list, or a listed name
- * whose row is properly gone all pass exactly as before, silently. It reads two
+ * whose row is properly gone all pass exactly as before, silently. It reads the
  * files in one directory, so it stays as cache-free and offline as the refresh
  * it runs inside, and it adds no step to the procedure a student follows.
+ *
+ * Both sides are read through the confirmed spellings first, so a request
+ * written under the spelling the club published still names the row the roster
+ * settled on. Whatever survives that is reported by `reportNearMissRemovals`,
+ * which says what an exact match cannot.
  */
-function refuseUnfinishedRemoval(rows: RosterRow[], csvFile: string, removalPath: string): void {
+function refuseUnfinishedRemoval(rows: RosterRow[], csvFile: string, alumniDir: string): void {
+  const removalPath = path.join(alumniDir, "removed.txt");
   if (!existsSync(removalPath)) return;
 
-  const removed = parseRemovalList(readFileSync(removalPath, "utf8"));
-  const stillListed = rows.filter((row) => removed.has(nameKey(row.name)));
-  if (!stillListed.length) return;
+  const contents = readFileSync(removalPath, "utf8");
+  const spellings = confirmedSpellingMap(loadConfirmedSpellings(alumniDir));
+  const removed = canonicaliseRemovals(parseRemovalList(contents), spellings);
+  const stillListed = rows.filter((row) => removed.has(nameKey(canonicalName(row.name, spellings))));
 
-  console.error(
-    `unfinished removal: ${stillListed.map((row) => row.name).join(", ")}\n` +
-      `Named on ${removalPath}, but ${csvFile} still carries a row for each of them.\n` +
-      `Deleting the row is what takes someone out of the file that ships, so the\n` +
-      `removal is not done yet. Delete those rows and run this command again —\n` +
-      `nothing else is needed, and no cache or network either way.`,
+  if (stillListed.length) {
+    console.error(
+      `unfinished removal: ${stillListed.map((row) => row.name).join(", ")}\n` +
+        `Named on ${removalPath}, but ${csvFile} still carries a row for each of them.\n` +
+        `Deleting the row is what takes someone out of the file that ships, so the\n` +
+        `removal is not done yet. Delete those rows and run this command again —\n` +
+        `nothing else is needed, and no cache or network either way.`,
+    );
+    process.exit(1);
+  }
+
+  reportNearMissRemovals(
+    parseRemovalNames(contents),
+    rows.map((row) => row.name),
+    removalPath,
   );
-  process.exit(1);
 }
 
 if (process.argv[2] === "--refresh-readme") {
@@ -95,7 +172,7 @@ if (process.argv[2] === "--refresh-readme") {
   let coverage: ReturnType<typeof coverageByYear>;
   try {
     const rows = parseRosterCsv(readFileSync(csvFile, "utf8"));
-    refuseUnfinishedRemoval(rows, csvFile, path.join(path.dirname(csvFile), "removed.txt"));
+    refuseUnfinishedRemoval(rows, csvFile, path.dirname(csvFile));
     people = rows.length;
     coverage = coverageByYear(rows);
     refreshed = refreshCoverageClaims(
@@ -125,24 +202,35 @@ const cacheDir = process.argv[2] ?? ".cache/alumni-roster";
 const outFile = process.argv[3] ?? "config/alumni/past-executives.csv";
 
 /**
- * The same refusal the fetcher makes, at the other entry point: a cache inside
- * the repository that git does not ignore holds the role addresses, phone
- * numbers and employers the shipped file exists to leave behind, one
- * `git add -A` away from a commit that cannot be taken back. Asking git rather
- * than re-reading the ignore rules keeps one answer, not two.
+ * The same refusal the fetcher makes, at the other entry point: a cache in a
+ * repository that git does not ignore holds the role addresses, phone numbers
+ * and employers the shipped file exists to leave behind, one `git add -A` away
+ * from a commit that cannot be taken back. Asking git rather than re-reading the
+ * ignore rules keeps one answer, not two.
+ *
+ * git is asked about the cache path, not about the working directory this was
+ * started from: a run launched outside any repository asked a question with no
+ * answer and took silence for permission. Any repository counts — committing
+ * someone's phone number to a different one is the same commit.
  */
 function refuseUnignoredCache(dir: string): void {
-  const toplevel = spawnSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" });
-  if (toplevel.status !== 0) return;
-
-  const repo = toplevel.stdout.trim();
   const absolute = path.resolve(dir);
-  if (absolute !== repo && !absolute.startsWith(repo + path.sep)) return;
-  if (spawnSync("git", ["check-ignore", "-q", absolute], { encoding: "utf8" }).status === 0) return;
+  // The deepest existing ancestor stands in for a directory nothing has created.
+  let probe = absolute;
+  while (!existsSync(probe)) {
+    const parent = path.dirname(probe);
+    if (parent === probe) break;
+    probe = parent;
+  }
+
+  const git = (...args: string[]) =>
+    spawnSync("git", ["-C", probe, ...args], { encoding: "utf8" }).status;
+  if (git("rev-parse", "--show-toplevel") !== 0) return;
+  if (git("check-ignore", "-q", absolute) === 0) return;
 
   console.error(
     `refusing to read a cache git does not ignore: ${absolute}\n` +
-      `That path is inside this repository, so the raw archived pages in it — role email\n` +
+      `That path is inside a git repository, so the raw archived pages in it — role email\n` +
       `addresses, phone numbers, employers — are one 'git add -A' away from the history\n` +
       `of a repository holding real people's records. Use the default\n` +
       `.cache/alumni-roster, add the path to .gitignore, or keep the cache outside the\n` +
@@ -397,15 +485,27 @@ if (!existsSync(removalPath)) {
   );
   process.exit(1);
 }
-const removed = parseRemovalList(readFileSync(removalPath, "utf8"));
-const kept = applyRemovals(sightings, removed);
-const suppressed = sightings.length - kept.length;
+// Applied before the removals and before the merge, so a person the club spelled
+// two ways is one name everywhere downstream — including to the removal list,
+// which a request may name under either spelling.
+const spellings = loadConfirmedSpellings(path.dirname(outFile));
+const confirmed = confirmedSpellingMap(spellings);
+const spelled = applyConfirmedSpellings(sightings, confirmed);
+const renamed = spelled.filter((sighting, at) => sighting.name !== sightings[at].name).length;
+
+const removalContents = readFileSync(removalPath, "utf8");
+const removed = canonicaliseRemovals(parseRemovalList(removalContents), confirmed);
+const kept = applyRemovals(spelled, removed);
+const suppressed = spelled.length - kept.length;
 
 const rows = mergeSightings(kept);
 
 const count = (level: Confidence) => rows.filter((r) => r.confidence === level).length;
 const coverage = coverageByYear(rows);
 console.log(`sightings: ${sightings.length}`);
+console.log(
+  `spellings: ${spellings.length} confirmed, ${renamed} sighting(s) renamed`,
+);
 console.log(
   `removed:   ${removed.size} name(s) on ${removalPath}, ${suppressed} sighting(s) suppressed`,
 );
@@ -424,6 +524,30 @@ if (nearDuplicates.length) {
     `\nnear-duplicate names, left unmerged because choosing a spelling would invent a name:`,
   );
   for (const [a, b] of nearDuplicates) console.warn(`  ${a}  /  ${b}`);
+  console.warn(
+    `  Settle one by confirming it with somebody who knows them, then record it on\n` +
+      `  ${path.join(path.dirname(outFile), "confirmed-spellings.tsv")}.`,
+  );
+}
+
+// The spelling this rebuild would have restored, had the removal named only the
+// other one. Exact matching cannot see it, so it is said out loud instead.
+reportNearMissRemovals(
+  parseRemovalNames(removalContents),
+  rows.map((row) => row.name),
+  removalPath,
+);
+
+// A correction nothing matches any more: the club has retired the page carrying
+// the spelling it fixes, or the roster no longer reaches that far back. Reported
+// for the same reason a stale exemption is — an entry that does nothing should
+// not look like an entry that does.
+for (const spelling of spellings) {
+  if (!sightings.some((sighting) => nameKey(sighting.name) === nameKey(spelling.published))) {
+    console.warn(
+      `\nstale entry on confirmed-spellings.tsv: no source spells anyone ${spelling.published} any more, so it corrects nothing`,
+    );
+  }
 }
 
 // A near-duplicate is a known property of the club's own pages. A source that

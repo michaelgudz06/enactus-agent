@@ -59,8 +59,9 @@ They can. There is no threshold to meet, no form, and no reason required.
 
    That rewrites the coverage report under "Gaps in the record" — the only place
    in this file that counts anybody — from the CSV you just edited. The only
-   other thing it reads is `removed.txt` beside it: no snapshot cache, no
-   network, no archive. It takes a second on a fresh clone, it never touches the
+   other things it reads are `removed.txt` and `confirmed-spellings.tsv` beside
+   it: no snapshot cache, no network, no archive. It takes a second on a fresh
+   clone, it never touches the
    roster itself, and it is what keeps the tests passing so that honouring a
    removal never leaves you with a red branch to explain. Do not wait for a
    batch, a sprint, or a meeting.
@@ -70,6 +71,17 @@ They can. There is no threshold to meet, no form, and no reason required.
    them, because adding the name without deleting the row leaves someone who
    asked to be taken off the file still in it. Delete those rows and run it
    again. It is not an extra step, only a check on the two above.
+
+   It also says — as a warning, never a refusal — when a name on the list is one
+   character from a name still in the file. **The club's pages spell some people
+   two ways, and a removal matches exactly**, so registering one spelling and
+   deleting both rows passes every check here and brings the person back at the
+   next rebuild under the spelling nobody registered. The warning names that
+   other spelling; add it to `removed.txt` too if it is them, and ignore it if
+   they are two people. It cannot refuse, because one character apart is
+   evidence and not proof, and nothing here may ever stop a removal. Where the
+   spelling has already been settled in `confirmed-spellings.tsv`, there is
+   nothing to notice: the request lands under either spelling.
 4. **Reply to them and say it is done.** One line is enough. Do not ask why, do
    not ask them to reconsider, and do not offer to keep a reduced version of
    their entry.
@@ -94,7 +106,7 @@ third-party directory, a data vendor, or a social network.
 | `enactussfu.com/program-managers/` | Wayback, 21 distinct bodies, 2012 → 2017 | Project leads, the layer below exec |
 | `enactussfu.com/project-managers/` | Wayback, 2017 → 2019 | The same page after it was renamed; the only source for project leads 2017-2019 |
 | `enactussfu.com/alumni/` | Wayback, 2012-2013 captures | The chapter's founder and the pre-2012 presidents, with their terms — the only source that reaches back before 2012 |
-| `enactussfu.com/…/community-spotlight-*` | Wayback, 7 posts, 2012-2013 | Alumni named in a post title, with no role and no term |
+| `enactussfu.com/…/community-spotlight-*` | Wayback, the 2012-2013 post series | Alumni named in a post title, with no role and no term |
 | `enactussfu.ca/our-team` | Wayback, 2023 capture | The 2022-23 executive, from the Wix-era site |
 | `enactussfu.ca/the-team` | Wayback, 2023-10 → 2024-04 | The 2023-24 executive, from the Squarespace-era site |
 | `enactussfu.ca/team` | Wayback (2026 captures) + live | The 2025-26 and 2026-27 executives |
@@ -275,8 +287,8 @@ its "2026 Regionals" block to the 2025-26 season.
 | Level | What it means |
 |---|---|
 | `high` | Name **and** role read directly out of a structured roster record on a club page — a team card, a titled roster entry, a stated term. This is the great majority of the file. |
-| `medium` | The club named the person, but not as a structured roster record. Competition coaches (a comma-separated run inside a sentence, under a year heading) and one alumni-page entry whose role had to be read out of prose. |
-| `low` | The club named the person and nothing else. These are the "Community Spotlight" alumni: the post title gives a name, the post body is an interview we do not read, and no role or term is stated anywhere. `role` and `years_active` are empty for these, honestly. (The sweep yields one fewer row than it has posts: one of them names Anoop Aulakh, who is also on the alumni page as a president, so his row is `high` rather than `low`.) |
+| `medium` | The club named the person, but not as a structured roster record. Competition coaches (a comma-separated run inside a sentence, under a year heading) and an alumni-page entry whose role had to be read out of prose. |
+| `low` | The club named the person and nothing else. These are the "Community Spotlight" alumni: the post title gives a name, the post body is an interview we do not read, and no role or term is stated anywhere. `role` and `years_active` are empty for these, honestly. (Not every post in the sweep yields a `low` row: one of them names Anoop Aulakh, who is also on the alumni page as a president, so his row is `high` rather than `low`.) |
 
 A person seen more than once takes the **best** confidence of their sightings:
 one direct read off a roster page establishes the name, and a later weaker
@@ -326,7 +338,7 @@ that could quietly disagree with it:
 2008-09   1    2014-15  17    2018-19  16    2025-26  38
 2009-10   1    2015-16  36    2022-23   6    2026-27  33
 
-people 199    with no year 6    earliest 1991    latest 2026-27
+people 198    with no year 6    earliest 1991    latest 2026-27
 years covered 16 of the 36 academic years since the chapter was founded in 1991
 ```
 
@@ -376,12 +388,46 @@ These are the gaps we know about:
 
 The club's own pages spell some names two ways. These are **reported, never
 merged** — `build.ts` prints them at the end of every run — because picking which
-spelling is correct would be inventing a name.
+spelling is correct would be inventing a name. A human who knows the person can
+settle one, and `confirmed-spellings.tsv` below is where that settlement lives.
 
-- `Tim MacDougal` / `Tim MacDougall` — the competition page uses both, in
-  different years. Almost certainly one person; two rows until a human confirms.
 - `Eva Yueng` on the competition page is spelled `Eva Yeung` in the `enactus-org`
   research. The file follows the club's page, which is the source.
+
+### Settled: `confirmed-spellings.tsv`
+
+**One person, one row — but only once somebody who knows them has said so.**
+`confirmed-spellings.tsv` in this directory holds five tab-separated columns:
+the spelling the club published, the spelling that is right, the snapshot the
+published spelling was read from, the role that confirmed it, and the date.
+`build.ts` renames every matching sighting *before* removals and before the
+merge, so the two rows become one person everywhere — not just in the written
+file.
+
+It is a file rather than a hand edit for the same reason `removed.txt` is: the
+club's pages still spell the name both ways, so **merging the rows by hand is
+undone by the next rebuild.** It carries its own provenance because a spelling
+settled by a person is not derived from anything, and crediting it to the club
+page would credit the page that was wrong.
+
+A missing file means nothing has been confirmed — the strictest reading, and the
+one that keeps both rows. A malformed row stops the run, because a correction
+silently skipped is one person back as two rows. An entry nothing matches any
+more is reported as stale, like an entry on `expected-empty-sources.txt`.
+
+The file ships with one row:
+
+- `Tim MacDougal` → `Tim MacDougall`, confirmed by the captain on 2026-08-06.
+  The competition page spelled it both ways in different snapshots: the two-L
+  spelling in the January 2026 capture, the one-L spelling in May 2026. The
+  roster recorded both rather than guessing, which was right; a human then
+  settled it. The row that ships cites the earliest snapshot, as every merged row
+  does; the other snapshot is kept in `confirmed-spellings.tsv`, so neither
+  page's evidence is lost.
+
+**Adding a row is a confirmation, not a tidy-up.** One character apart is
+evidence, not proof — `Ann Lee` and `Anna Lee` are two people. If nobody has
+confirmed it, leave both rows.
 
 ## Not yet wired into the pipeline
 

@@ -22,27 +22,53 @@ set -uo pipefail
 
 cache="${1:-.cache/alumni-roster}"
 
+# Lexical, so it works on a directory that does not exist yet: "$PWD/../elsewhere"
+# is not inside "$PWD", but the string it spells starts with it, and comparing
+# the strings refused a legitimate cache outside the repository with a diagnosis
+# that was simply wrong.
+normalise_path() { # normalise_path <path> -> absolute, no "." or ".." segments
+  local raw="$1" out="" segment
+  case "$raw" in /*) ;; *) raw="$PWD/$raw" ;; esac
+  while [ -n "$raw" ]; do
+    segment="${raw%%/*}"
+    case "$raw" in */*) raw="${raw#*/}" ;; *) raw="" ;; esac
+    case "$segment" in
+      "" | .) ;;
+      ..) out="${out%/*}" ;;
+      *) out="$out/$segment" ;;
+    esac
+  done
+  printf '%s' "${out:-/}"
+}
+
 # The pages this writes carry the role addresses, phone numbers and employers the
-# shipped file exists to leave behind, so a cache inside the repository that git
-# does not ignore is one `git add -A` away from committing them — and personal
-# data in a commit is not undone by a later fix. git decides, not a second copy
-# of the ignore rules here, and the answer is decided before a page is written.
-case "$cache" in /*) cache_abs="$cache" ;; *) cache_abs="$PWD/$cache" ;; esac
-repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-if [ -n "$repo_root" ]; then
-  case "$cache_abs/" in
-    "$repo_root"/*)
-      if ! git check-ignore -q "$cache_abs"; then
-        echo "refusing to cache archived pages in $cache_abs" >&2
-        echo "That path is inside this repository and git does not ignore it, so the raw" >&2
-        echo "pages — role email addresses, phone numbers, employers — would be one" >&2
-        echo "'git add -A' away from the history of a repository holding real people's" >&2
-        echo "records. Use the default .cache/alumni-roster, add the path to .gitignore," >&2
-        echo "or point the cache outside the repository." >&2
-        exit 1
-      fi
-      ;;
-  esac
+# shipped file exists to leave behind, so a cache in a repository that git does
+# not ignore is one `git add -A` away from committing them — and personal data in
+# a commit is not undone by a later fix. git decides, not a second copy of the
+# ignore rules here, and the answer is decided before a page is written.
+#
+# git is asked about the cache path, not about wherever this was started from: a
+# run launched outside any repository asked a question with no answer and took
+# silence for permission, so it wrote raw pages into whatever repository it was
+# pointed at. The deepest existing ancestor stands in for a directory this run
+# has not created yet, and any repository counts — committing someone's phone
+# number to a different one is the same commit.
+cache_abs="$(normalise_path "$cache")"
+probe="$cache_abs"
+while [ ! -d "$probe" ]; do
+  parent="$(dirname "$probe")"
+  [ "$parent" = "$probe" ] && break
+  probe="$parent"
+done
+if git -C "$probe" rev-parse --show-toplevel >/dev/null 2>&1 \
+  && ! git -C "$probe" check-ignore -q "$cache_abs"; then
+  echo "refusing to cache archived pages in $cache_abs" >&2
+  echo "That path is inside a git repository that does not ignore it, so the raw" >&2
+  echo "pages — role email addresses, phone numbers, employers — would be one" >&2
+  echo "'git add -A' away from the history of a repository holding real people's" >&2
+  echo "records. Use the default .cache/alumni-roster, add the path to .gitignore," >&2
+  echo "or point the cache outside the repository." >&2
+  exit 1
 fi
 
 mkdir -p "$cache"
@@ -79,6 +105,13 @@ note_source() { # note_source <local-name> <url>
     "$manifest" || printf '%s\t%s\n' "$1" "$2" >> "$manifest"
 }
 
+# Whether the manifest already knows where a cached file came from, whatever URL
+# that was. The other half of the same rule: a page on disk was retrieved once,
+# from one URL, and only that run knew which.
+recorded() { # recorded <local-name>
+  awk -F'\t' -v name="$1" '$1 == name { hit = 1 } END { exit !hit }' "$manifest"
+}
+
 # -f on every request: without it curl exits 0 on a 404, a 429 or a 503 and the
 # error page is written to the cache as if it were a snapshot, where it is never
 # re-fetched and parses to no roster at all. An error response has to leave no
@@ -89,13 +122,27 @@ cdx() { # cdx <url-pattern> -> "timestamp status digest" rows
     || { echo "  ! CDX query failed for $1" >&2; echo "cdx:$1" >> "$failures"; }
 }
 
+# A cached page is left exactly as it is, provenance included. Re-stamping it
+# with the URL this run's registry row spells would claim a retrieval that never
+# happened: edit a row and every page already on disk silently changes where it
+# came from, without one byte being re-downloaded. Only a request that actually
+# returned bytes may say where they came from — the same rule that makes live()
+# match on name AND url, at the other end of the same problem.
+#
+# Cached but unrecorded is the exception, and it is fetched again rather than
+# stamped with a guess: build.ts drops such a page and says to re-run this
+# script, so re-running has to genuinely record it.
 grab() { # grab <local-name> <wayback-timestamp> <original-url>
   local out="$cache/$1" url="https://web.archive.org/web/$2id_/$3"
-  if [ ! -s "$out" ]; then
-    curl -fsS --max-time 90 --retry 4 --retry-delay 5 --retry-connrefused -A "$ua" \
-      "$url" -o "$out" 2>/dev/null || rm -f "$out"
-    sleep 1
+  if [ -s "$out" ] && recorded "$1"; then
+    return 0
   fi
+
+  rm -f "$out"
+  curl -fsS --max-time 90 --retry 4 --retry-delay 5 --retry-connrefused -A "$ua" \
+    "$url" -o "$out" 2>/dev/null || rm -f "$out"
+  sleep 1
+
   if [ -s "$out" ]; then
     note_source "$1" "$url"
   else
@@ -160,13 +207,25 @@ bad_row() { # bad_row <line-number> <complaint>
 # reader rejects is a registry the other rejects too. A row with a stray leading
 # tab is the case worth the trouble: it once read as a blank line, so the source
 # was never fetched and this script still reported success.
+# parseSourceRegistry trims every field before it reads it, so this does too. A
+# CRLF checkout otherwise leaves a carriage return on the last column of every
+# row, and one whitespace problem is reported here as a malformed filter and
+# there as a malformed registry — two unrelated-looking errors for one cause.
+trim() { # trim <value>
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  printf '%s' "${value%"${value##*[![:space:]]}"}"
+}
+
 line=0
 seen_keys=""
 seen_prefixes=""
+seen_prefix_words=""
 while IFS= read -r row <&3 || [ -n "${row:-}" ]; do
   line=$((line + 1))
-  case "$row" in '#'*) continue ;; esac
-  [ -z "$row" ] && continue
+  trimmed="$(trim "$row")"
+  case "$trimmed" in '#'*) continue ;; esac
+  [ -z "$trimmed" ] && continue
 
   # Counted off the raw line, not off `read`: tab is IFS whitespace, so a
   # trailing empty column would otherwise vanish and a seven-column row would
@@ -177,10 +236,22 @@ while IFS= read -r row <&3 || [ -n "${row:-}" ]; do
     continue
   fi
   IFS=$'\t' read -r key kind prefix pattern url filter <<< "$row"
+  key="$(trim "$key")"
+  kind="$(trim "$kind")"
+  prefix="$(trim "$prefix")"
+  pattern="$(trim "$pattern")"
+  url="$(trim "$url")"
+  filter="$(trim "$filter")"
 
   if [ -z "$key" ] || [ -z "$kind" ] || [ -z "$prefix" ] \
     || [ -z "$pattern" ] || [ -z "$url" ] || [ -z "$filter" ]; then
     bad_row "$line" "every column needs a value; write '-' where a kind does not use one"
+    continue
+  fi
+  # The prefix names files on disk and is claimed with a startsWith, so it is
+  # checked like one rather than only for emptiness.
+  if ! printf '%s' "$prefix" | grep -qE '^[A-Za-z0-9][A-Za-z0-9-]*$'; then
+    bad_row "$line" "a cache prefix is letters, digits and dashes, not '$prefix'"
     continue
   fi
   if [ "$kind" = spotlight ] && ! printf '%s' "$filter" | grep -qE '^[A-Za-z0-9][A-Za-z0-9-]*$'; then
@@ -189,8 +260,20 @@ while IFS= read -r row <&3 || [ -n "${row:-}" ]; do
   fi
   case "$seen_keys" in *"|$key|"*) bad_row "$line" "duplicate source key '$key'"; continue ;; esac
   case "$seen_prefixes" in *"|$prefix|"*) bad_row "$line" "duplicate cache prefix '$prefix'"; continue ;; esac
+  # A prefix that is another prefix plus a dash claims that source's archived
+  # pages as well as its own: a row prefixed `live` would take `live-team.html`.
+  ambiguous=""
+  for seen in $seen_prefix_words; do
+    case "$prefix" in "$seen"-*) ambiguous="$seen" ;; esac
+    case "$seen" in "$prefix"-*) ambiguous="$seen" ;; esac
+  done
+  if [ -n "$ambiguous" ]; then
+    bad_row "$line" "cache prefix '$prefix' and '$ambiguous' would claim each other's pages"
+    continue
+  fi
   seen_keys="$seen_keys|$key|"
   seen_prefixes="$seen_prefixes|$prefix|"
+  seen_prefix_words="$seen_prefix_words $prefix"
 
   echo "== $key"
   case "$kind" in
