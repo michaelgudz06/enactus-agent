@@ -7,8 +7,34 @@ import { Lead, Mode, Status, STATUS_COLUMNS } from "@/lib/types";
 import LeadCard from "@/components/LeadCard";
 import EmailModal from "@/components/EmailModal";
 
-/** One read of `/api/leads`, tagged with the mode it was read for. */
-type LeadsResult = { mode: Mode; leads: Lead[]; warning?: string };
+/** One read of `/api/leads`, tagged with the mode and the ticket it was read for. */
+type LeadsResult = { ticket: number; mode: Mode; leads: Lead[]; warning?: string };
+
+/**
+ * Every read of the board takes a ticket, and only the newest ticket may write
+ * what is on screen. A read that a later one superseded — a mode switch, a
+ * second Refresh, the modal being closed — is dropped rather than landing as
+ * the wrong mode's leads. One sequence covers every path that reads, so the
+ * rule cannot drift apart between them, and it compares tickets rather than
+ * modes captured in a closure, which would be the mode of the render that
+ * started the read rather than the current one.
+ */
+export type ReadSequence = {
+  /** Take the newest ticket, superseding every read still in flight. */
+  start: () => number;
+  isCurrent: (ticket: number) => boolean;
+  /** Supersede every read in flight without starting one. */
+  abandon: () => void;
+};
+
+export function createReadSequence(): ReadSequence {
+  let current = 0;
+  return {
+    start: () => (current += 1),
+    isCurrent: (ticket) => ticket === current,
+    abandon: () => { current += 1; },
+  };
+}
 
 /**
  * The board is loading while the leads on screen are not the ones the current
@@ -31,32 +57,37 @@ export default function BoardPage() {
   const [overCol, setOverCol] = useState<Status | null>(null);
   const [emailLead, setEmailLead] = useState<Lead | null>(null);
   const [warning, setWarning] = useState("");
+  const [reads] = useState(createReadSequence);
 
   const loading = boardIsLoading(mode, loadedMode, refreshing);
 
   const readLeads = useCallback(async (): Promise<LeadsResult> => {
+    const ticket = reads.start();
     const res = await fetch(`/api/leads?mode=${mode}`);
     const data = await res.json();
-    return { mode, leads: data.leads || [], warning: data.warning };
-  }, [mode]);
+    return { ticket, mode, leads: data.leads || [], warning: data.warning };
+  }, [mode, reads]);
 
-  // Reading and applying are separate so the effect can drop a response that a
-  // mode switch has already superseded: a stale result would otherwise land as
-  // the wrong mode's leads and leave the board reading as loading forever.
+  // Reading and applying are separate so a superseded response can be dropped:
+  // it would otherwise land as the wrong mode's leads and leave the board
+  // reading as loading forever. Every caller applies through here, so both the
+  // effect and Refresh are held to the one rule.
   const applyLeads = useCallback((result: LeadsResult) => {
+    if (!reads.isCurrent(result.ticket)) return;
     setLeads(result.leads);
     if (result.warning) setWarning(result.warning);
     setLoadedMode(result.mode);
-  }, []);
+  }, [reads]);
 
   useEffect(() => {
-    let live = true;
-    readLeads().then((result) => { if (live) applyLeads(result); });
-    return () => { live = false; };
-  }, [readLeads, applyLeads]);
+    readLeads().then(applyLeads);
+    return () => reads.abandon();
+  }, [readLeads, applyLeads, reads]);
 
   async function refresh() {
     setRefreshing(true);
+    // A superseded refresh drops its leads but is still no longer refreshing;
+    // leaving the flag set would wedge the board as loading just as badly.
     applyLeads(await readLeads());
     setRefreshing(false);
   }
