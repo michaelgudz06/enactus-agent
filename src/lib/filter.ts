@@ -243,7 +243,6 @@ import {
   lookupList,
   metroVancouverCanonicals,
   normalizeDomain,
-  normalizeMunicipality,
   normalizeName,
 } from "./qualification-lists";
 

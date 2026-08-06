@@ -19,10 +19,15 @@ Nikita Venkatachellum, Co-Directors of External.
 |---|---|
 | `kind` | `domain` or `name`. A `domain` row matches `registrable_domain`; a `name` row matches `normalized_name`. |
 | `value` | The domain (lowercase, registrable form, no `www.`) or the **normalized** name (casefolded, punctuation/accents stripped, legal suffixes removed). |
+| `entity` | The human-readable organisation name, shown instead of the raw `value` wherever a decision is explained. |
 | `reason` | Why this row exists. Shown to a human in the Rejected view. |
 | `added_by` | Who added it. `enactus-disqualifiers/report.md §7.x` for seed rows. |
 | `added_at` | ISO date. |
 | `source_url` | The page that justifies the row, so a future maintainer can re-verify it. |
+
+Two files are not keyed lists and carry their own columns instead: `metro-vancouver.csv`
+(`canonical`, `aliases`) and `sector-policy.csv` (`sector`, `naics`, `pattern`, `policy`,
+`decided_by`, `decided_at`, `note`).
 
 Rows whose `value` is empty are **name-only entries that the report could not verify a domain
 for**. They are deliberately blank rather than guessed — see the two live traps in
@@ -36,15 +41,15 @@ parked on Afternic). Do not fill a blank in from memory; verify it first.
 | `national-partners.csv` | §7.1 | K-ORG-01 → CHANNEL `enactus_canada` | Every September and every May |
 | `national-flag.csv` | §7.2 | `human_review` only — never a kill | With §7.1 |
 | `student-orgs.csv` | §7.3 | K-ORG-02 → TERMINAL | Annually each September |
-| `edu-domains.csv` | §7.4 | K-ORG-02 / K-ORG-06 → TERMINAL | Rarely |
+| `edu-domains.csv` | §7.4 | K-ORG-02 → TERMINAL (SFU's own units are killed from `self.csv`) | Rarely |
 | `paid-membership.csv` | §7.5 | K-ORG-03a → TERMINAL | Quarterly, fed by the K-ORG-03c review queue |
 | `gov-domains.csv` | §7.6 | K-ORG-04 → CHANNEL `grants_pipeline` | Rarely |
 | `self.csv` | §7.7 | K-ORG-06 → TERMINAL | When a project launches |
-| `never-kill-domains.csv` | §7.7 | **Overrides every §3 predicate except L-01** | When a partner is signed |
-| `metro-vancouver.csv` | §7.8 | K-GEO-03 | Rarely |
+| `never-kill-domains.csv` | §7.7 | **Overrides every §3 predicate except the suppression kills L-01 and K-REL-01** | When a partner is signed |
+| `metro-vancouver.csv` | §7.8 | Membership only — the `metro_vancouver` band of `resolveGeography`, which weights `fit_score` and routes P-08-CONSTRAINT's walk list. No kill: the geographic terminals it used to feed were retired (see A6 at the head of `src/lib/filter.ts`). | Rarely |
 | `sector-policy.csv` | §7.9 | K-REP-01 / K-REP-02 / P-13 | On demand, one human answer per row |
 | `disposable-domains.csv` | §7.10 | D-06 → TERMINAL | Vendored, refreshed quarterly |
-| `free-mail-providers.csv` | §3.5 D-07 | D-07 exemption | Rarely |
+| `free-mail-providers.csv` | §3.5 D-07 | D-07 exemption, reused by K-REL-08 so one bounced `info@gmail.com` cannot penalise every free-mail lead | Rarely |
 | `parking-nameservers.csv` | §3.5 D-02 | D-02 → TERMINAL | Rarely |
 | `current-and-past-sponsors.csv` | §7.11 | K-REL-03, renewals, `never-kill` | Each September |
 
