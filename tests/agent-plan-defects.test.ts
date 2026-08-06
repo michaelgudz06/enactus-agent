@@ -264,14 +264,24 @@ describe("no search queries at all is a real stop", () => {
 
   // The blocker message already names what the model sent, so the entries it
   // dropped on the way there are not reported a second time.
-  test("reports a fully blank query list once", async () => {
-    const out = await runPlanOnly({ ...PLAN, searchQueries: ["   ", "\t"] });
+  // However the unusable list arrived -- entries a schema check can see through,
+  // or entries it had to recover past first -- the blocker is the one report of
+  // that loss.
+  const BLANK_QUERY_LISTS: Record<string, unknown[]> = {
+    "every entry is a blank string": ["   ", "\t"],
+    "the entries had to be recovered first": [42, null, "   "],
+  };
 
-    expect(out.errors).toHaveLength(1);
-    // Only the opening "understanding" status: the blocker is the single report
-    // of that loss, and the entries it dropped on the way are not a second one.
-    expect(out.statuses).toHaveLength(1);
-  });
+  for (const [shape, searchQueries] of Object.entries(BLANK_QUERY_LISTS)) {
+    test(`reports a fully blank query list once, when ${shape}`, async () => {
+      const out = await runPlanOnly({ ...PLAN, searchQueries });
+
+      expect(out.errors).toHaveLength(1);
+      // Only the opening "understanding" status: nothing announced the same loss
+      // a second time on the way to the blocker.
+      expect(out.statuses).toHaveLength(1);
+    });
+  }
 
   // A transport or parse failure is still a stop: there is no plan at all.
   test("still stops when the planning call itself fails", async () => {

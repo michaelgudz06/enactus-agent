@@ -558,15 +558,18 @@ function reviewPlan(entry: unknown): PlanReview {
   const claimedQueries = raw.searchQueries;
   reviewFields(PLAN_SUBJECT, raw, PLAN_PROPERTIES, defects);
 
-  // Held aside until the blocker is decided: when no query survives, the blocker
-  // message already names what the model sent, and reporting the same loss twice
-  // is its own kind of noise.
-  const queryDefects: ValueDefect[] = [];
-  const searchQueries = stringList(raw.searchQueries, "searchQueries", queryDefects);
+  // When no query survives, the blocker names what the model sent and is the one
+  // report of that loss, however the list arrived -- recovered entry by entry
+  // here or by reviewFields above. Reporting the same loss twice is its own kind
+  // of noise.
+  const searchQueries = stringList(raw.searchQueries, "searchQueries", defects);
   if (!searchQueries.length) {
-    return { plan: null, defects, blocker: missingQueriesReason(claimedQueries) };
+    return {
+      plan: null,
+      defects: defects.filter((d) => d.field !== "searchQueries"),
+      blocker: missingQueriesReason(claimedQueries),
+    };
   }
-  defects.push(...queryDefects);
 
   // criteria only sharpens the ranking prompt, which also carries the user's own
   // request, so losing it degrades the run rather than ending it. Announce it,

@@ -89,3 +89,46 @@ describe("a defective draft field costs that field only", () => {
     expect(json.error).toBeTruthy();
   });
 });
+
+function notesAbout(json: Record<string, unknown>, field: string): string[] {
+  return (json.notes as string[]).filter((n) => n.includes(field));
+}
+
+// A field that is a string and still says nothing is the same loss as a
+// wrong-typed one: the human gets a subject line the code wrote. The whole
+// class, whichever way the field came back empty.
+describe("a draft field with nothing in it is announced too", () => {
+  const EMPTY_SUBJECTS: Record<string, Record<string, unknown>> = {
+    "the model sent an empty string": { subject: "", body: "Hi there." },
+    "the model sent only whitespace": { subject: "   ", body: "Hi there." },
+    "the model omitted the field": { body: "Hi there." },
+  };
+
+  for (const [shape, response] of Object.entries(EMPTY_SUBJECTS)) {
+    test(`notes the substituted subject when ${shape}`, async () => {
+      const { status, json } = await draftFrom(response);
+
+      expect(status).toBe(200);
+      expect(json.subject).toBe("Enactus SFU x Renaissance Coffee");
+      expect(json.body).toBe("Hi there.");
+      expect(notesAbout(json, "subject")).toHaveLength(1);
+    });
+  }
+
+  test("notes an empty body, which the sender would otherwise send blank", async () => {
+    const { status, json } = await draftFrom({ subject: "Enactus SFU x you", body: "" });
+
+    expect(status).toBe(200);
+    expect(json.body).toBe("");
+    expect(notesAbout(json, "body")).toHaveLength(1);
+    expect(notesAbout(json, "subject")).toEqual([]);
+  });
+
+  // The wrong-typed field is already reported by the field review, so the
+  // fallback must not report it a second time.
+  test("reports a wrong-typed field once, not once per check", async () => {
+    const { json } = await draftFrom({ subject: 42, body: "Hi there." });
+
+    expect(notesAbout(json, "subject")).toHaveLength(1);
+  });
+});

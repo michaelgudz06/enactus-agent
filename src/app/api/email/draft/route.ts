@@ -18,6 +18,14 @@ const DRAFT_PROPERTIES: Record<string, Record<string, unknown>> = {
   body: { type: "string" },
 };
 
+// A field that is a string and still says nothing costs the human the same
+// thing a wrong-typed one does: the subject below is the code's, not the
+// model's, and nobody may read it as something the model wrote.
+const EMPTY_DRAFT_DETAIL: Record<string, string> = {
+  subject: "the model wrote no subject line, so this draft carries a generated one",
+  body: "the model wrote no body, so this draft is yours to write",
+};
+
 const STYLE = `Write outreach emails that sound like a real person wrote them.
 Hard rules:
 - NEVER use em dashes or en dashes. Use short sentences, commas, or periods instead.
@@ -76,6 +84,13 @@ export async function POST(req: Request) {
   const defects: ValueDefect[] = [];
   const raw = { ...(out as Record<string, unknown>) };
   reviewFields(l.company, raw, DRAFT_PROPERTIES, defects);
+
+  for (const [field, detail] of Object.entries(EMPTY_DRAFT_DETAIL)) {
+    const value = raw[field];
+    if (typeof value === "string" && value.trim()) continue;
+    if (defects.some((d) => d.field === field)) continue;
+    defects.push({ subject: l.company, field, detail, action: "ignored" });
+  }
 
   const subject = sanitizeEmail(typeof raw.subject === "string" && raw.subject.trim() ? raw.subject : `Enactus SFU x ${l.company}`);
   const body = sanitizeEmail(typeof raw.body === "string" ? raw.body : "");
