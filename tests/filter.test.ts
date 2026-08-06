@@ -1035,8 +1035,17 @@ describe("address-scoped terminals · the address dies, the account does not", (
     expect(result.field_terminals.every((t) => t.scope === "address")).toBe(true);
     expect(result.account.email).toBeNull();
     expect(result.cleared_fields).toContain("email");
-    // The penalty pass still ran rather than being skipped by a short-circuit.
-    expect(result.penalties.length).toBeGreaterThan(0);
+    // Evaluation did NOT short-circuit: L-05 is the last step of the §2.4 order.
+    expect(result.evaluated_rule_ids).toContain("L-05");
+  });
+
+  it("still accrues the penalties it has earned through an address-scoped terminal", () => {
+    // A role address that hard-bounced: the address dies, and P-08 is still charged.
+    const result = run(
+      account({ ...base, email: "info@example.ca", rel: { bounced_hard_at: "2026-05-01" } }),
+    );
+    expect(result.field_terminals.map((t) => t.rule_id)).toContain("K-REL-08");
+    expect(result.penalties.map((p) => p.rule_id)).toContain("P-08");
   });
 
   it("K-REL-08 no longer short-circuits the rules that follow it", () => {
@@ -1086,6 +1095,33 @@ describe("address-scoped terminals · the address dies, the account does not", (
 
   it("a row with no hard bounce levies nothing on its siblings", () => {
     expect(run(account({ ...base, email: "info@example.ca" })).sibling_penalties).toEqual([]);
+  });
+
+  // A shared free-mail provider is not shared ownership. D-07 already exempts the same list.
+  // Without this, one bounced info@gmail.com charges -40 to every free-mail lead in the corpus.
+  it.each(["gmail.com", "shaw.ca", "telus.net", "outlook.com"])(
+    "levies NOTHING on siblings when the bounced address is on %s",
+    (provider) => {
+      const result = run(
+        account({
+          ...base,
+          registrable_domain: null,
+          email: `info@${provider}`,
+          rel: { bounced_hard_at: "2026-05-01" },
+        }),
+      );
+      // The address itself still dies...
+      expect(result.field_terminals.map((t) => t.rule_id)).toContain("K-REL-08");
+      // ...and nobody else is touched.
+      expect(result.sibling_penalties).toEqual([]);
+    },
+  );
+
+  it("still levies on siblings for a company domain", () => {
+    const result = run(
+      account({ ...base, email: "info@example.ca", rel: { bounced_hard_at: "2026-05-01" } }),
+    );
+    expect(result.sibling_penalties.map((p) => p.match_value)).toEqual(["example.ca"]);
   });
 
   // §2.5: the sentence on a row explains THAT row. A sibling penalty is applied to a DIFFERENT
@@ -1433,20 +1469,106 @@ describe("§5 · franchise or branch — test the LOCATION, not the brand", () =
     expect(report.message).toContain("REROUTED, not dropped");
   });
 
+  // Red Bull is a chain, so §5 applies to it — but the fixture has to SAY it is a chain, because
+  // §5's entry condition is observed evidence, not the absence of evidence.
+  const redBullLocation = {
+    legal_name: "Red Bull",
+    address_region: "AT",
+    address_country: "AT",
+    observations: {
+      chain_has_franchise_page: true,
+      bc_branch_confirmed: true,
+    },
+  } as const;
+
   it("Red Bull is UNPROVEN — and 'we could not tell' is not evidence of 'no'", () => {
-    const report = franchiseOrBranchCarveOut(account({ legal_name: "Red Bull" }));
+    const report = franchiseOrBranchCarveOut(account({ ...redBullLocation }));
     expect(report.status).toBe("UNPROVEN");
-    expect(report.message).toContain("stays in the queue");
   });
 
   it("gives Red Bull P-04 (-30) and keeps it in the queue", () => {
-    const penalties = evaluatePenalties(account({ legal_name: "Red Bull" }), {
+    const penalties = evaluatePenalties(account({ ...redBullLocation }), {
       lists,
       now: NOW,
       franchise: "UNPROVEN",
     });
     const p04 = penalties.find((p) => p.rule_id === "P-04");
     expect(p04?.delta).toBe(-30);
+  });
+
+  // ENTRY CONDITION — §5 is scoped to locations of a chain. An independent single-location
+  // business is not a branch of anything, so the franchise question does not arise for it.
+  describe("§5's entry condition — an independent business is not a branch of anything", () => {
+    const independentBakery = {
+      legal_name: "Crema Artisan Bakers",
+      registrable_domain: "cremabakers.ca",
+      email: "info@cremabakers.ca",
+      address_municipality: "Burnaby",
+      address_region: "BC",
+      address_country: "CA",
+    } as const;
+
+    it("reports NOT_APPLICABLE rather than UNPROVEN", () => {
+      const report = franchiseOrBranchCarveOut(account({ ...independentBakery }));
+      expect(report.status).toBe("NOT_APPLICABLE");
+      expect(report.signals).toEqual([]);
+    });
+
+    it("is NOT penalised by any franchise or branch rule", () => {
+      const result = run(account({ ...independentBakery }));
+      expect(result.penalties.map((p) => p.rule_id)).not.toContain("P-04");
+      expect(result.franchise.status).toBe("NOT_APPLICABLE");
+    });
+
+    it("P-04 does not fire even if a caller passes UNPROVEN, without the §4 clauses", () => {
+      const penalties = evaluatePenalties(account({ ...independentBakery }), {
+        lists,
+        now: NOW,
+        franchise: "UNPROVEN",
+      });
+      expect(penalties.map((p) => p.rule_id)).not.toContain("P-04");
+    });
+
+    it("still enters §5 once a single chain signal is observed", () => {
+      const report = franchiseOrBranchCarveOut(
+        account({ ...independentBakery, observations: { store_locator_location_count: 3 } }),
+      );
+      expect(report.status).not.toBe("NOT_APPLICABLE");
+    });
+  });
+
+  // P-04's own §4 definition has three clauses, not one.
+  describe("P-04 requires all three clauses of its §4 definition", () => {
+    const branch = {
+      legal_name: "A Chain Location",
+      observations: { chain_has_franchise_page: true, bc_branch_confirmed: true },
+    } as const;
+
+    function p04(over: Partial<Account>) {
+      return evaluatePenalties(account({ ...branch, ...over }), {
+        lists,
+        now: NOW,
+        franchise: "UNPROVEN",
+      }).find((p) => p.rule_id === "P-04");
+    }
+
+    it("fires when the head office is outside BC and a local branch exists", () => {
+      expect(p04({ address_region: "ON" })?.delta).toBe(-30);
+    });
+
+    it("does not fire when the head office is IN BC", () => {
+      expect(p04({ address_region: "BC" })).toBeUndefined();
+    });
+
+    it("does not fire when no local branch is established", () => {
+      expect(
+        p04({ address_region: "ON", observations: { chain_has_franchise_page: true } }),
+      ).toBeUndefined();
+    });
+
+    it("does not fire when the head office location is unknown — absence is not evidence", () => {
+      expect(p04({})).toBeUndefined();
+    });
   });
 
   it("treats the franchise-opportunities page (S6) alone as insufficient for LOCAL_AUTHORITY", () => {
@@ -1474,6 +1596,56 @@ describe("§5 · franchise or branch — test the LOCATION, not the brand", () =
       }),
     );
     expect(report.status).toBe("HEAD_OFFICE");
+  });
+});
+
+// ===========================================================================
+// §4 — every penalty's ENTRY CONDITION, taken from its own definition row
+// ===========================================================================
+
+describe("P-03 · publicly traded, on evidence of being publicly traded", () => {
+  function p03(over: Partial<Account>) {
+    return evaluatePenalties(account({ legal_name: "Some Co", ...over }), { lists, now: NOW }).find(
+      (p) => p.rule_id === "P-03",
+    );
+  }
+
+  it.each([
+    ["a stock ticker", { has_stock_ticker: true }],
+    ["an investor-relations section", { has_investor_relations: true }],
+  ])("fires on %s", (_label, observations) => {
+    expect(p03({ observations })?.delta).toBe(-20);
+  });
+
+  // §4 defines P-03 as "Publicly traded (has a ticker / investor-relations section)". §6's
+  // single-proxy arm is not evidence of that. Cactus Club Cafe is the report's own example and a
+  // PAST PARTNER: penalising it as publicly traded for a suppliers page is factually untrue.
+  it.each([
+    ["a suppliers/procurement page", { has_supplier_procurement_path: true }],
+    ["20+ open job postings", { careers_open_postings: 25 }],
+    ["a 25+ location store locator", { store_locator_location_count: 30 }],
+    ["a named community-investment programme", { has_named_community_investment_programme: true }],
+  ])("does NOT fire on %s alone", (_label, observations) => {
+    expect(p03({ observations })).toBeUndefined();
+  });
+
+  it("does not tag Cactus Club Cafe, a past partner, as publicly traded", () => {
+    const result = run(
+      account({
+        ...FIXTURES.cactusClubCafe,
+        observations: { has_supplier_procurement_path: true, has_central_donation_form: true },
+      }),
+    );
+    expect(result.penalties.map((p) => p.rule_id)).not.toContain("P-03");
+  });
+
+  // §6's separate two-or-more-proxy arm is its own rule and is unchanged by this.
+  it("leaves K-SIZE-01's two-or-more-proxy arm alone", () => {
+    const twoProxies = account({
+      legal_name: "A Real Enterprise",
+      observations: { has_supplier_procurement_path: true, careers_open_postings: 40 },
+    });
+    expect(kSize01EnterpriseScale(twoProxies, NOW, "UNPROVEN").kind).toBe("terminal");
   });
 });
 

@@ -1369,6 +1369,49 @@ describe("gateInputsFromFilterResult", () => {
     expect(result.kills.every((k) => k.scope === "account")).toBe(true);
     expect(gateInputsFromFilterResult(result).is_excluded).toBe(true);
   });
+
+  // The never-kill allowlist keeps a past sponsor in the corpus when its domain dies. It does not
+  // make the dead domain deliverable, and the adapter must never turn a suppressed kill into a
+  // POSITIVE assertion that the address works.
+  it("never reports an OVERRIDDEN deliverability kill as a deliverable contact", () => {
+    const result = runFilter(
+      {
+        legal_name: "Modo Yoga Vancouver",
+        registrable_domain: "modoyogavancouver.com",
+        email: "info@modoyogavancouver.com",
+        address_municipality: "Vancouver",
+        address_region: "BC",
+        address_country: "CA",
+        dns: {
+          ns_present: false,
+          a_present: false,
+          mx_present: false,
+          ns_hosts: [],
+          mx_hosts: [],
+          smtp25_open: null,
+          resolver_attempts: 2,
+        },
+      },
+      lists,
+      { now: NOW },
+    );
+
+    // The allowlist did its job: the account survives rather than being dropped.
+    expect(result.overridden_kills.map((k) => k.rule_id)).toContain("D-01");
+    expect(result.kills).toEqual([]);
+
+    const inputs = gateInputsFromFilterResult(result);
+    expect(inputs.is_excluded).toBe(false);
+    expect(inputs.deliverable_contact).toBe(false);
+
+    // And the score does not award the deliverable-contact weight to a domain with no nameservers.
+    const scored = scoreCompany({ ...company({ legal_name: "Modo Yoga Vancouver" }), ...inputs }, config, {
+      lists,
+      now: NOW,
+    });
+    expect(scored.access.terms.find((t) => t.term === "deliverable_contact")?.points).toBe(0);
+    expect(scored.blocking_gates).toContain("G_DELIVERABLE");
+  });
 });
 
 // The module contract — "imports no model client" and "the weights live in config, not in code"

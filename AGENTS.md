@@ -108,6 +108,11 @@ the code does not repeat:
   hard gates, starting weights
 - `/Users/test/firstmate/data/enactus-org/report.md` — why the rules are what they are
 
+Those reports contradict themselves in five places. Every one is listed, with the reading taken
+and why, in the REPORT CONTRADICTIONS block at the head of `src/lib/filter.ts` (the ICP one is at
+`assignSegment` in `src/lib/scoring.ts`). The governing rule is **a rule's definition governs; a
+later procedure section may not widen it**. Add to that block rather than patching silently.
+
 Four invariants these modules exist to hold. Breaking one silently is the failure mode:
 
 1. **No model call in either module, ever** — not as a fallback. Both have a test asserting they
@@ -121,7 +126,9 @@ Four invariants these modules exist to hold. Breaking one silently is the failur
    they name and keep evaluating) and a `duration` (`forever` | `until_human_clears` | `until`).
    A terminal may also emit a `SiblingPenalty` onto OTHER rows; it is never summed into this one.
 3. **Missing data is never a kill.** Predicates return an explicit `cannot_evaluate` outcome
-   carrying the missing field names.
+   carrying the missing field names. Every rule also carries an explicit ENTRY CONDITION — "does
+   this rule apply to this row at all?" — taken from its own definition row. An unproven condition
+   on an entity the rule does not cover is a no-op, not a penalty.
 4. **Never blend the scores.** `fit` / `affinity` / `access` stay separate, and so do the two
    objectives (`deployable_cash` vs `relationship_volume`). For Tier B segments the cash
    objective is *not applicable*, not zero.

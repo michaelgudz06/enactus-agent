@@ -18,6 +18,54 @@
 //     `field IS NOT NULL AND <test>`. Where the data needed to decide is missing, the
 //     predicate returns an explicit `cannot_evaluate` outcome carrying the missing field
 //     names — never a silent pass and never a silent fail. §2.3.
+//
+//  4. EVERY RULE CARRIES AN EXPLICIT ENTRY CONDITION. Before a rule's severity is considered it
+//     must answer "does this rule apply to this row at all?". An unproven condition on an entity
+//     the rule does not cover is not a penalty — it is a NO-OP. Each rule's population is taken
+//     from its own definition row, never from a later procedure section (see below).
+//
+// ===========================================================================
+// REPORT CONTRADICTIONS — where the specifications disagree with themselves
+// ===========================================================================
+//
+// The reports are the requirements documents, and in four places they contradict themselves. The
+// governing rule applied throughout: A RULE'S DEFINITION GOVERNS; LATER PROCEDURE SECTIONS
+// IMPLEMENT THAT DEFINITION AND MAY NOT WIDEN IT. Each is pinned by a test.
+//
+//  C1. P-03, "publicly traded". §4 defines it as "Publicly traded (has a ticker /
+//      investor-relations section)". §6 option 2 widens it with "One [proxy] -> P-03 (-20)",
+//      where the proxy set includes a /suppliers path, 20+ job postings and a 25+ location store
+//      locator. TAKEN: §4. A suppliers page is not evidence of being publicly traded. The
+//      report's own honest caveat proves it — Cactus Club Cafe publishes Suppliers and Supply
+//      Chain Accountability, has no ticker, and is a PAST ENACTUS SFU PARTNER. Penalising an
+//      account that already said yes, for a reason factually untrue of it, means the
+//      implementation is wrong rather than the account. K-SIZE-01's separate two-or-more-proxy
+//      arm is §6's own rule and is unchanged.
+//
+//  C2. P-04, "branch autonomy unproven". §4 defines it as "Head office outside BC, local branch
+//      exists but branch autonomy unproven" — three clauses. §5 step 3 says only "neither fires
+//      -> UNPROVEN -> apply P-04". TAKEN: §4. §5 step 3 is an incomplete implementation of the
+//      §4 definition, not a broader rule. Applying the bare fall-through charged -30 to every
+//      independent single-location business in the corpus — the population §5 exists to protect,
+//      which the org report calls "where the yes lives".
+//
+//  C3. §5's own scope. §5 is "Franchise and branch handling" and its one-line rule is "test the
+//      LOCATION, not the brand", but its procedure has no entry condition, so an independent
+//      business fell through to UNPROVEN. TAKEN: §5's title and stated rule govern its
+//      procedure. A row with no observed chain or branch signal gets NOT_APPLICABLE.
+//
+//  C4. K-REL-08's cross-record penalty. §3.4 specifies "-40 on every other lead sharing
+//      email_domain" verbatim, with no free-mail carve-out, while D-07 one section later exempts
+//      LIST_free_mail_providers because "a Vancouver bakery legitimately uses @gmail.com".
+//      TAKEN: the D-07 exemption applies here too, reusing the same list. Read literally, one
+//      bounced info@gmail.com would levy the largest penalty in §4 on every free-mail lead in
+//      the corpus — a corpus-wide outage from one bad address. This is the one place a rule is
+//      NARROWED against its own text rather than widened; recorded here because the brief
+//      requires noting a disagreement rather than shipping it silently.
+//
+// A fifth contradiction lives in the ICP report and is documented at `assignSegment` in
+// src/lib/scoring.ts: §5 S4 asserts §4 precedence sends a funded CPG brand to S4, while §4's
+// normative ladder tests raised_institutional_capital first and sends it to S11. TAKEN: §4.
 
 import {
   type KeyedList,
@@ -1572,12 +1620,24 @@ export const HARD_BOUNCE_SIBLING_DELTA = -40;
  * cleared. The −40 half lands on DIFFERENT records, which is neither a scope nor a duration, so
  * it is emitted as a `SiblingPenalty` the caller applies — describing it only in the rendered
  * sentence would leave it permanently unenforced.
+ *
+ * ENTRY CONDITION on the cross-record half: the shared domain must be a domain that actually
+ * implies shared ownership. A free-mail provider does not — `@gmail.com` is shared by unrelated
+ * businesses, and D-07 already exempts the same list for the same reason. Without this, one
+ * bounced `info@gmail.com` levies the largest penalty in §4 on every free-mail lead in the
+ * corpus. See the REPORT CONTRADICTIONS note at the head of this file.
  */
-export function kRel08HardBounced(a: Account, now: Date): PredicateResult {
+export function kRel08HardBounced(
+  a: Account,
+  now: Date,
+  lists?: Pick<QualificationLists, "freeMailProviders">,
+): PredicateResult {
   const at = a.rel?.bounced_hard_at;
   if (!at) return pass("K-REL-08");
-  const domain = emailDomain(a);
+  const rawDomain = emailDomain(a);
   const address = a.email ?? "";
+  const sharedOwnership = Boolean(rawDomain) && !lists?.freeMailProviders.domains.has(rawDomain);
+  const domain = sharedOwnership ? rawDomain : "";
   return {
     kind: "terminal",
     scope: "address",
@@ -1590,11 +1650,11 @@ export function kRel08HardBounced(a: Account, now: Date): PredicateResult {
       account: a,
       rule_id: "K-REL-08",
       verb: "rejected at this address",
-      because: `mail to it hard-bounced on ${at}. The address is dead forever; every other lead sharing ${domain || "this email domain"} takes a ${HARD_BOUNCE_SIBLING_DELTA} penalty but stays in the queue`,
+      because: `mail to it hard-bounced on ${at}. The address is dead forever${domain ? `; every other lead sharing ${domain} takes a ${HARD_BOUNCE_SIBLING_DELTA} penalty but stays in the queue` : ", and no other lead is penalised because the address is on a free-mail provider that implies no shared ownership"}`,
       evidence_url: "rel.bounced_hard_at",
       now,
     }),
-    // No domain means nothing to match a sibling on, so there is no penalty to emit.
+    // No domain, or a free-mail domain, means there is no sibling to match: nothing to emit.
     sibling_penalty: domain
       ? {
           match_field: "email_domain",
@@ -2283,7 +2343,7 @@ export function kRep02SensitiveSector(
 // Vancouver, Rumble, skoah., iDance, The Old Spaghetti Factory, Waves Coffee House, Browns
 // Socialhouse, Cactus Club Cafe, Popeye's Supplements and Red Bull.
 
-export type FranchiseStatus = "LOCAL_AUTHORITY" | "HEAD_OFFICE" | "UNPROVEN";
+export type FranchiseStatus = "LOCAL_AUTHORITY" | "HEAD_OFFICE" | "UNPROVEN" | "NOT_APPLICABLE";
 
 export interface FranchiseReport {
   status: FranchiseStatus;
@@ -2292,8 +2352,51 @@ export interface FranchiseReport {
   message: string;
 }
 
+/**
+ * §5's ENTRY CONDITION: is this row a location of something bigger at all?
+ *
+ * §5 is titled "Franchise and branch handling" and its one-line rule is "test the LOCATION, not
+ * the brand" — every signal in it is a property of a location of a chain. An independent
+ * single-location business is not a location of anything, so for that row the franchise question
+ * is NOT_APPLICABLE, never UNPROVEN. Running the ladder on it and falling through to Step 3 is
+ * what made P-04 fire on every independent SMB in the corpus — the exact population the report
+ * calls "where the yes lives".
+ *
+ * Admission requires observed evidence of a chain or branch relationship. Absence of that
+ * evidence is not evidence of a chain (§2.3).
+ */
+function isChainOrBranchLocation(a: Account): boolean {
+  const o = a.observations ?? {};
+  return Boolean(
+    // Any §5 signal was actually observed for this location (S1-S6, N1-N4 inputs).
+    o.location_page_text ||
+      o.location_has_own_domain_with_mx ||
+      o.location_specific_email ||
+      o.named_local_owner ||
+      o.bc_registry_distinct_entity ||
+      o.chain_has_franchise_page ||
+      o.only_head_office_contact ||
+      o.has_central_donation_form ||
+      o.corporate_owned_all_locations ||
+      // A store locator listing more than one location is direct evidence of a network.
+      (o.store_locator_location_count ?? 0) >= 2 ||
+      // K-GEO-02's carve-out already established that a local branch of this account exists.
+      o.bc_branch_confirmed,
+  );
+}
+
 export function franchiseOrBranchCarveOut(a: Account): FranchiseReport {
   const o = a.observations ?? {};
+
+  // Step 0 — the entry condition. Not a location of anything: §5 does not apply.
+  if (!isChainOrBranchLocation(a)) {
+    return {
+      status: "NOT_APPLICABLE",
+      signals: [],
+      message:
+        "No franchise or branch signal was observed, so this row is not a location of a chain and §5 does not apply to it. The franchise question is NOT APPLICABLE rather than unproven, and P-04 does not fire: an independent single-location business cannot have unproven autonomy as a branch of nothing.",
+    };
+  }
 
   // Step 1 — positive local-autonomy signals. ANY ONE returns LOCAL_AUTHORITY.
   const positive: string[] = [];
@@ -2354,6 +2457,19 @@ export interface PenaltyContext {
   lists: QualificationLists;
   now: Date;
   franchise?: FranchiseStatus;
+}
+
+/** P-04 clause 1: the account's registered head office is somewhere other than BC. */
+function headOfficeOutsideBc(a: Account): boolean {
+  if (a.address_region) return !isBcRegion(a.address_region);
+  if (a.address_country) return a.address_country.trim().toUpperCase() !== "CA";
+  return false;
+}
+
+/** P-04 clause 2: a local branch of that head office exists in scope. */
+function localBranchExists(a: Account, lists: QualificationLists): boolean {
+  if (a.observations?.bc_branch_confirmed) return true;
+  return localityBasis(a, lists).bases_in_scope.includes("operating_location");
 }
 
 function penalty(
@@ -2417,24 +2533,33 @@ export function evaluatePenalties(a: Account, ctx: PenaltyContext): PenaltyResul
     );
   }
 
-  // P-03 — publicly traded, or exactly one enterprise proxy. Kill only if K-CHAN-01/02 also fires.
-  const proxies = enterpriseProxies(a);
-  if (o.has_stock_ticker || o.has_investor_relations || proxies.count === 1) {
+  // P-03 — publicly traded. ENTRY CONDITION: a ticker or an investor-relations section, which is
+  // what §4 defines the rule as. §6's "one proxy -> P-03" arm is not applied here; see the
+  // REPORT CONTRADICTIONS note at the head of this file.
+  if (o.has_stock_ticker || o.has_investor_relations) {
+    const evidence = [
+      o.has_stock_ticker ? "stock_ticker" : null,
+      o.has_investor_relations ? "investor_relations_section" : null,
+    ]
+      .filter(Boolean)
+      .join(", ");
     out.push(
       penalty(
         a,
         ctx,
         "P-03",
-        "enterprise_signal",
+        "publicly_traded",
         -20,
-        proxies.fired.join(", ") || "investor relations / ticker",
-        `it shows an enterprise signal (${proxies.fired.join(", ") || "investor relations or a stock ticker"}). This correlates with formal giving, but Red Bull-style local product releases still happen — a SINGLE procurement signal must never kill, and Cactus Club Cafe publishes Suppliers and is a past partner`,
+        evidence,
+        `it publishes ${evidence}, which is direct evidence of a publicly traded company. This correlates with formal giving, but Red Bull-style local product releases still happen, so it is a penalty and not a kill`,
       ),
     );
   }
 
-  // P-04 — head office outside BC / franchise autonomy unproven.
-  if (ctx.franchise === "UNPROVEN") {
+  // P-04 — ENTRY CONDITION, from §4's own definition: "Head office outside BC, local branch
+  // exists but branch autonomy unproven". All three clauses are required. §5's bare UNPROVEN
+  // fall-through implements only the third; see the REPORT CONTRADICTIONS note.
+  if (ctx.franchise === "UNPROVEN" && headOfficeOutsideBc(a) && localBranchExists(a, lists)) {
     out.push(
       penalty(
         a,
@@ -2442,8 +2567,8 @@ export function evaluatePenalties(a: Account, ctx: PenaltyContext): PenaltyResul
         "P-04",
         "branch_autonomy_unproven",
         -30,
-        "franchise_status=unproven",
-        "neither a local-autonomy nor a head-office signal was observed for this location. Real but weak, so the row stays in the queue",
+        `head office ${a.address_region ?? a.address_country}, franchise_status=unproven`,
+        `its head office is outside BC and a local branch exists, but neither a local-autonomy nor a head-office signal was observed for that branch. Real but weak, so the row stays in the queue`,
       ),
     );
   }
@@ -2707,7 +2832,7 @@ export function killPredicateSequence(
     () => kRel06DeclinedPermanently(a, now),
     () => kRel05DeclinedRecently(a, now),
     () => kRel07DeclinedOnTiming(a, now),
-    () => kRel08HardBounced(a, now),
+    () => kRel08HardBounced(a, now, lists),
     // 3. national partner
     () => kOrg01NationalPartner(a, lists, now),
     // 4. org type

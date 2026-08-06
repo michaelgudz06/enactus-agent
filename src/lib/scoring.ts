@@ -1264,9 +1264,17 @@ export function gateInputsFromFilterResult(
   const deliverabilityRules = new Set(["D-01", "D-02", "D-03", "D-05", "D-06", "D-07", "K-REL-08"]);
   // An address-scoped terminal (D-05, D-07, K-REL-08) does NOT exclude the account, but it does
   // mean the recorded contact is undeliverable — so it feeds G_DELIVERABLE, not G_EXCLUDED.
-  const deliverabilityKilled = [...result.kills, ...result.field_terminals].some((k) =>
-    deliverabilityRules.has(k.rule_id),
-  );
+  //
+  // `overridden_kills` counts too. The never-kill allowlist keeps a past sponsor in the corpus
+  // when its domain goes dead; it does not make the dead domain deliverable. Reading only
+  // `kills` turned a suppressed D-01 into a POSITIVE assertion that the address works, and
+  // `scoreAccess` then awarded the full deliverable_contact weight to a domain with no
+  // nameservers.
+  const deliverabilityKilled = [
+    ...result.kills,
+    ...result.field_terminals,
+    ...result.overridden_kills,
+  ].some((k) => deliverabilityRules.has(k.rule_id));
   const deliverabilityUnknown = result.cannot_evaluate.some((c) => deliverabilityRules.has(c.rule_id));
 
   return {
