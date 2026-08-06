@@ -4,9 +4,19 @@ import { chatJSON } from "@/lib/llm";
 import { sanitizeEmail } from "@/lib/sanitize";
 import { Lead } from "@/lib/types";
 import { ENACTUS_PROJECTS } from "@/lib/enactus";
+import { ValueDefect, defectMessage, describeValue, reviewFields } from "@/lib/review";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+// Checked field by field, on the same contract the plan and the leads use. A
+// subject that came back as the wrong type used to reach sanitizeEmail as a
+// non-string and throw out of the handler, so the request failed with an opaque
+// 500 and the body a human could have sent went with it.
+const DRAFT_PROPERTIES: Record<string, Record<string, unknown>> = {
+  subject: { type: "string" },
+  body: { type: "string" },
+};
 
 const STYLE = `Write outreach emails that sound like a real person wrote them.
 Hard rules:
@@ -44,9 +54,9 @@ export async function POST(req: Request) {
     l.sponsorship_type?.length ? `Angle: ${l.sponsorship_type.join(", ")}` : "",
   ].filter(Boolean).join("\n");
 
-  let out: { subject: string; body: string };
+  let out: unknown;
   try {
-    out = await chatJSON<{ subject: string; body: string }>(
+    out = await chatJSON<unknown>(
       [
         { role: "system", content: `${goal}\n\n${STYLE}\n\nRespond ONLY as JSON: {"subject": string, "body": string}` },
         { role: "user", content: `Draft a first-touch outreach email to this lead.\n\n${facts}` },
@@ -57,8 +67,19 @@ export async function POST(req: Request) {
     return Response.json({ error: `Draft failed: ${(e as Error).message}` }, { status: 500 });
   }
 
-  const subject = sanitizeEmail(out.subject || `Enactus SFU x ${l.company}`);
-  const body = sanitizeEmail(out.body || "");
+  // Nothing object-shaped came back, so there is no field to keep: a real stop.
+  if (!out || typeof out !== "object" || Array.isArray(out)) {
+    return Response.json({ error: `The model did not return a draft: got ${describeValue(out)}` }, { status: 502 });
+  }
+
+  // A malformed subject costs the subject, never the body beside it.
+  const defects: ValueDefect[] = [];
+  const raw = { ...(out as Record<string, unknown>) };
+  reviewFields(l.company, raw, DRAFT_PROPERTIES, defects);
+
+  const subject = sanitizeEmail(typeof raw.subject === "string" && raw.subject.trim() ? raw.subject : `Enactus SFU x ${l.company}`);
+  const body = sanitizeEmail(typeof raw.body === "string" ? raw.body : "");
+  const notes = defects.map((d) => defectMessage(d, "draft"));
 
   const { data: draft } = await supabaseAdmin
     .from(DRAFTS)
@@ -66,5 +87,5 @@ export async function POST(req: Request) {
     .select("*")
     .single();
 
-  return Response.json({ subject, body, draftId: draft?.id ?? null, to: l.contact_email });
+  return Response.json({ subject, body, notes, draftId: draft?.id ?? null, to: l.contact_email });
 }

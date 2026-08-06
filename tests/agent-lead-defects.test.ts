@@ -120,8 +120,8 @@ describe("a defective field costs that field only", () => {
     expect(out.statuses.some((s) => s.includes("reasoning") && s.includes("42"))).toBe(true);
   });
 
-  test("keeps a wrongly typed list from reaching the record", async () => {
-    const out = await runWithLeads([rawLead({ company: "Gabi & Jules", sponsorship_type: "in_kind" })]);
+  test("keeps a list that is the wrong type entirely out of the record", async () => {
+    const out = await runWithLeads([rawLead({ company: "Gabi & Jules", sponsorship_type: 42 })]);
 
     expect(out.leads).toHaveLength(1);
     expect(out.leads[0].sponsorship_type).toEqual([]);
@@ -188,6 +188,28 @@ describe("a recoverable value is read rather than thrown away", () => {
     expect(reported).toHaveLength(1);
     expect(reported[0]).toMatch(/named no source/i);
     expect(reported[0]).not.toContain("cited candidate");
+  });
+
+  // A lone value where a list was asked for reads as a list of one, on the same
+  // rule that reads "88" as 88. Losing a usable sponsorship angle to a typo is
+  // the same defect as losing a usable score to one.
+  test("reads a single list entry sent as a bare string", async () => {
+    const out = await runWithLeads([rawLead({ company: "Gabi & Jules", sponsorship_type: "in_kind" })]);
+
+    expect(out.leads).toHaveLength(1);
+    expect(out.leads[0].sponsorship_type).toEqual(["in_kind"]);
+    expect(out.statuses.some((s) => s.includes("sponsorship_type"))).toBe(true);
+  });
+
+  // One unusable entry may not cost the entries beside it, exactly as one
+  // unusable lead may not cost the leads beside it.
+  test("keeps the usable entries of a partly malformed list", async () => {
+    const out = await runWithLeads([
+      rawLead({ company: "Gabi & Jules", sponsorship_type: ["monetary", 42, "in_kind"] }),
+    ]);
+
+    expect(out.leads[0].sponsorship_type).toEqual(["monetary", "in_kind"]);
+    expect(out.statuses.some((s) => s.includes("sponsorship_type"))).toBe(true);
   });
 
   test("leaves a value with no single reading alone", async () => {

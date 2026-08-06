@@ -63,18 +63,44 @@ schema-validate every JSON response. Never fabricate a value the model did not
 supply, and never present unverified data as verified.
 
 A wrong type is read only when it has exactly one possible reading — `fit_score`
-of `"88"` is a slip, not an ambiguity, so `recoverValue` in `src/lib/agent.ts`
-reads it as 88 and reports the recovery. Anything open to interpretation
-(`"high"`) is not guessed at: the field is left at its default. Both are
+of `"88"` is a slip, not an ambiguity, so `recoverValue` in `src/lib/review.ts`
+reads it as 88 and reports the recovery. A lone value where a list was asked for
+reads as a list of one, and an unusable entry in a list costs that entry rather
+than the list. Anything open to interpretation (`"high"`, or `"yes"` for a
+boolean) is not guessed at: the field is left at its default. All of them are
 announced on the activity stream, because a silent repair teaches nobody that
-the model is misbehaving. Do not "restore" a stricter rule by deleting that
+the model is misbehaving. Do not "restore" a stricter rule by deleting a
 recovery — losing a usable score to a typo was a real defect.
 
-Rejection is scoped to the thing that failed. A bad field costs that field, an
-unusable record costs that record, and neither may cost the rest of the batch:
-`reviewLeads` checks each lead on its own and emits what it changed or dropped.
-Never validate a batch of leads atomically — one wrong-typed field taking every
-lead with it is the exact failure this agent was repaired for.
+### Validation annotates, it does not abort
+
+A validation failure costs the smallest thing that actually failed, and nothing
+more. It stops work only when the next step genuinely cannot run. A malformed
+optional field costs that field, a recoverable one is normalised, a malformed
+required field costs the record that carries it, and none of them may cost the
+run.
+
+`src/lib/review.ts` is the one mechanism that enforces this, and every level
+reads model output through it: `reviewPlan` and `reviewLeads` in
+`src/lib/agent.ts`, and the draft route. Do not add a second, parallel path —
+that is how the same failure shape kept reappearing. It was fixed three times,
+one level higher each time: a bad field killed a lead, then killed the whole
+batch, then killed the entire run before a single search. It is stated here at
+the level of the principle so a fourth level cannot appear.
+
+Locally, check the envelope and nothing more. A schema handed to `chatJSON` that
+type-checks properties makes one cosmetic field fatal to everything beside it —
+a wrong-typed `altAngle`, a hint about a different search angle, used to end the
+run on "Planning failed" while the search queries next to it were perfectly
+good. The strict schema still goes to the provider; see `PLAN_SCHEMA` and
+`LEADS_SCHEMA` for the two views of one shape.
+
+A genuine blocker still stops the run, and says what was missing. A plan with no
+usable `searchQueries` means there is nothing to search: that is a real stop and
+must stay one. Never soften it into a warning, and never widen it back out to
+cover fields the next step does not need — `criteria` sharpens the ranking
+prompt that already carries the user's request, so losing it degrades the run
+rather than ending it.
 
 The same honesty applies to storage. A failed insert must never be dressed up as
 a saved lead: `persistLead` returns whether the row was actually written, the run

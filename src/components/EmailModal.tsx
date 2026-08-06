@@ -12,10 +12,15 @@ export default function EmailModal({ lead, onClose }: { lead: Lead; onClose: () 
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
   const [gmailMsg, setGmailMsg] = useState("");
+  // What the draft lost on the way here. A field the model sent in the wrong
+  // type costs that field, and saying so beats a draft that is quietly thinner
+  // than it looks.
+  const [notes, setNotes] = useState<string[]>([]);
 
   const generate = useCallback(async () => {
     setLoading(true);
     setError("");
+    setNotes([]);
     try {
       const res = await fetch("/api/email/draft", {
         method: "POST",
@@ -26,6 +31,7 @@ export default function EmailModal({ lead, onClose }: { lead: Lead; onClose: () 
       if (!res.ok) throw new Error(data.error || "Failed to draft");
       setSubject(data.subject);
       setBody(data.body);
+      if (Array.isArray(data.notes)) setNotes(data.notes);
       if (data.to) setTo(data.to);
     } catch (e) {
       setError((e as Error).message);
@@ -127,6 +133,13 @@ export default function EmailModal({ lead, onClose }: { lead: Lead; onClose: () 
                   style={{ background: "var(--surface2)", borderColor: "var(--border)" }}
                 />
               </div>
+              {notes.length > 0 && (
+                <ul className="text-xs space-y-1" style={{ color: "var(--muted)" }}>
+                  {notes.map((note, i) => (
+                    <li key={i}>{note}</li>
+                  ))}
+                </ul>
+              )}
             </>
           )}
 
