@@ -25,11 +25,14 @@ recorded on the lead as `contact_email_status` and is never presented as a
 contact — and the lead itself is kept, because the company may still be worth
 pursuing even when the address is not usable.
 
-Company websites go through the same gate, whichever route they arrive by —
-claimed by the model or derived from a search result. Never synthesise one from
-an aggregator or social URL: a LinkedIn post about a bakery is evidence, not the
-bakery's website. A claim that fails is recorded as `website_status` and the lead
-is kept, exactly as with an address.
+Company websites are gated by how much the code actually knows. A domain the
+model *claims* is a claim: it is format-checked and has to resolve, and a claim
+that fails is recorded as `website_status` while the lead is kept, exactly as
+with an address. A hostname taken from a search result is evidence the code
+observed, so it is not re-verified — but it still goes through the aggregator
+check, because an aggregator or social host is never the company's own website
+whichever route it arrives by. A LinkedIn post about a bakery is evidence, not
+the bakery's website.
 
 This is not hypothetical. Live testing caught the agent inventing
 `momentenergy.co` (no A record, no MX) for a company whose real domain is

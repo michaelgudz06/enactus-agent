@@ -55,9 +55,10 @@ describe("a defective field costs that field only", () => {
     expect(out.errors).toEqual([]);
     expect(out.leads.map((l) => l.company)).toEqual(["Renaissance Coffee", "Gabi & Jules", "BAK'D Cookies"]);
 
-    // The damaged lead is kept, with each bad field falling back to its default.
+    // The damaged lead is kept: the recoverable field is read, the rest fall
+    // back to their defaults.
     const [first, hurt, last] = out.leads;
-    expect(hurt.fit_score).toBeNull();
+    expect(hurt.fit_score).toBe(88);
     expect(hurt.connection_type).toBe("none");
     expect(hurt.why_fit).toBeNull();
     expect(hurt.description).toBe("Campus cafe operating at SFU Burnaby for 30 years.");
@@ -84,7 +85,27 @@ describe("a defective field costs that field only", () => {
   test("says nothing about leads that are clean", async () => {
     const out = await runWithLeads([rawLead(), rawLead({ company: "Gabi & Jules", source_index: 2 })]);
 
-    expect(out.statuses.some((s) => /ignoring|Dropped/.test(s))).toBe(false);
+    expect(out.statuses.some((s) => /ignoring|Dropped|read /.test(s))).toBe(false);
+  });
+
+  // The strict schema this run sends lists connection_type as required with null
+  // among its allowed values, so null is the model reporting no tie -- reporting
+  // it as misbehaviour would train the reader to ignore the stream.
+  test("treats a null connection_type as no tie rather than a defect", async () => {
+    const out = await runWithLeads([
+      rawLead({ connection_type: null }),
+      rawLead({ company: "Gabi & Jules", source_index: 2, connection_type: null }),
+    ]);
+
+    expect(out.leads.map((l) => l.connection_type)).toEqual(["none", "none"]);
+    expect(out.statuses.some((s) => s.includes("connection_type"))).toBe(false);
+  });
+
+  test("still reports an unrecognised connection that is not null", async () => {
+    const out = await runWithLeads([rawLead({ connection_type: "partner" })]);
+
+    expect(out.leads[0].connection_type).toBe("none");
+    expect(out.statuses.some((s) => s.includes("connection_type") && s.includes("partner"))).toBe(true);
   });
 
   test("survives a wrongly typed field that the persist path would have thrown on", async () => {
@@ -99,16 +120,59 @@ describe("a defective field costs that field only", () => {
     expect(out.statuses.some((s) => s.includes("reasoning") && s.includes("42"))).toBe(true);
   });
 
-  test("keeps a wrongly typed list and index from reaching the record", async () => {
-    const out = await runWithLeads([
-      rawLead({ company: "Gabi & Jules", sponsorship_type: "in_kind", source_index: "2" }),
-    ]);
+  test("keeps a wrongly typed list from reaching the record", async () => {
+    const out = await runWithLeads([rawLead({ company: "Gabi & Jules", sponsorship_type: "in_kind" })]);
 
     expect(out.leads).toHaveLength(1);
     expect(out.leads[0].sponsorship_type).toEqual([]);
-    expect(out.leads[0].sources).toEqual([]);
     expect(out.statuses.some((s) => s.includes("sponsorship_type"))).toBe(true);
+  });
+});
+
+// A wrong type with exactly one possible reading is a slip, not an ambiguity.
+describe("a recoverable value is read rather than thrown away", () => {
+  test("reads a stringified fit score and still clamps it", async () => {
+    const out = await runWithLeads([
+      rawLead({ fit_score: "88.4" }),
+      rawLead({ company: "Gabi & Jules", source_index: 2, fit_score: "140" }),
+    ]);
+
+    expect(out.leads[0].fit_score).toBe(88);
+    expect(out.leads[1].fit_score).toBe(100);
+  });
+
+  test("reports the recovery as the coercion it is", async () => {
+    const out = await runWithLeads([rawLead({ fit_score: "88" })]);
+
+    const reported = out.statuses.filter((s) => s.includes("fit_score"));
+
+    expect(reported).toHaveLength(1);
+    expect(reported[0]).toContain("88");
+    expect(reported[0]).toMatch(/read fit_score/);
+  });
+
+  test("reads a stringified source index and still bounds-checks it", async () => {
+    const out = await runWithLeads([
+      rawLead({ company: "Gabi & Jules", source_index: "2", website: null }),
+      rawLead({ company: "BAK'D Cookies", source_index: "99", website: null }),
+    ]);
+
+    expect(out.leads[0].sources).toEqual([
+      { url: "https://gabiandjules.com/pages/about-us", title: "Gabi & Jules" },
+    ]);
+    expect(out.leads[1].sources).toEqual([]);
     expect(out.statuses.some((s) => s.includes("source_index"))).toBe(true);
+  });
+
+  test("leaves a value with no single reading alone", async () => {
+    const out = await runWithLeads([
+      rawLead({ fit_score: "high" }),
+      rawLead({ company: "Gabi & Jules", source_index: 2, fit_score: "" }),
+      rawLead({ company: "BAK'D Cookies", source_index: 1, fit_score: { value: 90 } }),
+    ]);
+
+    expect(out.leads.map((l) => l.fit_score)).toEqual([null, null, null]);
+    expect(out.statuses.filter((s) => s.includes("ignoring fit_score"))).toHaveLength(3);
   });
 });
 

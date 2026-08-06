@@ -452,8 +452,11 @@ export interface LeadDefect {
   lead: string;
   field: string;
   detail: string;
-  /** True when the whole record was unusable, false when only this field was. */
-  dropped: boolean;
+  /**
+   * What the defect cost: the value was read anyway ("coerced"), the field was
+   * left at its default ("ignored"), or the whole record was unusable ("dropped").
+   */
+  action: "coerced" | "ignored" | "dropped";
 }
 
 function describeValue(value: unknown): string {
@@ -471,19 +474,40 @@ function expectedTypes(schema: Record<string, unknown>): string {
   return Array.isArray(declared) ? (declared as string[]).join(" or ") : String(declared);
 }
 
+// A value the model sent in the wrong type but with only one possible reading:
+// "88" for a number is a slip, not an ambiguity. Recovering it keeps a lead off
+// the board with no fit score for a typo, and the slip is still reported.
+function recoverValue(schema: Record<string, unknown>, value: unknown): { value: unknown } | null {
+  const declared = schema.type;
+  const allowed = Array.isArray(declared) ? (declared as string[]) : [String(declared)];
+  if (allowed.includes("number") && typeof value === "string") {
+    const trimmed = value.trim();
+    const asNumber = Number(trimmed);
+    if (trimmed && Number.isFinite(asNumber)) return { value: asNumber };
+  }
+  return null;
+}
+
 export function defectMessage(defect: LeadDefect): string {
-  return defect.dropped
-    ? `Dropped ${defect.lead}: ${defect.detail}.`
-    : `${defect.lead}: ignoring ${defect.field} — ${defect.detail}. The rest of the lead was kept.`;
+  switch (defect.action) {
+    case "dropped":
+      return `Dropped ${defect.lead}: ${defect.detail}.`;
+    case "coerced":
+      return `${defect.lead}: ${defect.detail}. The model sent the wrong type for it.`;
+    default:
+      return `${defect.lead}: ignoring ${defect.field} — ${defect.detail}. The rest of the lead was kept.`;
+  }
 }
 
 /**
  * Checks each lead on its own, field by field.
  *
- * One bad field costs that field and nothing else: it is removed so persistLead's
- * existing normalisation supplies the default, and the loss is reported. A record
- * is dropped only when it is genuinely unusable -- no company name to put on a
- * card. A defect in one lead never touches another lead in the same response.
+ * One bad field costs that field and nothing else. A wrong type with a single
+ * possible reading is recovered; anything else is removed so persistLead's
+ * existing normalisation supplies the default. Either way the model's slip is
+ * reported rather than swallowed. A record is dropped only when it is genuinely
+ * unusable -- no company name to put on a card. A defect in one lead never
+ * touches another lead in the same response.
  */
 export function reviewLeads(entries: unknown[]): { leads: RawLead[]; defects: LeadDefect[] } {
   const leads: RawLead[] = [];
@@ -496,7 +520,7 @@ export function reviewLeads(entries: unknown[]): { leads: RawLead[]; defects: Le
         lead: position,
         field: "lead",
         detail: `expected an object, got ${describeValue(entry)}`,
-        dropped: true,
+        action: "dropped",
       });
       return;
     }
@@ -508,7 +532,7 @@ export function reviewLeads(entries: unknown[]): { leads: RawLead[]; defects: Le
         lead: position,
         field: "company",
         detail: `no usable company name (got ${describeValue(raw.company)})`,
-        dropped: true,
+        action: "dropped",
       });
       return;
     }
@@ -518,24 +542,36 @@ export function reviewLeads(entries: unknown[]): { leads: RawLead[]; defects: Le
       try {
         validateAgainstSchema(raw[field], schema, field);
       } catch {
-        defects.push({
-          lead: company,
-          field,
-          detail: `expected ${expectedTypes(schema)}, got ${describeValue(raw[field])}`,
-          dropped: false,
-        });
-        delete raw[field];
+        const recovered = recoverValue(schema, raw[field]);
+        if (recovered) {
+          defects.push({
+            lead: company,
+            field,
+            detail: `read ${field} ${describeValue(raw[field])} as ${describeValue(recovered.value)}`,
+            action: "coerced",
+          });
+          raw[field] = recovered.value;
+        } else {
+          defects.push({
+            lead: company,
+            field,
+            detail: `expected ${expectedTypes(schema)}, got ${describeValue(raw[field])}`,
+            action: "ignored",
+          });
+          delete raw[field];
+        }
       }
     }
 
-    // A connection the code does not recognise is a claim about a real
-    // relationship, so it is reported rather than quietly becoming "none".
-    if (raw.connection_type !== undefined && !(CONNECTION_TYPES as string[]).includes(raw.connection_type as string)) {
+    // The schema this run sends permits null, so null is the model saying it
+    // found no tie, not a defect. Any other unrecognised value is a claim about
+    // a real relationship, and is reported rather than quietly becoming "none".
+    if (raw.connection_type != null && !(CONNECTION_TYPES as string[]).includes(raw.connection_type as string)) {
       defects.push({
         lead: company,
         field: "connection_type",
         detail: `expected one of ${CONNECTION_TYPES.join(", ")}, got ${describeValue(raw.connection_type)}`,
-        dropped: false,
+        action: "ignored",
       });
       delete raw.connection_type;
     }
