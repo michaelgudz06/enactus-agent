@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, vi } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 
 const stub = vi.hoisted(() => ({ chatJSON: vi.fn() }));
 
@@ -17,19 +17,25 @@ vi.mock("@/lib/llm", async (orig) => ({
   chatJSON: stub.chatJSON,
 }));
 vi.mock("@/lib/supabase", () => {
-  // Enough of the query builder for the one read and the one insert the route
-  // makes. Nothing here reaches a real project.
+  // Enough of the query builder for the reads and inserts the route makes: the
+  // lead, the draft row, the spend ledger the budget gate reads, and the
+  // attribution line. Nothing here reaches a real project.
   const single = async () => ({ data: LEAD, error: null });
   const builder = {
     select: () => builder,
     eq: () => builder,
     insert: () => builder,
     single,
+    // The spend read is awaited without `.single()`, so the builder has to
+    // settle to an empty, error-free result: a month with nothing spent in it.
+    then: (resolve: (v: unknown) => unknown) => Promise.resolve({ data: [], error: null }).then(resolve),
   };
   return {
     hasServiceKey: () => true,
     LEADS: "enactus_leads",
     DRAFTS: "enactus_email_drafts",
+    SPEND: "enactus_api_spend",
+    ACTIVITY: "enactus_activity_log",
     supabaseAdmin: { from: () => builder },
   };
 });
@@ -38,7 +44,17 @@ const { POST } = await import("@/app/api/email/draft/route");
 
 beforeEach(() => {
   vi.resetAllMocks();
+  // A configured SFU inbox, so these tests see only the model's own defects.
+  // The unconfigured and non-SFU cases are covered in outreach-sender.test.ts.
+  vi.stubEnv("OUTREACH_FROM_EMAIL", "enactus@sfu.ca");
 });
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
+// The sign-off is written by code, so every usable body ends with it.
+const SIGNATURE = "Tester\nExternal Relations, Enactus SFU\nenactus@sfu.ca";
 
 async function draftFrom(response: unknown) {
   stub.chatJSON.mockResolvedValueOnce(response);
@@ -53,7 +69,7 @@ describe("a defective draft field costs that field only", () => {
     const { status, json } = await draftFrom({ subject: 42, body: "Hi there, we would love 15 minutes." });
 
     expect(status).toBe(200);
-    expect(json.body).toBe("Hi there, we would love 15 minutes.");
+    expect(json.body).toBe(`Hi there, we would love 15 minutes.\n\n${SIGNATURE}`);
     // The subject falls back rather than taking the request down with it.
     expect(json.subject).toBe("Enactus SFU x Renaissance Coffee");
   });
@@ -110,7 +126,7 @@ describe("a draft field with nothing in it is announced too", () => {
 
       expect(status).toBe(200);
       expect(json.subject).toBe("Enactus SFU x Renaissance Coffee");
-      expect(json.body).toBe("Hi there.");
+      expect(json.body).toBe(`Hi there.\n\n${SIGNATURE}`);
       expect(notesAbout(json, "subject")).toHaveLength(1);
     });
   }
@@ -144,7 +160,7 @@ describe("a draft wrapped in a list of one", () => {
 
     expect(status).toBe(200);
     expect(json.subject).toBe(WRAPPED[0].subject);
-    expect(json.body).toBe(WRAPPED[0].body);
+    expect(json.body).toBe(`${WRAPPED[0].body}\n\n${SIGNATURE}`);
   });
 
   test("announces the unwrap, which the same draft unwrapped does not", async () => {

@@ -15,6 +15,19 @@
 // `~deepseek/deepseek-v4-flash-latest`, which would silently change model
 // underneath us and make a quality regression unattributable. OpenRouter
 // publishes no dated variant of v4-pro; if one appears, pin it here.
+//
+// Every call here is charged against the monthly cap in `src/lib/budget.ts`
+// before its fetch and booked after it. The check lives inside this client on
+// purpose: a cap a caller can route around by not calling the checker is not a
+// cap, and there is no option on any function below to skip it.
+import {
+  assertHeadroom,
+  estimateMessageTokens,
+  estimateTokens,
+  openRouterCostUsd,
+  recordSpend,
+} from "./budget";
+
 const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
 
 /** Prose only. Streams a visible analysis for a human to read. $0.435/$0.87 per 1M. */
@@ -28,6 +41,33 @@ export function hasLLMKey() {
 }
 
 type Msg = { role: "system" | "user" | "assistant"; content: string };
+
+/**
+ * What a completed call actually cost, from OpenRouter's own usage numbers.
+ * They are on every non-streaming response; when a stream is cut short before
+ * its usage chunk arrives, the character estimate stands in, which is why the
+ * headroom check above always runs on the ceiling rather than on this.
+ */
+async function bookUsage(
+  model: string,
+  operation: string,
+  usage: unknown,
+  fallback: { inputTokens: number; outputTokens: number }
+): Promise<void> {
+  const reported = usage as { prompt_tokens?: unknown; completion_tokens?: unknown } | null | undefined;
+  const inputTokens =
+    typeof reported?.prompt_tokens === "number" ? reported.prompt_tokens : fallback.inputTokens;
+  const outputTokens =
+    typeof reported?.completion_tokens === "number" ? reported.completion_tokens : fallback.outputTokens;
+  await recordSpend({
+    provider: "openrouter",
+    model,
+    operation,
+    inputTokens,
+    outputTokens,
+    costUsd: openRouterCostUsd(model, inputTokens, outputTokens),
+  });
+}
 
 function headers() {
   const key = process.env.OPENROUTER_API_KEY;
@@ -43,21 +83,31 @@ function headers() {
 // Non-streaming plain-text completion (used for email drafting).
 export async function chatText(
   messages: Msg[],
-  opts: { model?: string; maxTokens?: number; temperature?: number } = {}
+  opts: { model?: string; maxTokens?: number; temperature?: number; operation?: string } = {}
 ): Promise<string> {
+  const model = opts.model ?? STRUCTURED;
+  const maxTokens = opts.maxTokens ?? 900;
+  const inputTokens = estimateMessageTokens(messages);
+  await assertHeadroom(openRouterCostUsd(model, inputTokens, maxTokens), `a ${model} call`);
+
   const res = await fetch(OR_URL, {
     method: "POST",
     headers: headers(),
     body: JSON.stringify({
-      model: opts.model ?? STRUCTURED,
+      model,
       messages,
-      max_tokens: opts.maxTokens ?? 900,
+      max_tokens: maxTokens,
       temperature: opts.temperature ?? 0.6,
     }),
   });
   if (!res.ok) throw new Error(`OpenRouter ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const data = await res.json();
-  return data?.choices?.[0]?.message?.content ?? "";
+  const content: string = data?.choices?.[0]?.message?.content ?? "";
+  await bookUsage(model, opts.operation ?? "text", data?.usage, {
+    inputTokens,
+    outputTokens: estimateTokens(content),
+  });
+  return content;
 }
 
 export interface JsonSchemaSpec {
@@ -85,6 +135,8 @@ export async function chatJSON<T = unknown>(
     schema?: JsonSchemaSpec;
     /** Normalise known-benign shape variance before the schema check. */
     coerce?: (raw: unknown) => unknown;
+    /** Which pipeline step this is, for the spend ledger. */
+    operation?: string;
   } = {}
 ): Promise<T> {
   const model = opts.model ?? STRUCTURED;
@@ -94,6 +146,10 @@ export async function chatJSON<T = unknown>(
     );
   }
 
+  const maxTokens = opts.maxTokens ?? 1500;
+  const inputTokens = estimateMessageTokens(messages);
+  await assertHeadroom(openRouterCostUsd(model, inputTokens, maxTokens), `a ${model} call`);
+
   const send = async (format: Record<string, unknown>) =>
     fetch(OR_URL, {
       method: "POST",
@@ -101,7 +157,7 @@ export async function chatJSON<T = unknown>(
       body: JSON.stringify({
         model,
         messages,
-        max_tokens: opts.maxTokens ?? 1500,
+        max_tokens: maxTokens,
         temperature: 0.3,
         response_format: format,
       }),
@@ -126,6 +182,14 @@ export async function chatJSON<T = unknown>(
 
   const data = await res.json();
   const content: string = data?.choices?.[0]?.message?.content ?? "";
+  // Booked before the parse. A response that arrives unparseable was still
+  // generated and still billed, and a ledger that only counts the calls that
+  // went well is a ledger that drifts under exactly the conditions the cap
+  // matters most.
+  await bookUsage(model, opts.operation ?? "json", data?.usage, {
+    inputTokens,
+    outputTokens: estimateTokens(content),
+  });
   const parsed = extractJSON<unknown>(content);
   const shaped = opts.coerce ? opts.coerce(parsed) : parsed;
   if (opts.schema) validateAgainstSchema(shaped, opts.schema.validate ?? opts.schema.schema, opts.schema.name);
@@ -176,14 +240,22 @@ export function validateAgainstSchema(value: unknown, schema: Record<string, unk
 export async function streamReasoner(
   messages: Msg[],
   handlers: { onReasoning?: (delta: string) => void; onContent?: (delta: string) => void },
-  opts: { model?: string; maxTokens?: number; signal?: AbortSignal; fastProvider?: boolean } = {}
+  opts: { model?: string; maxTokens?: number; signal?: AbortSignal; fastProvider?: boolean; operation?: string } = {}
 ): Promise<{ reasoning: string; content: string }> {
+  const model = opts.model ?? REASONER;
+  const maxTokens = opts.maxTokens ?? 2400;
+  const inputTokens = estimateMessageTokens(messages);
+  await assertHeadroom(openRouterCostUsd(model, inputTokens, maxTokens), `a ${model} call`);
+
   const body: Record<string, unknown> = {
-    model: opts.model ?? REASONER,
+    model,
     messages,
-    max_tokens: opts.maxTokens ?? 2400,
+    max_tokens: maxTokens,
     temperature: 0.4,
     stream: true,
+    // Ask for the usage chunk so the ledger books what this actually cost
+    // rather than what it might have.
+    stream_options: { include_usage: true },
   };
   // Route to the highest-throughput provider so reasoning finishes within budget.
   if (opts.fastProvider) body.provider = { sort: "throughput" };
@@ -203,6 +275,7 @@ export async function streamReasoner(
   let buffer = "";
   let reasoning = "";
   let content = "";
+  let usage: unknown = null;
 
   try {
     while (true) {
@@ -219,6 +292,7 @@ export async function streamReasoner(
         if (payload === "[DONE]") continue;
         try {
           const json = JSON.parse(payload);
+          if (json?.usage) usage = json.usage;
           const delta = json?.choices?.[0]?.delta ?? {};
           const r: string | undefined = delta.reasoning ?? delta.reasoning_content;
           const c: string | undefined = delta.content;
@@ -239,6 +313,13 @@ export async function streamReasoner(
     // On a time-budget abort, keep whatever reasoning we streamed so far and
     // let the caller proceed to structuring. Re-throw genuine errors.
     if (!(opts.signal?.aborted || (e as Error)?.name === "AbortError")) throw e;
+  } finally {
+    // A run that aborted on its time budget still generated, and was still
+    // billed for, everything that streamed before the cut.
+    await bookUsage(model, opts.operation ?? "stream", usage, {
+      inputTokens,
+      outputTokens: estimateTokens(reasoning + content),
+    });
   }
   return { reasoning, content };
 }

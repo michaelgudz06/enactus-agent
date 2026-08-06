@@ -85,8 +85,22 @@ export async function ensureAccessToken(tokens: GmailTokens): Promise<GmailToken
   return { access_token: d.access_token, refresh_token: tokens.refresh_token, expiry: Date.now() + (d.expires_in ?? 3600) * 1000 };
 }
 
-export async function createDraft(accessToken: string, to: string, subject: string, body: string): Promise<string> {
+/**
+ * `from` is the club's @sfu.ca inbox, and it is only ever passed when one is
+ * actually configured -- a placeholder in a MIME header would be a malformed
+ * message, not a hint. Gmail honours it only if that address is a verified
+ * send-as alias on the connected account, which is a one-time setup step in
+ * Gmail itself and is documented in the README.
+ *
+ * Still a draft. There is no send path here, and there must not be one.
+ */
+export async function createDraft(
+  accessToken: string,
+  message: { to: string; subject: string; body: string; from?: string }
+): Promise<string> {
+  const { to, subject, body, from } = message;
   const mime = [
+    ...(from ? [`From: ${from}`] : []),
     `To: ${to}`,
     `Subject: ${subject}`,
     'Content-Type: text/plain; charset="UTF-8"',

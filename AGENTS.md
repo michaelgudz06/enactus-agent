@@ -79,6 +79,24 @@ any day for any reason. `config/alumni/README.md` is authoritative and carries t
 removal procedure — read it before touching that directory or wiring it into the
 pipeline.
 
+### Attribution is not accountability
+
+`src/lib/activity.ts` records who was signed in for each action: creating,
+editing or deleting a lead, generating a draft, running the agent, signing in.
+Name, action, record id. **No credential, session token or email body ever
+reaches that table** — `scrubDetail` enforces it on every entry rather than
+trusting each call site, and it also strips contact names and addresses, which
+belong on the lead and not in an audit line. `detail` holds primitives only so
+nothing nested can smuggle a secret past it.
+
+Two different things are easily conflated here, and only the first is built.
+Privacy law wants **one designated individual** answerable for the whole
+database, permanently, whoever happens to be logged in — it does not rotate per
+session, which is the entire point of designating someone. That decision is open
+and is **deliberately recorded nowhere in this repository**. Do not name anyone
+as accountable in code, config or docs, and do not read a name in the activity
+log as that person.
+
 ### Code decides, the model reports
 
 The model proposes; code verifies and has the last word. Anything a model
@@ -134,6 +152,48 @@ The same honesty applies to storage. A failed insert must never be dressed up as
 a saved lead: `persistLead` returns whether the row was actually written, the run
 reports every failure with the database's own message, and the UI only claims
 leads reached the board when they did.
+
+### The $20 CAD monthly cap is a stop, not a budget line
+
+`src/lib/budget.ts` is the only mechanism. It meters the two providers that cost
+money — OpenRouter (`src/lib/llm.ts`) and Exa (`src/lib/exa.ts`) — against a hard
+$20 CAD/month cap, and the README says what that buys.
+
+Three properties hold it together, and each exists because the alternative is a
+run that looks finished and is not:
+
+- **The check is inside the provider clients**, before the fetch, not at their
+  call sites. No caller can route around it and **no function takes a skip
+  flag**. A cap a caller can wave away is not a cap. Do not add an argument that
+  bypasses it, including "just for tests" — the tests set the ledger instead.
+- **A run either happens in full or does not start.** `runAgent` prices its own
+  worst case up front and refuses cleanly, naming the cap and the spend. Never
+  soften this into a smaller run: partial leads that look complete are the
+  failure class this codebase was repaired for four times.
+- **A budget stop must never wear the clothes of a degradation.** Every catch in
+  the pipeline that keeps a run alive through a bad model response re-throws
+  `BudgetExceededError` through `rethrowIfBudget`, because otherwise "we ran out
+  of money" arrives as "no candidates found" or "ranking from the research
+  instead". `tests/agent-budget-stop.test.ts` holds that, one test per catch.
+
+Unknown spend is treated as spent: a ledger that cannot be read stops the work
+rather than assuming zero, and a failed read is never cached as a clean month.
+An unpriced model is charged at the dearest known rate, never free — so a new
+pin in `src/lib/llm.ts` needs a price in `OPENROUTER_PRICES` or the cap starts
+guessing. `RUN_SHAPE` is where the run's shape lives so the estimate and the
+pipeline cannot drift apart.
+
+### Outreach comes from an SFU inbox, and code writes the sign-off
+
+`src/lib/sender.ts`. `OUTREACH_FROM_EMAIL` must be an `@sfu.ca` address;
+anything else is **refused rather than used**, because quietly signing from a
+personal mailbox defeats the ruling while looking fine. Unconfigured still
+drafts, with an obvious bracketed placeholder — a guard that stops a student
+drafting because an env var is missing is worse than no guard.
+
+The signature is appended by code and the model is told not to write one. That
+is the same rule as `src/lib/contact.ts`: an address is a fact, and a model asked
+for one invents one.
 
 ### Drafts only, never send
 
@@ -206,7 +266,14 @@ a row, and leave `value` blank with a note rather than asserting an unverified d
 
 - `npm test` runs the vitest suite. Tests must never reach the live Supabase
   project: with `SUPABASE_SERVICE_ROLE_KEY` unset the agent falls back to an
-  in-memory lead, which is what the suite relies on.
+  in-memory lead, which is what the suite relies on. A test that mocks
+  `@/lib/supabase` wholesale must export every table constant the code under
+  test touches (`SPEND` and `ACTIVITY` included) — vitest throws on a missing
+  one, and the budget gate reads it before anything else runs.
+- Provider prices in `src/lib/budget.ts` are **verified live, never guessed**,
+  and dated in the file. Re-verify against `GET
+  https://openrouter.ai/api/v1/models` and `docs.exa.ai/reference/pricing` when a
+  model pin moves. The README carries what the cap buys, measured.
 - `src/lib/llm.ts` pins the exact published model ID — dated where the provider
   publishes a dated variant, undated where it does not — and never a floating
   `-latest` alias, so a quality regression can be attributed to a model change.
@@ -224,9 +291,13 @@ a row, and leave `value` blank with a note rather than asserting an unverified d
   project.** Until they are, every insert fails on the missing column; the agent
   now reports that instead of showing leads it did not save, but the leads are
   still lost. The statements are listed at the top of the file for whoever
-  deploys, and repeated with the other migrations.
+  deploys, and repeated with the other migrations. `enactus_api_spend` and
+  `enactus_activity_log` are new tables rather than columns, so the file does
+  create them — but until it is run, the budget cap is per-process and nothing
+  is attributed. Both say so rather than implying otherwise.
 - Credentials live in `.env.local`, which is gitignored. Never print, log, or
-  commit a secret value.
+  commit a secret value. Variable names are documented in the README; add new
+  ones there.
 - **Run `npm ci` after any commit that changes `package.json`.** `js-yaml` is a
   direct dependency at 5.x, and eslint pulls a transitive 4.x; before the direct
   dependency existed, eslint's copy was the one hoisted to `node_modules/js-yaml`.

@@ -1,10 +1,13 @@
 import { getSession } from "@/lib/auth";
 import { supabaseAdmin, LEADS, DRAFTS, hasServiceKey } from "@/lib/supabase";
-import { chatJSON } from "@/lib/llm";
+import { STRUCTURED, chatJSON } from "@/lib/llm";
 import { sanitizeEmail } from "@/lib/sanitize";
 import { Lead } from "@/lib/types";
 import { ENACTUS_PROJECTS } from "@/lib/enactus";
 import { ValueDefect, defectMessage, describeValue, readEnvelope, reviewFields } from "@/lib/review";
+import { BudgetExceededError, budgetBlocker, estimateDraftUsd } from "@/lib/budget";
+import { outreachSender, withSignature } from "@/lib/sender";
+import { logActivity } from "@/lib/activity";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,13 +29,17 @@ const EMPTY_DRAFT_DETAIL: Record<string, string> = {
   body: "the model wrote no body, so this draft is yours to write",
 };
 
+// The sign-off is code's, not the model's. An email address is a fact, and a
+// model asked to write one will invent one -- the failure `src/lib/contact.ts`
+// exists to catch. `withSignature` appends the real one.
 const STYLE = `Write outreach emails that sound like a real person wrote them.
 Hard rules:
 - NEVER use em dashes or en dashes. Use short sentences, commas, or periods instead.
 - Be concise and brief. 90 to 150 words for the body. No filler, no corporate fluff.
 - Exactly one clear call to action (usually asking for a 15 minute chat).
 - Warm and specific, reference the concrete reason this company is a fit.
-- Plain text, no markdown. Sign off as the sender's name placeholder [Your Name], Enactus SFU.`;
+- Plain text, no markdown.
+- Do NOT write a sign-off, signature, name or email address at the end. One is appended for you. End on the call to action.`;
 
 export async function POST(req: Request) {
   const session = await getSession();
@@ -42,14 +49,20 @@ export async function POST(req: Request) {
   const { leadId } = await req.json().catch(() => ({}));
   if (!leadId) return Response.json({ error: "leadId required" }, { status: 400 });
 
+  // Cheap next to a run, but it is still the club's money, and a draft that
+  // half-generates is no more use than half a run.
+  const blocker = await budgetBlocker(estimateDraftUsd(STRUCTURED), "an outreach draft");
+  if (blocker) return Response.json({ error: blocker }, { status: 402 });
+
   const { data: lead, error } = await supabaseAdmin.from(LEADS).select("*").eq("id", leadId).single();
   if (error || !lead) return Response.json({ error: "Lead not found" }, { status: 404 });
   const l = lead as Lead;
 
+  const sender = outreachSender(session.name);
   const isSales = l.mode === "sales";
   const goal = isSales
-    ? `You are a project manager reaching out to a potential customer to introduce your product and ask for a short intro call.`
-    : `You are ${session.name}, on the External Relations team at Enactus SFU (a student social-entrepreneurship club at Simon Fraser University). You are asking this company to support Enactus SFU with sponsorship (monetary and/or in-kind).\n\n${ENACTUS_PROJECTS}\n\nGround the email in ONE specific Enactus SFU project that best fits this company (use the "Why they fit" note if it names one). Mention that project by name and why it aligns with them, rather than pitching Enactus generically.`;
+    ? `You are a project manager reaching out to a potential customer to introduce your product and ask for a short intro call. You are writing from your Simon Fraser University email address, so the message carries SFU's name.`
+    : `You are ${session.name}, on the External Relations team at Enactus SFU (a student social-entrepreneurship club at Simon Fraser University). You are writing from your Simon Fraser University email address, so the message carries SFU's name and should read like it came from a student at the university. You are asking this company to support Enactus SFU with sponsorship (monetary and/or in-kind).\n\n${ENACTUS_PROJECTS}\n\nGround the email in ONE specific Enactus SFU project that best fits this company (use the "Why they fit" note if it names one). Mention that project by name and why it aligns with them, rather than pitching Enactus generically.`;
 
   const facts = [
     `Company: ${l.company}`,
@@ -69,9 +82,13 @@ export async function POST(req: Request) {
         { role: "system", content: `${goal}\n\n${STYLE}\n\nRespond ONLY as JSON: {"subject": string, "body": string}` },
         { role: "user", content: `Draft a first-touch outreach email to this lead.\n\n${facts}` },
       ],
-      { maxTokens: 700 }
+      { maxTokens: 700, operation: "draft" }
     );
   } catch (e) {
+    // A budget stop is not a drafting failure and must not read as one: it says
+    // what the cap is and what has been spent, and it is the caller's cue to
+    // stop retrying rather than to try again.
+    if (e instanceof BudgetExceededError) return Response.json({ error: e.message }, { status: 402 });
     return Response.json({ error: `Draft failed: ${(e as Error).message}` }, { status: 500 });
   }
 
@@ -94,8 +111,11 @@ export async function POST(req: Request) {
   }
 
   const subject = sanitizeEmail(typeof raw.subject === "string" && raw.subject.trim() ? raw.subject : `Enactus SFU x ${l.company}`);
-  const body = sanitizeEmail(typeof raw.body === "string" ? raw.body : "");
+  const body = withSignature(sanitizeEmail(typeof raw.body === "string" ? raw.body : ""), sender, l.mode);
   const notes = defects.map((d) => defectMessage(d, "draft"));
+  // The missing or wrong sending address is the human's to fix, so it is said
+  // in the same place the model's own slips are said.
+  if (sender.problem) notes.push(sender.problem);
 
   const { data: draft } = await supabaseAdmin
     .from(DRAFTS)
@@ -103,5 +123,23 @@ export async function POST(req: Request) {
     .select("*")
     .single();
 
-  return Response.json({ subject, body, notes, draftId: draft?.id ?? null, to: l.contact_email });
+  const attribution = await logActivity({
+    actor: session.name,
+    action: "draft_generated",
+    subject: "draft",
+    subjectId: draft?.id ?? null,
+    detail: { company: l.company, lead: l.id, from_configured: sender.configured },
+  });
+
+  return Response.json({
+    subject,
+    body,
+    notes,
+    draftId: draft?.id ?? null,
+    to: l.contact_email,
+    // What this draft is written to be sent from. The agent still never sends.
+    from: sender.email,
+    fromConfigured: sender.configured,
+    ...(attribution.error ? { attributionError: attribution.error } : {}),
+  });
 }

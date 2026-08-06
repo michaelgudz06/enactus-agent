@@ -1,5 +1,13 @@
 // Minimal Exa client for lead discovery + research.
 // Docs: https://docs.exa.ai — POST /search with inline contents.
+//
+// Exa is the expensive half of the monthly API budget: the three searches in a
+// run cost about three times every model call in it put together, so the number
+// of searches is what $20 a month actually buys. The budget check below sits
+// inside this client rather than at its call sites, so there is no way to reach
+// the endpoint without passing it.
+
+import { assertHeadroom, exaSearchCostUsd, recordSpend } from "./budget";
 
 const EXA_URL = "https://api.exa.ai/search";
 
@@ -24,9 +32,12 @@ export async function exaSearch(
   const key = process.env.EXA_API_KEY;
   if (!key) throw new Error("EXA_API_KEY not set");
 
+  const numResults = opts.numResults ?? 8;
+  await assertHeadroom(exaSearchCostUsd(numResults), "an Exa search");
+
   const body: Record<string, unknown> = {
     query,
-    numResults: opts.numResults ?? 8,
+    numResults,
     type: "auto",
     contents: {
       text: { maxCharacters: 1200 },
@@ -48,6 +59,18 @@ export async function exaSearch(
 
   const data = (await res.json()) as { results?: unknown[] };
   const results = Array.isArray(data.results) ? data.results : [];
+
+  // Billed on what came back, since the price is a flat base plus anything past
+  // the tenth result. Only a request Exa actually served is charged; a rejected
+  // one costs the club nothing and must not be booked as if it did.
+  await recordSpend({
+    provider: "exa",
+    model: "search",
+    operation: "search",
+    requests: 1,
+    costUsd: exaSearchCostUsd(results.length),
+  });
+
   return results.map((r) => {
     const x = r as Record<string, unknown>;
     return {

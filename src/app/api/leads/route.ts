@@ -1,6 +1,7 @@
 import { getSession } from "@/lib/auth";
 import { supabaseAdmin, LEADS, hasServiceKey } from "@/lib/supabase";
 import { Mode } from "@/lib/types";
+import { logActivity } from "@/lib/activity";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -44,5 +45,14 @@ export async function POST(req: Request) {
   };
   const { data, error } = await supabaseAdmin.from(LEADS).insert(row).select("*").single();
   if (error) return Response.json({ error: error.message }, { status: 500 });
-  return Response.json({ lead: data });
+
+  const attribution = await logActivity({
+    actor: session.name,
+    action: "lead_created",
+    subject: "lead",
+    subjectId: (data as { id?: string } | null)?.id ?? null,
+    detail: { company: row.company, mode, via: "manual" },
+  });
+
+  return Response.json({ lead: data, ...(attribution.error ? { attributionError: attribution.error } : {}) });
 }

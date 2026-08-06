@@ -47,6 +47,17 @@ export function isAggregatorHost(host: string): boolean {
   return AGGREGATOR_HOST.test(host);
 }
 
+/**
+ * The format half of the email gate, on its own, for an address that is
+ * configured rather than claimed by a model. Exported so the sending identity
+ * in `src/lib/sender.ts` is checked by this gate rather than a second one -- a
+ * parallel address parser is how two answers to "is this a real address" start
+ * disagreeing.
+ */
+export function isEmailShape(value: string): boolean {
+  return EMAIL_SHAPE.test(value.trim());
+}
+
 // A resolver failure that says nothing about the domain: the server was busy,
 // unreachable, or gave up. NXDOMAIN and ENODATA are absent from this list on
 // purpose -- those are real answers.

@@ -21,6 +21,7 @@ describe("requestDraft", () => {
       body: "Hi there,",
       notes: ["fit_score arrived as a string; read as 88"],
       to: "hello@example.ca",
+      from: "enactus@sfu.ca",
     })));
 
     const result = await requestDraft("lead-1");
@@ -32,7 +33,20 @@ describe("requestDraft", () => {
       body: "Hi there,",
       notes: ["fit_score arrived as a string; read as 88"],
       to: "hello@example.ca",
+      from: "enactus@sfu.ca",
     });
+  });
+
+  // The sending mailbox is the club's ruling and the modal shows it, so a
+  // response without one must not put `undefined` on screen.
+  test("a missing from address reads as empty rather than undefined", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ subject: "S", body: "B", notes: [] })));
+
+    const result = await requestDraft("lead-1");
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.from).toBe("");
   });
 
   test("a malformed notes field costs notes and nothing else", async () => {

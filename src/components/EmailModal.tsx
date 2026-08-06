@@ -10,7 +10,16 @@ import { Lead } from "@/lib/types";
  * draft route applies to model output.
  */
 export type DraftResult =
-  | { leadId: string; ok: true; subject: string; body: string; notes: string[]; to: string | null }
+  | {
+      leadId: string;
+      ok: true;
+      subject: string;
+      body: string;
+      notes: string[];
+      to: string | null;
+      /** The SFU inbox this draft is written to be sent from. */
+      from: string;
+    }
   | { leadId: string; ok: false; error: string };
 
 export async function requestDraft(leadId: string): Promise<DraftResult> {
@@ -29,6 +38,7 @@ export async function requestDraft(leadId: string): Promise<DraftResult> {
       body: data.body,
       notes: Array.isArray(data.notes) ? data.notes : [],
       to: data.to || null,
+      from: typeof data.from === "string" ? data.from : "",
     };
   } catch (e) {
     return { leadId, ok: false, error: (e as Error).message };
@@ -53,6 +63,8 @@ export default function EmailModal({ lead, onClose }: { lead: Lead; onClose: () 
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [to, setTo] = useState<string | null>(lead.contact_email);
+  // Read-only: the sending mailbox is the club's ruling, not a per-draft choice.
+  const [from, setFrom] = useState("");
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
   const [gmailMsg, setGmailMsg] = useState("");
@@ -69,6 +81,7 @@ export default function EmailModal({ lead, onClose }: { lead: Lead; onClose: () 
       setBody(result.body);
       setNotes(result.notes);
       if (result.to) setTo(result.to);
+      setFrom(result.from);
       setError("");
     } else {
       setError(result.error);
@@ -140,6 +153,17 @@ export default function EmailModal({ lead, onClose }: { lead: Lead; onClose: () 
         </div>
 
         <div className="p-5 space-y-3">
+          {from && (
+            <div>
+              <label className="text-xs font-medium" style={{ color: "var(--muted)" }}>From</label>
+              <div
+                className="mt-1 w-full rounded-lg px-3 py-2 text-sm border"
+                style={{ background: "var(--bg)", borderColor: "var(--border)", color: "var(--muted)" }}
+              >
+                {from}
+              </div>
+            </div>
+          )}
           <div>
             <label className="text-xs font-medium" style={{ color: "var(--muted)" }}>To</label>
             <input

@@ -1,13 +1,42 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Sparkles, ArrowUp, Brain, History, Lightbulb, CircleDashed, CheckCircle2, AlertTriangle } from "lucide-react";
+import { Sparkles, ArrowUp, Brain, History, Lightbulb, CircleDashed, CheckCircle2, AlertTriangle, Wallet } from "lucide-react";
 import { useApp } from "@/components/AppShell";
 import { AgentEvent, Lead, SearchRow } from "@/lib/types";
 import LeadCard from "@/components/LeadCard";
 import EmailModal from "@/components/EmailModal";
 
 interface Step { step: string; message: string; }
+
+/** What `/api/budget` reports. `null` while it is loading or if it failed. */
+interface Budget {
+  monthLabel: string;
+  capCad: number;
+  spentCad: number;
+  remainingCad: number;
+  runsRemaining: number;
+  persisted: boolean;
+  error: string | null;
+}
+
+/**
+ * The budget line, in the words a student needs. Kept out of the component so
+ * the wording is testable on its own.
+ *
+ * A budget that could not be read says so rather than showing a number nobody
+ * should act on, and the run button stays enabled either way -- the server holds
+ * the cap, and a UI that blocks on its own guess would be a guard that fires
+ * early.
+ */
+export function budgetLine(budget: Budget): string {
+  if (budget.error) return `Monthly API budget: could not be read. ${budget.error}`;
+  const spend = `$${budget.spentCad.toFixed(2)} of $${budget.capCad.toFixed(2)} CAD used in ${budget.monthLabel}`;
+  if (budget.runsRemaining < 1) {
+    return `${spend}. Not enough left for another run. It resets at the start of next month.`;
+  }
+  return `${spend}, about ${budget.runsRemaining} run${budget.runsRemaining === 1 ? "" : "s"} left`;
+}
 
 const EXAMPLES_SPONSOR = [
   "Catering & food companies in Burnaby that could sponsor student events",
@@ -35,6 +64,7 @@ export default function AgentPage() {
   const [saved, setSaved] = useState(0);
   const [history, setHistory] = useState<SearchRow[]>([]);
   const [emailLead, setEmailLead] = useState<Lead | null>(null);
+  const [budget, setBudget] = useState<Budget | null>(null);
   const reasonRef = useRef<HTMLDivElement>(null);
 
   const examples = mode === "sales" ? EXAMPLES_SALES : EXAMPLES_SPONSOR;
@@ -42,6 +72,12 @@ export default function AgentPage() {
   useEffect(() => {
     fetch(`/api/searches?mode=${mode}`).then((r) => r.json()).then((d) => setHistory(d.searches || [])).catch(() => {});
   }, [mode, done]);
+
+  // Before a run, and again after one, so the number on screen is what the next
+  // run will actually be measured against.
+  useEffect(() => {
+    fetch("/api/budget").then((r) => r.json()).then(setBudget).catch(() => setBudget(null));
+  }, [done]);
 
   useEffect(() => {
     if (reasonRef.current) reasonRef.current.scrollTop = reasonRef.current.scrollHeight;
@@ -125,8 +161,19 @@ export default function AgentPage() {
             rows={3}
             className="w-full bg-transparent outline-none text-sm resize-none px-1"
           />
-          <div className="flex items-center justify-between mt-2">
+          <div className="flex items-center justify-between mt-2 gap-3">
             <span className="text-[11px]" style={{ color: "var(--faint)" }}>⌘/Ctrl + Enter to run</span>
+            {budget && (
+              <span
+                className="text-[11px] flex items-center gap-1 ml-auto mr-1 text-right"
+                title={budget.persisted ? undefined : "No database key is set, so this only counts what this server has spent since it started."}
+                style={{ color: budget.error || budget.runsRemaining < 1 ? "var(--accent)" : "var(--faint)" }}
+              >
+                <Wallet size={12} className="shrink-0" />
+                {budgetLine(budget)}
+                {!budget.error && !budget.persisted && " (not persisted)"}
+              </span>
+            )}
             <button
               onClick={() => run()}
               disabled={running || !prompt.trim()}

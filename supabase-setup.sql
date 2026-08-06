@@ -11,6 +11,18 @@
 --   alter table public.enactus_leads add column if not exists website_status text;
 --
 -- Both are idempotent and repeated below with the rest of the migrations.
+--
+-- ⚠ TWO NEW TABLES, ADDED 2026-08-06. `create table if not exists` DOES create
+-- them, so running this whole file is enough, but they must exist before either
+-- feature works:
+--
+--   enactus_api_spend      the ledger behind the $20 CAD/month API cap. Until
+--                          it exists the cap CANNOT be enforced across runs:
+--                          each serverless invocation starts from zero and the
+--                          month's real spend is unknown. The app reports that
+--                          as "not persisted" rather than implying a live cap.
+--   enactus_activity_log   who was signed in for each action. Until it exists
+--                          nothing is attributed, and the app says so.
 -- ══════════════════════════════════════════════════════════════════
 
 create table if not exists public.enactus_leads (
@@ -70,6 +82,52 @@ create table if not exists public.enactus_email_drafts (
   created_by_name text
 );
 
+-- ── The monthly API budget ledger ──
+-- One append-only row per paid provider call, so the $20 CAD/month cap is a
+-- fact about the month rather than about one serverless invocation. Costs are
+-- stored in USD, which is what OpenRouter and Exa bill in; the CAD cap is
+-- converted at the pinned rate in src/lib/budget.ts.
+create table if not exists public.enactus_api_spend (
+  id uuid primary key default gen_random_uuid(),
+  -- 'YYYY-MM' in America/Vancouver, so a run late on the 31st counts against
+  -- the month the student thinks it does.
+  billing_month text not null,
+  provider text not null,
+  model text,
+  operation text,
+  input_tokens integer default 0,
+  output_tokens integer default 0,
+  requests integer default 0,
+  cost_usd numeric(12,6) not null default 0,
+  created_at timestamptz default now()
+);
+
+-- Every budget read is "what has this month cost", so that is what is indexed.
+create index if not exists enactus_api_spend_month_idx
+  on public.enactus_api_spend (billing_month);
+
+-- ── Attribution ──
+-- Who was signed in when something happened. Names and record ids only: no
+-- credential, no session token, no email body ever reaches this table, and
+-- src/lib/activity.ts scrubs the detail column before it is written.
+--
+-- This answers "who used the tool", NOT "who is accountable". Privacy law wants
+-- one designated individual for the whole database, permanently, whoever is
+-- logged in. That designation is a separate open decision and is deliberately
+-- not recorded anywhere in this repository.
+create table if not exists public.enactus_activity_log (
+  id uuid primary key default gen_random_uuid(),
+  actor_name text not null,
+  action text not null,
+  subject_type text,
+  subject_id uuid,
+  detail jsonb default '{}'::jsonb,
+  created_at timestamptz default now()
+);
+
+create index if not exists enactus_activity_log_created_idx
+  on public.enactus_activity_log (created_at desc);
+
 -- Additive migrations for projects created before these columns existed.
 -- `create table if not exists` above will not add them to an existing table.
 alter table public.enactus_leads add column if not exists contact_email_status text;
@@ -80,6 +138,8 @@ alter table public.enactus_leads add column if not exists website_status text;
 alter table public.enactus_leads        enable row level security;
 alter table public.enactus_searches     enable row level security;
 alter table public.enactus_email_drafts enable row level security;
+alter table public.enactus_api_spend    enable row level security;
+alter table public.enactus_activity_log enable row level security;
 
 -- ── Seed: 25 curated Lower Mainland contacts ──
 insert into public.enactus_leads

@@ -29,6 +29,10 @@ export const supabaseAdmin = new Proxy({} as SupabaseClient, {
 export const LEADS = "enactus_leads";
 export const SEARCHES = "enactus_searches";
 export const DRAFTS = "enactus_email_drafts";
+/** Append-only ledger of paid API calls, behind the monthly cap. */
+export const SPEND = "enactus_api_spend";
+/** Append-only attribution: who was signed in when an action happened. */
+export const ACTIVITY = "enactus_activity_log";
 
 export function hasServiceKey() {
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;

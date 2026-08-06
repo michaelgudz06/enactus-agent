@@ -1,11 +1,13 @@
 import crypto from "crypto";
 import { AgentEvent, ConnectionType, Lead, Mode } from "./types";
-import { chatJSON, streamReasoner, REASONER } from "./llm";
+import { chatJSON, streamReasoner, REASONER, STRUCTURED } from "./llm";
 import { exaSearch, dedupeByDomain, ExaResult } from "./exa";
 import { supabaseAdmin, LEADS, SEARCHES, hasServiceKey } from "./supabase";
 import { createVerifiers, isAggregatorHost, EmailCheck, WebsiteCheck } from "./contact";
 import { ENACTUS_ORG, ENACTUS_PROJECTS, ENACTUS_VENTURES } from "./enactus";
 import { ValueDefect, defectMessage, describeValue, readEnvelope, recoverValue, reviewFields } from "./review";
+import { BudgetExceededError, RUN_SHAPE, budgetBlocker, estimateAgentRunUsd } from "./budget";
+import { logActivity } from "./activity";
 
 type Emit = (e: AgentEvent) => void;
 
@@ -149,7 +151,49 @@ function planPrompt(mode: Mode): string {
 Only look for real companies, businesses, or grant-making foundations that could give money or in-kind support. NEVER target other student clubs, university clubs or associations (at SFU or elsewhere), or organizations whose "sponsorship" is actually a paid membership, paid directory listing, or a fee the club would have to pay. Word the search queries to find businesses/sponsors, not clubs or memberships.`;
 }
 
+/** Worst case for one run, priced from the models this pipeline actually pins. */
+export function runCostEstimateUsd(): number {
+  return estimateAgentRunUsd({ reasoner: REASONER, structured: STRUCTURED });
+}
+
+/**
+ * A run either has the budget for all of itself or does not start.
+ *
+ * Both halves matter. The pre-flight check makes the stop clean: nothing is
+ * charged, nothing is searched, and the message names the cap and the spend. The
+ * catch makes it honest if the cap is somehow reached mid-run anyway -- two
+ * students running at once, say -- because the alternative is what the provider
+ * clients would otherwise produce, a run that swallows the refusal and returns
+ * three leads as though it had finished. There is no `done` event on this path,
+ * so nothing downstream can read a budget stop as a completed run.
+ */
 export async function runAgent(
+  input: { prompt: string; mode: Mode; answers?: string; userName: string; skipClarify?: boolean },
+  emit: Emit
+): Promise<void> {
+  const blocker = await budgetBlocker(runCostEstimateUsd(), "a full agent run");
+  if (blocker) {
+    emit({ type: "error", message: blocker });
+    return;
+  }
+
+  try {
+    await runPipeline(input, emit);
+  } catch (e) {
+    if (!(e instanceof BudgetExceededError)) throw e;
+    emit({ type: "error", message: e.message });
+  }
+}
+
+// A budget stop is never a degradation. It has to travel out through the
+// catches that exist to keep a run alive, because every one of them would
+// otherwise turn "we ran out of money" into a quieter, wronger story: no
+// candidates found, ranking from the research instead, no usable results.
+function rethrowIfBudget(e: unknown): void {
+  if (e instanceof BudgetExceededError) throw e;
+}
+
+async function runPipeline(
   input: { prompt: string; mode: Mode; answers?: string; userName: string; skipClarify?: boolean },
   emit: Emit
 ): Promise<void> {
@@ -165,9 +209,10 @@ export async function runAgent(
         { role: "system", content: `${planPrompt(mode)}\n\nRespond ONLY with JSON of shape: {"needClarification": boolean, "questions": string[], "searchQueries": string[], "criteria": string, "altAngle": string, "location": string}. Provide 3 focused searchQueries. Only set needClarification true (with up to 2 short questions) if the request is too vague to search well. altAngle is a different angle to try if this search was already done before.` },
         { role: "user", content: fullPrompt },
       ],
-      { maxTokens: 800, schema: PLAN_SCHEMA }
+      { maxTokens: 800, schema: PLAN_SCHEMA, operation: "plan" }
     );
   } catch (e) {
+    rethrowIfBudget(e);
     // No plan came back at all, so there is nothing to degrade to.
     emit({ type: "error", message: `Planning failed: ${(e as Error).message}` });
     return;
@@ -217,21 +262,33 @@ export async function runAgent(
   }
 
   // ── 3. Discover via Exa ─────────────────────────────────────────────────
-  emit({ type: "status", step: "discover", message: `Searching the web with Exa: ${plan.searchQueries.slice(0, 3).join("  ·  ")}` });
+  // The run's shape lives in `src/lib/budget.ts` so the pre-flight estimate and
+  // the searches it is estimating cannot drift apart.
+  const queries = plan.searchQueries.slice(0, RUN_SHAPE.searchQueries);
+  emit({ type: "status", step: "discover", message: `Searching the web with Exa: ${queries.join("  ·  ")}` });
   let candidates: ExaResult[] = [];
   try {
     const batches = await Promise.all(
-      plan.searchQueries.slice(0, 3).map((q) => exaSearch(q, { numResults: 6 }).catch(() => []))
+      queries.map((q) =>
+        // One dead query costs that query. A budget stop is not one dead query,
+        // and returning [] for it would report an empty web instead of an empty
+        // wallet.
+        exaSearch(q, { numResults: RUN_SHAPE.resultsPerSearch }).catch((e) => {
+          rethrowIfBudget(e);
+          return [];
+        })
+      )
     );
     candidates = dedupeByDomain(batches.flat().filter((r) => r.url));
   } catch (e) {
+    rethrowIfBudget(e);
     emit({ type: "error", message: `Discovery failed: ${(e as Error).message}` });
     return;
   }
   // Drop obvious non-company noise + cap.
   candidates = candidates
     .filter((r) => !/wikipedia\.org|reddit\.com|indeed\.com|glassdoor\./.test(r.url))
-    .slice(0, 6);
+    .slice(0, RUN_SHAPE.candidates);
 
   if (!candidates.length) {
     emit({ type: "status", step: "discover", message: "No candidates found. Try rephrasing or broadening the request." });
@@ -290,12 +347,13 @@ Reason candidate by candidate: which are the strongest ${mode === "sales" ? "cus
         { role: "user", content: reasoningUser },
       ],
       { onReasoning: capture, onContent: capture },
-      { model: REASONER, maxTokens: 1200, signal: controller.signal, fastProvider: true }
+      { model: REASONER, maxTokens: 1200, signal: controller.signal, fastProvider: true, operation: "reason" }
     );
     reasoningText = (r.reasoning || r.content || "").trim();
-  } catch {
-    // Genuine failure (not the budget abort): fall back to structuring from the
-    // raw candidates rather than dropping the whole run.
+  } catch (e) {
+    rethrowIfBudget(e);
+    // Genuine failure (not the time-budget abort): fall back to structuring from
+    // the raw candidates rather than dropping the whole run.
     if (!controller.signal.aborted) {
       emit({ type: "status", step: "reason", message: "Reasoning hit a snag; ranking from the candidate research instead" });
     }
@@ -351,9 +409,15 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
           { role: "system", content: `${scoreSystem} Output only the JSON described, nothing else.` },
           { role: "user", content: structureUser },
         ],
-        { maxTokens: 2800, schema: LEADS_SCHEMA, coerce: (raw) => coerceLeadsPayload(raw, envelopeDefects) }
+        {
+          maxTokens: 2800,
+          schema: LEADS_SCHEMA,
+          coerce: (raw) => coerceLeadsPayload(raw, envelopeDefects),
+          operation: "structure",
+        }
       )) ?? null;
   } catch (e) {
+    rethrowIfBudget(e);
     // Say what actually went wrong. A schema rejection, a rate limit and an
     // unparseable body used to be indistinguishable to the person waiting.
     structuringError = (e as Error).message;
@@ -398,7 +462,22 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
     const { website, websiteStatus } = websiteFor(site, src);
     const { lead, saved, error } = await persistLead(raw, { website, websiteStatus, src, mode, userName, contact });
     finalized.push(lead);
-    if (saved) savedCount += 1;
+    if (saved) {
+      savedCount += 1;
+      // Attributed only when a row exists to attribute. A log line pointing at
+      // an id the database never issued is worse than no line.
+      await announceLogFailure(
+        logActivity({
+          actor: userName,
+          action: "lead_created",
+          subject: "lead",
+          subjectId: lead.id,
+          detail: { company: lead.company, mode, via: "agent" },
+        }),
+        `${lead.company} was saved`,
+        emit
+      );
+    }
     if (!saved && error) {
       unsaved.push(lead.company);
       emit({
@@ -435,7 +514,28 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
     }
   }
 
+  await announceLogFailure(
+    logActivity({
+      actor: userName,
+      action: "agent_run",
+      subject: "search",
+      subjectId: searchId,
+      detail: { mode, leads_found: finalized.length, leads_saved: savedCount },
+    }),
+    "this run",
+    emit
+  );
+
   emit({ type: "done", count: finalized.length, saved: savedCount, searchId });
+}
+
+// Attribution failing must not undo the work, and must not be silent either --
+// a log with holes in it is only useful if you know where the holes are. Same
+// rule as an insert that did not happen: say so on the activity stream.
+async function announceLogFailure(work: Promise<{ logged: boolean; error: string | null }>, what: string, emit: Emit) {
+  const { error } = await work;
+  if (!error) return;
+  emit({ type: "status", step: "persist", message: `Could not record who ${what}: ${error}` });
 }
 
 // `source_index` is the model's claim about which candidate it used. Trust it
