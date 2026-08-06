@@ -17,6 +17,7 @@
  * A source that yields nothing is reported rather than quietly skipped: a gap in
  * the record is a gap, and config/alumni/README.md lists the ones we know of.
  */
+import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -90,6 +91,35 @@ if (process.argv[2] === "--refresh-readme") {
 
 const cacheDir = process.argv[2] ?? ".cache/alumni-roster";
 const outFile = process.argv[3] ?? "config/alumni/past-executives.csv";
+
+/**
+ * The same refusal the fetcher makes, at the other entry point: a cache inside
+ * the repository that git does not ignore holds the role addresses, phone
+ * numbers and employers the shipped file exists to leave behind, one
+ * `git add -A` away from a commit that cannot be taken back. Asking git rather
+ * than re-reading the ignore rules keeps one answer, not two.
+ */
+function refuseUnignoredCache(dir: string): void {
+  const toplevel = spawnSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" });
+  if (toplevel.status !== 0) return;
+
+  const repo = toplevel.stdout.trim();
+  const absolute = path.resolve(dir);
+  if (absolute !== repo && !absolute.startsWith(repo + path.sep)) return;
+  if (spawnSync("git", ["check-ignore", "-q", absolute], { encoding: "utf8" }).status === 0) return;
+
+  console.error(
+    `refusing to read a cache git does not ignore: ${absolute}\n` +
+      `That path is inside this repository, so the raw archived pages in it — role email\n` +
+      `addresses, phone numbers, employers — are one 'git add -A' away from the history\n` +
+      `of a repository holding real people's records. Use the default\n` +
+      `.cache/alumni-roster, add the path to .gitignore, or keep the cache outside the\n` +
+      `repository.`,
+  );
+  process.exit(1);
+}
+
+refuseUnignoredCache(cacheDir);
 const registryPath = process.argv[4] ?? fileURLToPath(new URL("sources.tsv", import.meta.url));
 /** The day the cache was fetched, as the `captured_at` every row carries. */
 const capturedAt = process.env.ROSTER_CAPTURED_AT ?? new Date().toISOString().slice(0, 10);

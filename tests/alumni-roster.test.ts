@@ -1,5 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1440,5 +1448,104 @@ describe("the roster CSV, read back", () => {
     ["nothing but comments", "# all comment\n"],
   ])("throws on %s", (_case, contents) => {
     expect(() => parseRosterCsv(contents)).toThrow();
+  });
+});
+
+describe("recording where a cached page came from", () => {
+  const FETCH_SCRIPT = fileURLToPath(
+    new URL("../scripts/alumni-roster/fetch-snapshots.sh", import.meta.url),
+  );
+
+  /** Stands in for curl: writes a body to whatever `-o` names, and succeeds. */
+  const STUB_CURL = `#!/bin/sh
+out=""
+while [ $# -gt 0 ]; do
+  case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac
+done
+[ -n "$out" ] && printf '<h3>a page</h3>' > "$out"
+exit 0
+`;
+
+  /** The fetcher, run against a registry declaring one live source. */
+  function runFetch(cacheDir: string, url: string) {
+    const root = mkdtempSync(path.join(tmpdir(), "alumni-fetch-"));
+    const bin = path.join(root, "bin");
+    mkdirSync(bin);
+    writeFileSync(path.join(bin, "curl"), STUB_CURL, { mode: 0o755 });
+
+    const script = path.join(root, "fetch-snapshots.sh");
+    copyFileSync(FETCH_SCRIPT, script);
+    writeFileSync(path.join(root, "sources.tsv"), `team (live)\tlive\tlive-team\t-\t${url}\t-\n`);
+
+    return spawnSync("bash", [script, cacheDir], {
+      encoding: "utf8",
+      env: { ...inheritedEnv, PATH: `${bin}:${process.env.PATH ?? ""}` },
+    });
+  }
+
+  /** manifest.tsv is persisted state the build reads; the last line for a name wins. */
+  const recordedUrl = (cacheDir: string, file: string) =>
+    readFileSync(path.join(cacheDir, "manifest.tsv"), "utf8")
+      .split("\n")
+      .filter((line) => line.startsWith(`${file}\t`))
+      .at(-1)
+      ?.split("\t")[1];
+
+  test("a live page re-fetched from a new URL is recorded against the URL it came from", () => {
+    const cacheDir = mkdtempSync(path.join(tmpdir(), "alumni-cache-"));
+
+    const first = runFetch(cacheDir, "https://www.enactussfu.ca/team");
+    expect(first.status).toBe(0);
+    expect(recordedUrl(cacheDir, "live-team.html")).toBe("https://www.enactussfu.ca/team");
+
+    // The club renames the page and the maintainer edits that one registry row.
+    const second = runFetch(cacheDir, "https://www.enactussfu.ca/our-team");
+    expect(second.status).toBe(0);
+    expect(recordedUrl(cacheDir, "live-team.html")).toBe("https://www.enactussfu.ca/our-team");
+  });
+
+  test("re-fetching from the same URL does not grow the manifest", () => {
+    const cacheDir = mkdtempSync(path.join(tmpdir(), "alumni-cache-"));
+    runFetch(cacheDir, "https://www.enactussfu.ca/team");
+    runFetch(cacheDir, "https://www.enactussfu.ca/team");
+
+    const lines = readFileSync(path.join(cacheDir, "manifest.tsv"), "utf8")
+      .split("\n")
+      .filter((line) => line.startsWith("live-team.html\t"));
+    expect(lines).toHaveLength(1);
+  });
+
+  test("a cache inside the repository that git does not ignore is refused, unwritten", () => {
+    const inRepo = fileURLToPath(new URL("../not-ignored-cache", import.meta.url));
+    rmSync(inRepo, { recursive: true, force: true });
+
+    try {
+      const fetched = runFetch(inRepo, "https://www.enactussfu.ca/team");
+      expect(fetched.status).not.toBe(0);
+      // Refused before anything was written, not warned about afterwards.
+      expect(existsSync(inRepo)).toBe(false);
+
+      const built = spawnSync(
+        process.execPath,
+        ["--experimental-strip-types", BUILD_SCRIPT, inRepo, path.join(tmpdir(), "unused.csv")],
+        { encoding: "utf8", env: inheritedEnv },
+      );
+      expect(built.status).not.toBe(0);
+      expect(existsSync(inRepo)).toBe(false);
+    } finally {
+      rmSync(inRepo, { recursive: true, force: true });
+    }
+  });
+
+  test("the cache git is told to ignore is allowed", () => {
+    const ignored = fileURLToPath(new URL("../.cache/alumni-roster-fixture", import.meta.url));
+    try {
+      const run = runFetch(ignored, "https://www.enactussfu.ca/team");
+
+      expect(run.status).toBe(0);
+      expect(recordedUrl(ignored, "live-team.html")).toBe("https://www.enactussfu.ca/team");
+    } finally {
+      rmSync(ignored, { recursive: true, force: true });
+    }
   });
 });

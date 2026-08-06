@@ -21,6 +21,30 @@
 set -uo pipefail
 
 cache="${1:-.cache/alumni-roster}"
+
+# The pages this writes carry the role addresses, phone numbers and employers the
+# shipped file exists to leave behind, so a cache inside the repository that git
+# does not ignore is one `git add -A` away from committing them — and personal
+# data in a commit is not undone by a later fix. git decides, not a second copy
+# of the ignore rules here, and the answer is decided before a page is written.
+case "$cache" in /*) cache_abs="$cache" ;; *) cache_abs="$PWD/$cache" ;; esac
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -n "$repo_root" ]; then
+  case "$cache_abs/" in
+    "$repo_root"/*)
+      if ! git check-ignore -q "$cache_abs"; then
+        echo "refusing to cache archived pages in $cache_abs" >&2
+        echo "That path is inside this repository and git does not ignore it, so the raw" >&2
+        echo "pages — role email addresses, phone numbers, employers — would be one" >&2
+        echo "'git add -A' away from the history of a repository holding real people's" >&2
+        echo "records. Use the default .cache/alumni-roster, add the path to .gitignore," >&2
+        echo "or point the cache outside the repository." >&2
+        exit 1
+      fi
+      ;;
+  esac
+fi
+
 mkdir -p "$cache"
 ua='enactus-alumni-roster/1.0 (Enactus SFU past-executive reconstruction)'
 
@@ -45,9 +69,14 @@ failures="$cache/.failures"
 touch "$manifest"
 : > "$failures"
 
+# Matched on name AND url: a live page is re-downloaded every run, so if its URL
+# in the registry changed, the bytes now on disk came from the new one. Recording
+# the name as already known would leave the manifest citing a page these bytes
+# never came from, and build.ts would stamp that URL on every row it produced.
+# The later line wins when build.ts reads the manifest, so appending is enough.
 note_source() { # note_source <local-name> <url>
-  awk -F'\t' -v name="$1" '$1 == name { hit = 1 } END { exit !hit }' "$manifest" \
-    || printf '%s\t%s\n' "$1" "$2" >> "$manifest"
+  awk -F'\t' -v name="$1" -v url="$2" '$1 == name && $2 == url { hit = 1 } END { exit !hit }' \
+    "$manifest" || printf '%s\t%s\n' "$1" "$2" >> "$manifest"
 }
 
 # -f on every request: without it curl exits 0 on a 404, a 429 or a 503 and the
