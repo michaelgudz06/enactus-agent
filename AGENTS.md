@@ -14,6 +14,10 @@ The club is a volunteer student group whose exec turns over every year. The rule
 below exist because breaking them costs the club its credibility with real local
 businesses, and the person who has to apologise is a student. Keep them.
 
+## Commands
+
+`npm test` (vitest, `tests/**/*.test.ts`) · `npm run typecheck` · `npm run lint` · `npm run build`
+
 ## Rules
 
 ### Never invent an email address or a domain
@@ -46,6 +50,10 @@ receipt", "charitable receipt", or any equivalent in outreach or UI copy. Offer
 what the club can actually give: logo placement, event presence, student talent,
 project association.
 
+This is also why `K-CHAN-02` in `src/lib/filter.ts` treats a published
+registered-charity requirement as terminal and records the SFU Advancement
+escalation instead: the club cannot meet it.
+
 ### Never target other student clubs, or anything that charges us
 
 Sponsorship means a company gives the club money or in-kind support. It is not
@@ -53,6 +61,8 @@ something the club pays to join. Exclude other student clubs and university
 associations at any school, paid memberships, paid directory listings, ticketed
 programs, and fee-based accelerators. Chambers of commerce and business
 associations that charge dues are out for the same reason.
+
+`K-ORG-02` and `K-ORG-03` in `src/lib/filter.ts` enforce this deterministically.
 
 ### Code decides, the model reports
 
@@ -114,6 +124,68 @@ leads reached the board when they did.
 
 `src/lib/gmail.ts` uses the `gmail.compose` scope deliberately. A human presses
 send, which is where CASL liability belongs. **Do not add a send path.**
+
+If you are the person who eventually wires one: **a passing score is not permission
+to email.** `evaluateGates` in `src/lib/scoring.ts` answers `G_LAWFUL_BASIS` with
+`not_applicable` whenever the email channel is closed — the gate asks whether this
+lead may be *emailed*, and an unreachable row is not an unqualified one. So a lead
+whose claimed CASL basis was found INVALID (L-04, P-08-CONSTRAINT) comes back with
+`blocked: false` and every gate passing. `ScoreResult.blocked` is therefore not a
+sufficient pre-send check.
+
+`FilterResult.email_channel_open` / `CompanyFacts.email_channel_open` is the
+operative protection. A send path must refuse a closed-channel lead
+**structurally** — make it impossible to construct the send, rather than trusting a
+caller to remember the flag. That is the same rule as `persistLead` returning
+whether the row was written: the type carries the fact, not a convention.
+
+## The qualification layer
+
+`src/lib/filter.ts` (disqualifiers) and `src/lib/scoring.ts` (ICP) implement two written
+specifications. **Read the spec before changing a rule** — they carry measurements and citations
+the code does not repeat:
+
+- `/Users/test/firstmate/data/enactus-disqualifiers/report.md` — kill predicates, soft penalties,
+  franchise handling, the maintained lists
+- `/Users/test/firstmate/data/enactus-icp/report.md` — the 17 segments, assignment precedence,
+  hard gates, starting weights
+- `/Users/test/firstmate/data/enactus-org/report.md` — why the rules are what they are
+
+Those reports contradict themselves in five places. Every one is listed, with the reading taken
+and why, in the REPORT CONTRADICTIONS block at the head of `src/lib/filter.ts` (the ICP one is at
+`assignSegment` in `src/lib/scoring.ts`). The governing rule is **a rule's definition governs; a
+later procedure section may not widen it**. Add to that block rather than patching silently.
+
+Four invariants these modules exist to hold. Breaking one silently is the failure mode:
+
+1. **No model call in either module, ever** — not as a fallback. Both have a test asserting they
+   import no model client.
+2. **Hard kills and soft penalties stay separate.** A wrongly killed account is invisible
+   forever; a wrongly penalised one still surfaces. Kill only when the account can never be a
+   sponsor at any price, contacting it would be unlawful, or the right action is a different
+   channel. When in doubt, penalise. Every terminal carries two orthogonal qualifiers taken
+   verbatim from the report's Outcome and Suppression-window columns: a `scope`
+   (`account` | `address` | `email` | `person` — only `account` drops the row, the rest clear what
+   they name and keep evaluating) and a `duration` (`forever` | `until_human_clears` | `until`).
+   A terminal may also emit a `SiblingPenalty` onto OTHER rows; it is never summed into this one.
+3. **Missing data is never a kill.** Predicates return an explicit `cannot_evaluate` outcome
+   carrying the missing field names. Every rule also carries an explicit ENTRY CONDITION — "does
+   this rule apply to this row at all?" — taken from its own definition row. An unproven condition
+   on an entity the rule does not cover is a no-op, not a penalty.
+4. **Never blend the scores.** `fit` / `affinity` / `access` stay separate, and so do the two
+   objectives (`deployable_cash` vs `relationship_volume`). For Tier B segments the cash
+   objective is *not applicable*, not zero.
+
+## Policy lives in `config/`, not in code
+
+`config/icp.yaml` (scoring weights) and `config/exclusions/*.csv` (the maintained lists) are
+edited by the VP External Relations, not by a programmer — see `config/exclusions/README.md` for
+ownership, cadence and regeneration commands. `loadIcpConfig()` validates that each score block's
+weights sum to 100 and rejects the file otherwise.
+
+Domain values in those CSVs are **verified, never guessed**: the disqualifier report caught two
+plausible-looking domains that belonged to entirely different organisations. Verify before adding
+a row, and leave `value` blank with a note rather than asserting an unverified domain.
 
 ## Working in this repo
 

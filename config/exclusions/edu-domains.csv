@@ -1,0 +1,12 @@
+kind,value,entity,reason,added_by,added_at,source_url
+domain,sfu.ca,Simon Fraser University,Host institution. Any subdomain is a student org or an internal university unit,enactus-disqualifiers/report.md 7.4,2026-08-06,https://www.sfu.ca/
+domain,ubc.ca,University of British Columbia,Post-secondary institution. DNS-verified 2026-08-06,enactus-disqualifiers/report.md 7.4,2026-08-06,https://www.ubc.ca/
+domain,bcit.ca,British Columbia Institute of Technology,Post-secondary institution. DNS-verified 2026-08-06,enactus-disqualifiers/report.md 7.4,2026-08-06,https://www.bcit.ca/
+domain,capilanou.ca,Capilano University,Post-secondary institution. DNS-verified 2026-08-06,enactus-disqualifiers/report.md 7.4,2026-08-06,https://www.capilanou.ca/
+domain,kpu.ca,Kwantlen Polytechnic University,Post-secondary institution. DNS-verified 2026-08-06,enactus-disqualifiers/report.md 7.4,2026-08-06,https://www.kpu.ca/
+domain,langara.ca,Langara College,Post-secondary institution. DNS-verified 2026-08-06,enactus-disqualifiers/report.md 7.4,2026-08-06,https://langara.ca/
+domain,douglascollege.ca,Douglas College,Post-secondary institution. DNS-verified 2026-08-06,enactus-disqualifiers/report.md 7.4,2026-08-06,https://www.douglascollege.ca/
+domain,vcc.ca,Vancouver Community College,Post-secondary institution. DNS-verified 2026-08-06,enactus-disqualifiers/report.md 7.4,2026-08-06,https://www.vcc.ca/
+domain,ecuad.ca,Emily Carr University of Art and Design,Post-secondary institution. DNS-verified 2026-08-06,enactus-disqualifiers/report.md 7.4,2026-08-06,https://www.ecuad.ca/
+domain,ufv.ca,University of the Fraser Valley,Post-secondary institution. DNS-verified 2026-08-06,enactus-disqualifiers/report.md 7.4,2026-08-06,https://www.ufv.ca/
+domain,twu.ca,Trinity Western University,Post-secondary institution. DNS-verified 2026-08-06,enactus-disqualifiers/report.md 7.4,2026-08-06,https://www.twu.ca/
