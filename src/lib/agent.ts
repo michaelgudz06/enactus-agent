@@ -1,8 +1,9 @@
 import crypto from "crypto";
 import { AgentEvent, ConnectionType, Lead, Mode } from "./types";
-import { chatJSON, streamReasoner, extractJSON, REASONER } from "./llm";
+import { chatJSON, streamReasoner, REASONER } from "./llm";
 import { exaSearch, dedupeByDomain, ExaResult } from "./exa";
 import { supabaseAdmin, LEADS, SEARCHES, hasServiceKey } from "./supabase";
+import { createContactEmailVerifier, EmailCheck } from "./contact";
 import { ENACTUS_ORG, ENACTUS_PROJECTS, ENACTUS_VENTURES } from "./enactus";
 
 type Emit = (e: AgentEvent) => void;
@@ -15,6 +16,68 @@ interface Plan {
   altAngle: string;
   location: string;
 }
+
+// Schemas the provider is asked to honour and the response is checked against.
+// `required` lists only what the run genuinely cannot proceed without; every
+// other field is type-checked when present, so a wrong type is rejected instead
+// of being coerced into the database.
+const NULLABLE_STRING = { type: ["string", "null"] };
+
+const PLAN_SCHEMA = {
+  name: "search_plan",
+  schema: {
+    type: "object",
+    required: ["searchQueries", "criteria"],
+    properties: {
+      needClarification: { type: ["boolean", "null"] },
+      questions: { type: ["array", "null"], items: { type: "string" } },
+      searchQueries: { type: "array", items: { type: "string" } },
+      criteria: { type: "string" },
+      altAngle: NULLABLE_STRING,
+      location: NULLABLE_STRING,
+    },
+  },
+};
+
+const LEADS_SCHEMA = {
+  name: "leads",
+  schema: {
+    type: "object",
+    required: ["leads"],
+    properties: {
+      leads: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["company"],
+          properties: {
+            company: { type: "string" },
+            website: NULLABLE_STRING,
+            industry: NULLABLE_STRING,
+            location: NULLABLE_STRING,
+            description: NULLABLE_STRING,
+            contact_name: NULLABLE_STRING,
+            contact_role: NULLABLE_STRING,
+            contact_email: NULLABLE_STRING,
+            connection_type: { enum: ["alum", "past_sponsor", "ecosystem", "none"] },
+            connection_note: NULLABLE_STRING,
+            sponsorship_type: { type: ["array", "null"], items: { type: "string" } },
+            fit_score: { type: ["number", "null"] },
+            why_fit: NULLABLE_STRING,
+            reasoning: NULLABLE_STRING,
+            source_index: { type: ["number", "null"] },
+          },
+        },
+      },
+    },
+  },
+};
+
+// How much of the analysis the structuring step is shown. The old 3,000-char cap
+// silently dropped the tail, which is exactly where the analyst's conclusions
+// live; the structuring model has a 1M-token context, so this only needs to be
+// generous enough to bound a runaway stream.
+const REASONING_FORWARD_CHARS = 60000;
 
 const STOP = new Set(
   "the a an and or of for to in on at with from find me some list companies company business businesses that are who is looking want need new leads potential more".split(
@@ -74,7 +137,7 @@ export async function runAgent(
         { role: "system", content: `${planPrompt(mode)}\n\nRespond ONLY with JSON of shape: {"needClarification": boolean, "questions": string[], "searchQueries": string[], "criteria": string, "altAngle": string, "location": string}. Provide 3 focused searchQueries. Only set needClarification true (with up to 2 short questions) if the request is too vague to search well. altAngle is a different angle to try if this search was already done before.` },
         { role: "user", content: fullPrompt },
       ],
-      { maxTokens: 800 }
+      { maxTokens: 800, schema: PLAN_SCHEMA }
     );
   } catch (e) {
     emit({ type: "error", message: `Planning failed: ${(e as Error).message}` });
@@ -138,7 +201,7 @@ export async function runAgent(
   }
   emit({ type: "status", step: "research", message: `Found ${candidates.length} candidates. Analyzing fit and connections` });
 
-  // ── 4. Reason + score with R1 (visible reasoning) ───────────────────────
+  // ── 4. Reason + score with the reasoning model (visible reasoning) ──────
   const context = candidates
     .map((c, i) => `[${i + 1}] ${c.title || domainOf(c.url)}\nURL: ${c.url}\n${(c.text || c.highlights.join(" ")).slice(0, 700)}`)
     .join("\n\n");
@@ -148,7 +211,8 @@ export async function runAgent(
       ? `You are a sales-lead analyst. Assess each candidate organization as a potential CUSTOMER for the user's product.\n\n${ENACTUS_VENTURES}`
       : `You are a sponsorship-lead analyst for Enactus SFU. Assess each candidate organization as a potential SPONSOR. Detect any Simon Fraser University (SFU) or Enactus alumni connection, or past-sponsor / SFU-ecosystem tie, strictly from the provided text.\n\n${ENACTUS_ORG}\n\n${ENACTUS_PROJECTS}\n\nFor each strong sponsor, identify which specific Enactus SFU project best matches their industry or values, so outreach can pitch that project.\n\nHARD EXCLUSIONS — drop these candidates entirely (do not output them at all): other student clubs, university clubs, or student associations (at SFU or any school); anything that would require Enactus to PAY (paid memberships, paid directory or association listings, ticketed programs, fee-based accelerators). Enactus is asking companies to give, not to join or pay. Only keep real companies, businesses, or grant-making foundations.`;
 
-  // Stage A — R1 reasons out loud (visible), no JSON. Capped so it stays snappy.
+  // Stage A — the reasoning model thinks out loud (visible), no JSON. Capped so
+  // it stays snappy.
   const reasoningUser = `User request: ${fullPrompt}
 Ideal lead: ${plan.criteria}
 
@@ -157,13 +221,25 @@ ${context}
 
 Reason candidate by candidate: which are the strongest ${mode === "sales" ? "customers" : "sponsors"} and why? Weigh SFU/Enactus ties, local fit, how winnable the ask is${mode === "sales" ? "" : ", and which specific Enactus SFU project each best aligns with"}. Be concise and specific. Do NOT output JSON, just think it through.`;
 
-  emit({ type: "status", step: "reason", message: "DeepSeek R1 reasoning about each candidate" });
-  // Hard time budget: R1 is the slow step. Cap it so the serverless function
+  emit({ type: "status", step: "reason", message: "Reasoning about each candidate" });
+  // Hard time budget: reasoning is the slow step. Cap it so the serverless function
   // always has room to structure + persist within the 60s limit. If the budget
   // is hit, we proceed with whatever reasoning streamed so far.
-  const R1_BUDGET_MS = 28000;
+  const REASONING_BUDGET_MS = 28000;
   const controller = new AbortController();
-  const budget = setTimeout(() => controller.abort(), R1_BUDGET_MS);
+  let budgetHit = false;
+  const budget = setTimeout(() => {
+    budgetHit = true;
+    controller.abort();
+  }, REASONING_BUDGET_MS);
+  // Accumulate every delta as it arrives. Whatever the stream does afterwards --
+  // return normally, abort, or throw -- the reasoning the user already watched
+  // stream past is still ours to structure from.
+  let streamed = "";
+  const capture = (d: string) => {
+    streamed += d;
+    emit({ type: "reasoning", text: d });
+  };
   let reasoningText = "";
   try {
     const r = await streamReasoner(
@@ -171,14 +247,11 @@ Reason candidate by candidate: which are the strongest ${mode === "sales" ? "cus
         { role: "system", content: scoreSystem },
         { role: "user", content: reasoningUser },
       ],
-      {
-        onReasoning: (d) => emit({ type: "reasoning", text: d }),
-        onContent: (d) => emit({ type: "reasoning", text: d }),
-      },
+      { onReasoning: capture, onContent: capture },
       { model: REASONER, maxTokens: 1200, signal: controller.signal, fastProvider: true }
     );
     reasoningText = (r.reasoning || r.content || "").trim();
-  } catch (e) {
+  } catch {
     // Genuine failure (not the budget abort): fall back to structuring from the
     // raw candidates rather than dropping the whole run.
     if (!controller.signal.aborted) {
@@ -187,8 +260,20 @@ Reason candidate by candidate: which are the strongest ${mode === "sales" ? "cus
   } finally {
     clearTimeout(budget);
   }
+  // An abort can surface either as a partial return or as a throw. Either way,
+  // degrade to what actually streamed rather than to nothing.
+  if (!reasoningText) reasoningText = streamed.trim();
+  if (budgetHit) {
+    emit({
+      type: "status",
+      step: "reason",
+      message: reasoningText
+        ? `Analysis hit its ${Math.round(REASONING_BUDGET_MS / 1000)}s time budget. Ranking from the ${reasoningText.length} characters of reasoning that streamed before the cut.`
+        : `Analysis hit its ${Math.round(REASONING_BUDGET_MS / 1000)}s time budget before producing anything. Ranking from the candidate research instead.`,
+    });
+  }
 
-  // Stage B — V3 turns the analysis into reliable structured JSON (fast).
+  // Stage B — the structured-output model turns the analysis into JSON (fast).
   emit({ type: "status", step: "structure", message: "Structuring the shortlisted leads" });
   const structureUser = `User request: ${fullPrompt}
 Ideal lead: ${plan.criteria}
@@ -198,7 +283,7 @@ Candidates:
 ${context}
 
 Analyst reasoning to base your selection on:
-${reasoningText.slice(0, 3000)}
+${reasoningText.slice(0, REASONING_FORWARD_CHARS)}
 
 Output ONLY JSON of the leads worth pursuing:
 {"leads":[{"company","website","industry","location","description","contact_name","contact_role","contact_email","connection_type","connection_note","sponsorship_type","fit_score","why_fit","reasoning","source_index"}]}
@@ -217,9 +302,9 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
         { role: "system", content: `${scoreSystem} Output only the JSON described, nothing else.` },
         { role: "user", content: structureUser },
       ],
-      { maxTokens: 2800 }
+      { maxTokens: 2800, schema: LEADS_SCHEMA, coerce: coerceLeadsPayload }
     );
-    if (p && Array.isArray(p.leads)) parsed = p;
+    parsed = coerceLeadsPayload(p);
   } catch {
     // fall through
   }
@@ -228,12 +313,14 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
     return;
   }
 
-  const reasoningTrace = reasoningText.slice(0, 4000);
+  // One verifier for the whole run: each domain costs at most one DNS query.
+  const verifyEmail = createContactEmailVerifier();
   const finalized: Lead[] = [];
   for (const raw of parsed.leads ?? []) {
-    const src = candidates[(raw.source_index ?? 1) - 1];
-    const website = raw.website || (src ? `https://${domainOf(src.url)}` : null);
-    const lead = await persistLead(raw, { website, src, mode, userName, reasoningTrace });
+    const src = resolveSource(candidates, raw.source_index);
+    const website = websiteFor(raw.website, src);
+    const contact = raw.contact_email ? await verifyEmail(raw.contact_email) : null;
+    const lead = await persistLead(raw, { website, src, mode, userName, contact });
     finalized.push(lead);
     emit({ type: "lead", lead });
   }
@@ -256,6 +343,44 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
   emit({ type: "done", count: finalized.length, searchId });
 }
 
+// Platforms that host pages *about* a company rather than the company's own
+// site. A source on one of these is legitimate evidence, but its hostname is
+// never the company's website.
+const AGGREGATOR_HOST =
+  /(^|\.)(linkedin\.com|facebook\.com|instagram\.com|twitter\.com|x\.com|threads\.net|tiktok\.com|youtube\.com|medium\.com|substack\.com|crunchbase\.com|yelp\.[a-z.]+|tripadvisor\.[a-z.]+|bbb\.org|eventbrite\.[a-z.]+)$/i;
+
+// `source_index` is the model's claim about which candidate it used. Trust it
+// only when it actually indexes a candidate we researched: an out-of-range or
+// absent index used to silently attribute a lead to another company's page.
+export function resolveSource(candidates: ExaResult[], sourceIndex: unknown): ExaResult | undefined {
+  if (typeof sourceIndex !== "number" || !Number.isInteger(sourceIndex)) return undefined;
+  if (sourceIndex < 1 || sourceIndex > candidates.length) return undefined;
+  return candidates[sourceIndex - 1];
+}
+
+// A company website is either the model's own claim or the source's hostname --
+// never an aggregator's hostname, which belongs to the platform, not the lead.
+export function websiteFor(claimed: string | null | undefined, src?: ExaResult): string | null {
+  if (claimed) return claimed;
+  if (!src) return null;
+  const host = domainOf(src.url);
+  if (!host || AGGREGATOR_HOST.test(host)) return null;
+  return `https://${host}`;
+}
+
+// The structuring model returns `{"leads":[...]}` most of the time and a bare
+// top-level array the rest of the time. Live testing measured the bare array at
+// 53% of completed runs, and every lead in those runs used to be thrown away.
+// Accept both shapes.
+export function coerceLeadsPayload(p: unknown): { leads: RawLead[] } | null {
+  if (Array.isArray(p)) return { leads: p as RawLead[] };
+  if (p && typeof p === "object") {
+    const leads = (p as { leads?: unknown }).leads;
+    if (Array.isArray(leads)) return { leads: leads as RawLead[] };
+  }
+  return null;
+}
+
 interface RawLead {
   company: string;
   website?: string | null;
@@ -274,9 +399,22 @@ interface RawLead {
   source_index?: number;
 }
 
+// An address the model produced that code could not verify. Kept on the record
+// so a human can chase it down, never handed to the drafting or Gmail path.
+function unverifiedNote(check: Exclude<EmailCheck, { ok: true }>): string {
+  const why = check.reason === "format" ? "not a valid email address" : "domain has no mail record";
+  return `unverified (${why}): ${check.email}`;
+}
+
 async function persistLead(
   raw: RawLead,
-  ctx: { website: string | null; src?: ExaResult; mode: Mode; userName: string; reasoningTrace: string }
+  ctx: {
+    website: string | null;
+    src?: ExaResult;
+    mode: Mode;
+    userName: string;
+    contact: EmailCheck | null;
+  }
 ): Promise<Lead> {
   const conn = (["alum", "past_sponsor", "ecosystem", "none"].includes(raw.connection_type ?? "")
     ? raw.connection_type
@@ -289,16 +427,20 @@ async function persistLead(
     description: raw.description ?? null,
     contact_name: raw.contact_name ?? null,
     contact_role: raw.contact_role ?? null,
-    contact_email: raw.contact_email ?? null,
+    contact_email: ctx.contact?.ok ? ctx.contact.email : null,
+    contact_email_status: ctx.contact && !ctx.contact.ok ? unverifiedNote(ctx.contact) : null,
     location: raw.location ?? null,
     connection_type: conn,
     connection_note: raw.connection_note ?? null,
     sponsorship_type: Array.isArray(raw.sponsorship_type) ? raw.sponsorship_type : [],
     fit_score: typeof raw.fit_score === "number" ? Math.max(0, Math.min(100, Math.round(raw.fit_score))) : null,
     why_fit: raw.why_fit ?? null,
-    // Per-company reasoning (from V3). Falls back to the shared trace only if the
-    // model omitted a company-specific one.
-    reasoning: (raw.reasoning && raw.reasoning.trim()) || ctx.reasoningTrace || raw.why_fit || null,
+    // Per-company reasoning only. The shared analyst trace discusses every
+    // candidate together, which the structuring prompt explicitly forbids a
+    // lead's reasoning from doing, so it is never borrowed here. If the model
+    // gave nothing company-specific, fall back to this company's own why_fit,
+    // then leave the field empty.
+    reasoning: (raw.reasoning && raw.reasoning.trim()) || (raw.why_fit && raw.why_fit.trim()) || null,
     sources: ctx.src ? [{ url: ctx.src.url, title: ctx.src.title ?? undefined }] : [],
     status: "prospects" as const,
     mode: ctx.mode,

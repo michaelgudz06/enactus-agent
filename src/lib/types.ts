@@ -18,6 +18,9 @@ export interface Lead {
   contact_name: string | null;
   contact_role: string | null;
   contact_email: string | null;
+  // Set when the model supplied an address that failed verification. The address
+  // is kept here, unusable but visible, instead of being presented as a contact.
+  contact_email_status: string | null;
   location: string | null;
   connection_type: ConnectionType;
   connection_note: string | null;
