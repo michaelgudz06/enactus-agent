@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Mail, Trash2, ChevronDown, ExternalLink, Brain } from "lucide-react";
 import { Lead } from "@/lib/types";
-import ConnectionChip, { fitColor } from "./ConnectionChip";
+import ConnectionChip from "./ConnectionChip";
 
 export default function LeadCard({
   lead,
@@ -27,23 +27,14 @@ export default function LeadCard({
       className="rounded-xl border p-3 card-hover animate-in"
       style={{ background: "var(--surface2)", borderColor: "var(--border)", cursor: draggable ? "grab" : "default" }}
     >
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="font-semibold text-sm leading-tight truncate">{lead.company}</div>
-          <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-            {lead.industry && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "var(--surface3)", color: "var(--muted)" }}>
-                {lead.industry}
-              </span>
-            )}
-            {lead.location && <span className="text-[10px]" style={{ color: "var(--faint)" }}>{lead.location}</span>}
-          </div>
-        </div>
-        {lead.fit_score != null && (
-          <div className="shrink-0 grid place-items-center w-9 h-9 rounded-lg text-xs font-bold" style={{ background: "var(--surface3)", color: fitColor(lead.fit_score) }} title="Fit score">
-            {lead.fit_score}
-          </div>
+      <div className="font-semibold text-sm leading-tight truncate">{lead.company}</div>
+      <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+        {lead.industry && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "var(--surface3)", color: "var(--muted)" }}>
+            {lead.industry}
+          </span>
         )}
+        {lead.location && <span className="text-[10px]" style={{ color: "var(--faint)" }}>{lead.location}</span>}
       </div>
 
       <div className="mt-2 flex items-center gap-1.5 flex-wrap">
