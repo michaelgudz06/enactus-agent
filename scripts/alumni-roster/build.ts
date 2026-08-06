@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import {
   academicYearOfCapture,
   applyRemovals,
+  capturedAcademicYear,
   coverageByYear,
   findNearDuplicates,
   mergeSightings,
@@ -64,7 +65,12 @@ if (process.argv[2] === "--refresh-readme") {
     const rows = parseRosterCsv(readFileSync(csvFile, "utf8"));
     people = rows.length;
     coverage = coverageByYear(rows);
-    refreshed = refreshCoverageClaims(readFileSync(readmeFile, "utf8"), people, coverage);
+    refreshed = refreshCoverageClaims(
+      readFileSync(readmeFile, "utf8"),
+      people,
+      coverage,
+      capturedAcademicYear(rows, process.env.ROSTER_CAPTURED_AT),
+    );
   } catch (error) {
     console.error(
       `cannot refresh ${readmeFile} from ${csvFile}: ${error instanceof Error ? error.message : String(error)}`,

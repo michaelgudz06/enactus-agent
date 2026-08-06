@@ -150,7 +150,8 @@ function parseCoverageReport(block: string) {
     years: years.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
     people: Number(field("people")),
     yearsCovered: Number(field("years covered")),
-    span: Number(/years covered \d+ of (\d+)/.exec(totals)?.[1]),
+    span: Number(/years covered \d+ of the (\d+) academic years/.exec(totals)?.[1]),
+    foundingYear: Number(/since the chapter was founded in (\d{4})/.exec(totals)?.[1]),
     earliest: field("earliest"),
     latest: field("latest"),
     undated: Number(field("with no year")),
@@ -1158,20 +1159,23 @@ describe("refreshing what the README says about the roster", () => {
    * no network — the position a student is in when an alum emails and the only
    * thing they have is a fresh clone.
    */
-  function runRefresh({ dropRowsFor = null as string | null } = {}) {
+  function runRefresh({
+    dropRowsFor = null,
+    dropYear = null,
+  }: { dropRowsFor?: string | null; dropYear?: string | null } = {}) {
     const root = mkdtempSync(path.join(tmpdir(), "alumni-refresh-"));
     const csv = path.join(root, "past-executives.csv");
     const readme = path.join(root, "README.md");
 
     const committed = readFileSync(CSV, "utf8");
+    const preamble = committed.split("\n").filter((line) => line.startsWith("#")).join("\n") + "\n";
+    const kept = parseRosterCsv(committed).filter(
+      (row) =>
+        row.name !== dropRowsFor && !(dropYear !== null && expandYears(row.yearsActive).includes(dropYear)),
+    );
     writeFileSync(
       csv,
-      dropRowsFor === null
-        ? committed
-        : committed
-            .split("\n")
-            .filter((line) => !line.startsWith(`${dropRowsFor},`))
-            .join("\n"),
+      dropRowsFor === null && dropYear === null ? committed : preamble + toCsv(kept),
     );
     writeFileSync(readme, readFileSync(README, "utf8"));
 
@@ -1216,6 +1220,31 @@ describe("refreshing what the README says about the roster", () => {
     expect(after.years).toEqual(coverage.years);
   });
 
+  test("dropping the earliest person costs the numerator, never the denominator", () => {
+    const before = claimsIn(readFileSync(README, "utf8"));
+    const run = runRefresh({ dropRowsFor: "Jade Bourelle" });
+    const after = claimsIn(readFileSync(run.readme, "utf8"));
+
+    expect(run.status).toBe(0);
+    expect(after.people).toBe(before.people - 1);
+    expect(after.yearsCovered).toBe(before.yearsCovered - 1);
+    expect(after.earliest).not.toBe(before.earliest);
+    // The share of the club's history this file covers must fall, not rise.
+    expect(after.span).toBe(before.span);
+    expect(after.foundingYear).toBe(before.foundingYear);
+  });
+
+  test("dropping the latest cohort leaves the denominator alone too", () => {
+    const before = claimsIn(readFileSync(README, "utf8"));
+    const run = runRefresh({ dropYear: "2026-27" });
+    const after = claimsIn(readFileSync(run.readme, "utf8"));
+
+    expect(run.status).toBe(0);
+    expect(after.people).toBeLessThan(before.people);
+    expect(after.latest).not.toBe(before.latest);
+    expect(after.span).toBe(before.span);
+  });
+
   test("a roster it cannot read stops it rather than half-rewriting the README", () => {
     const root = mkdtempSync(path.join(tmpdir(), "alumni-refresh-bad-"));
     const csv = path.join(root, "past-executives.csv");
@@ -1243,7 +1272,8 @@ describe("the coverage report, as text", () => {
     "```",
     "2015-16   2    2024-25   1  ← coaches only",
     "",
-    "people 3    years covered 2 of 10    earliest 2015-16    latest 2024-25    with no year 6",
+    "people 3    with no year 6    earliest 2015-16    latest 2024-25",
+    "years covered 2 of the 10 academic years since the chapter was founded in 1991",
     "```",
     "",
     "The people with no year are the Community Spotlight names.",
@@ -1255,13 +1285,18 @@ describe("the coverage report, as text", () => {
 
   test("the table and the totals beneath it are rewritten together", () => {
     const refreshed = reportIn(
-      refreshCoverageClaims(readme, 9, {
-        years: [
-          ["2015-16", 4],
-          ["2024-25", 5],
-        ],
-        undated: 2,
-      }),
+      refreshCoverageClaims(
+        readme,
+        9,
+        {
+          years: [
+            ["2015-16", 4],
+            ["2024-25", 5],
+          ],
+          undated: 2,
+        },
+        2026,
+      ),
     );
 
     expect(refreshed.years).toEqual([
@@ -1275,44 +1310,71 @@ describe("the coverage report, as text", () => {
     expect(refreshed.latest).toBe("2024-25");
   });
 
-  test("the span is the years the roster reaches across, covered or not", () => {
-    const refreshed = reportIn(
-      refreshCoverageClaims(readme, 2, {
-        years: [
-          ["1991", 1],
-          ["2026-27", 1],
-        ],
-        undated: 0,
-      }),
+  test("the span runs from the founding year, not from the roster's earliest row", () => {
+    const withFounder = reportIn(
+      refreshCoverageClaims(
+        readme,
+        2,
+        {
+          years: [
+            ["1991", 1],
+            ["2026-27", 1],
+          ],
+          undated: 0,
+        },
+        2026,
+      ),
+    );
+    const withoutFounder = reportIn(
+      refreshCoverageClaims(readme, 1, { years: [["2026-27", 1]], undated: 0 }, 2026),
     );
 
-    expect(refreshed.yearsCovered).toBe(2);
-    expect(refreshed.span).toBe(36);
+    expect(withFounder.span).toBe(36);
+    expect(withFounder.yearsCovered).toBe(2);
+    // Losing the earliest row costs the numerator, never the denominator.
+    expect(withoutFounder.span).toBe(36);
+    expect(withoutFounder.yearsCovered).toBe(1);
+    expect(withoutFounder.foundingYear).toBe(1991);
+  });
+
+  test("the span moves with the year the roster was captured, and nothing else", () => {
+    const later = reportIn(
+      refreshCoverageClaims(readme, 1, { years: [["2026-27", 1]], undated: 0 }, 2030),
+    );
+
+    expect(later.span).toBe(40);
   });
 
   test("a note beside a year survives a refresh that changes its count", () => {
-    const refreshed = refreshCoverageClaims(readme, 9, {
-      years: [
-        ["2015-16", 4],
-        ["2024-25", 5],
-      ],
-      undated: 2,
-    });
+    const refreshed = refreshCoverageClaims(
+      readme,
+      9,
+      {
+        years: [
+          ["2015-16", 4],
+          ["2024-25", 5],
+        ],
+        undated: 2,
+      },
+      2026,
+    );
 
     expect(refreshed).toContain("2015-16   4    2024-25   5  ← coaches only");
   });
 
   test("a year with no note is written without one", () => {
-    const refreshed = refreshCoverageClaims(readme, 2, { years: [["1991", 2]], undated: 0 });
+    const refreshed = refreshCoverageClaims(readme, 2, { years: [["1991", 2]], undated: 0 }, 2026);
     expect(refreshed).toContain("```\n1991      2\n");
   });
 
   test("a README whose report has moved throws rather than leaving it stale", () => {
     expect(() =>
-      refreshCoverageClaims(readme.replace("## Gaps in the record", "## Gaps"), 3, {
-        years: [["2015-16", 3]],
-        undated: 0,
-      }),
+      refreshCoverageClaims(
+        readme.replace("## Gaps in the record", "## Gaps"),
+        3,
+        { years: [["2015-16", 3]], undated: 0 },
+        2026,
+      ),
     ).toThrow();
   });
 });

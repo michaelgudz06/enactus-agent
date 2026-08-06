@@ -315,7 +315,8 @@ that could quietly disagree with it:
 2008-09   1    2014-15  17    2018-19  16    2025-26  38
 2009-10   1    2015-16  36    2022-23   6    2026-27  33
 
-people 199    years covered 16 of 36    earliest 1991    latest 2026-27    with no year 6
+people 199    with no year 6    earliest 1991    latest 2026-27
+years covered 16 of the 36 academic years since the chapter was founded in 1991
 ```
 
 The people with no year at all are the Community Spotlight names, whose posts

@@ -740,6 +740,20 @@ export function parseRosterCsv(contents: string): RosterRow[] {
 
 const COVERAGE_BLOCK = /(## Gaps in the record[\s\S]*?```\n)([\s\S]*?)(```)/;
 
+/**
+ * The year the chapter was founded, as the club itself published it: its
+ * archived site footers carry "Founded in 1991", and the 2012 /alumni/ page
+ * dates its founder's entry to that year — the same page the roster's own 1991
+ * row was read from.
+ *
+ * It is pinned rather than read off the roster because it is the denominator of
+ * the coverage report: taken from the earliest row instead, removing the person
+ * who holds that row would shrink the span and the report would claim a larger
+ * share of the club's history than it covers, in the section whose whole job is
+ * saying what is missing.
+ */
+export const FOUNDING_YEAR = 1991;
+
 /** "2024-25  12  ← coaches only" -> the note beside the count, if there is one. */
 function notesInTable(block: string): Map<string, string> {
   const notes = new Map<string, string>();
@@ -765,6 +779,7 @@ function notesInTable(block: string): Map<string, string> {
 export function renderCoverageReport(
   people: number,
   coverage: { years: Array<[string, number]>; undated: number },
+  asOfYear: number,
   notes: Map<string, string> = new Map(),
 ): string {
   const columns = 4;
@@ -785,17 +800,22 @@ export function renderCoverageReport(
 
   const first = coverage.years[0]?.[0];
   const last = coverage.years.at(-1)?.[0];
-  const span = first && last ? Number(last.slice(0, 4)) - Number(first.slice(0, 4)) + 1 : 0;
+  // Founding year to the year this roster was captured. Neither end is a row,
+  // so the share of the club's history this file covers does not rise when
+  // somebody is taken out of it.
+  const span = asOfYear - FOUNDING_YEAR + 1;
 
   if (lines.length) lines.push("");
   lines.push(
     [
       `people ${people}`,
-      `years covered ${coverage.years.length} of ${span}`,
+      `with no year ${coverage.undated}`,
       `earliest ${first ?? "-"}`,
       `latest ${last ?? "-"}`,
-      `with no year ${coverage.undated}`,
     ].join("    "),
+  );
+  lines.push(
+    `years covered ${coverage.years.length} of the ${span} academic years since the chapter was founded in ${FOUNDING_YEAR}`,
   );
 
   return lines.join("\n") + "\n";
@@ -810,6 +830,7 @@ export function refreshCoverageClaims(
   readme: string,
   people: number,
   coverage: { years: Array<[string, number]>; undated: number },
+  asOfYear: number,
 ): string {
   const block = COVERAGE_BLOCK.exec(readme);
   if (!block) throw new Error('no fenced coverage report under "## Gaps in the record"');
@@ -817,8 +838,33 @@ export function refreshCoverageClaims(
   return readme.replace(
     COVERAGE_BLOCK,
     (_match, open: string, body: string, close: string) =>
-      open + renderCoverageReport(people, coverage, notesInTable(body)) + close,
+      open + renderCoverageReport(people, coverage, asOfYear, notesInTable(body)) + close,
   );
+}
+
+/**
+ * The academic year the roster was captured in, read off the capture date the
+ * file records for every row rather than off the clock, so a refresh run today
+ * and one run next year produce the same report. `ROSTER_CAPTURED_AT` pins it
+ * the same way it pins the build. A file whose rows disagree about when they
+ * were captured is not a file to guess at.
+ */
+export function capturedAcademicYear(rows: RosterRow[], pinned?: string): number {
+  const dates = pinned
+    ? new Set([pinned])
+    : new Set(rows.flatMap((row) => row.capturedAt.split(" | ")).filter(Boolean));
+
+  if (dates.size !== 1) {
+    throw new Error(
+      dates.size === 0
+        ? "no capture date to date the roster by"
+        : `rows disagree about when they were captured: ${[...dates].sort().join(", ")}`,
+    );
+  }
+
+  const [date] = dates;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`not a capture date: ${date}`);
+  return Number(academicYearOfCapture(`${date.replace(/-/g, "")}000000`).slice(0, 4));
 }
 
 /**
