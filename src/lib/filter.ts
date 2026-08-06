@@ -203,6 +203,24 @@
 //          list is deliberately incomplete; the cost is under-killing, which is the safe
 //          direction.
 //
+//  A8. §5's LOCAL_AUTHORITY EXEMPTION IS NOW EMITTED, NOT NARRATED. 2026-08-06.
+//
+//      Report §5 line 702: "Returns `LOCAL_AUTHORITY` (exempt from K-SIZE-01 and K-GEO-01/02)".
+//      The exemption was rendered in §5's sentence from the first commit and consumed by
+//      K-SIZE-01 alone, so a scraped franchisee row carrying its brand's foreign country took an
+//      ACCOUNT-SCOPED `outside_canada` terminal — invisible forever — beside a sentence saying it
+//      was exempt. The class it silently dropped is the club's own converted list: Modo Yoga
+//      Vancouver, Rumble, skoah, The Old Spaghetti Factory, Waves Coffee.
+//
+//      K-GEO-02 is retired (A6), so the surviving exemption set is K-SIZE-01 and K-GEO-01.
+//
+//      HOW A5 MISSED IT, which is the part worth keeping: A5 was scoped to a LIST of four known
+//      instances, so it guaranteed exactly those four. The set is now derived from the RENDER
+//      PATH instead — every site that produces a `message` — and that derivation also caught the
+//      NOT_APPLICABLE and UNPROVEN sentences asserting what P-04 would do, which nothing carried
+//      and which UNPROVEN additionally overclaimed ("takes P-04" when P-04 needs two more §4
+//      clauses). Both now render from `enables`.
+//
 //  A5. AN EFFECT A RULE DESCRIBES IS PART OF ITS RETURN TYPE. Four rules in a row were found
 //      narrating an outcome nothing emitted (K-REL-08's sibling −40, L-04's email channel,
 //      P-08's forbid, §5's head-office reroute). Sweeping for it caught the ones that existed;
@@ -1254,7 +1272,11 @@ export function enterpriseProxies(a: Account): EnterpriseProxyReport {
  * SFU PARTNER. So one non-ticker proxy produces no outcome at all, which is the intended
  * behaviour and not an omission. Zero proxies and no headcount is `cannot_evaluate`.
  */
-export function kSize01EnterpriseScale(a: Account, now: Date, franchise?: FranchiseStatus): PredicateResult {
+export function kSize01EnterpriseScale(
+  a: Account,
+  now: Date,
+  franchise: FranchiseReport | undefined,
+): PredicateResult {
   const headcount = a.headcount ?? null;
   const bandMax = a.headcount_band_max ?? null;
   const proxies = enterpriseProxies(a);
@@ -1275,7 +1297,7 @@ export function kSize01EnterpriseScale(a: Account, now: Date, franchise?: Franch
 
   // §5 overrides the size kill: a franchise location with local authority is a small local
   // business that happens to share a logo.
-  if (franchise === "LOCAL_AUTHORITY") return pass("K-SIZE-01");
+  if (franchiseExempts(franchise, "K-SIZE-01")) return pass("K-SIZE-01");
 
   const basis = measuredLarge ? "measured" : "proxy";
   const detail = measuredLarge
@@ -1460,18 +1482,30 @@ export function kGeo01OutsideCanada(
   a: Account,
   lists: QualificationLists,
   now: Date,
+  franchise: FranchiseReport | undefined,
 ): PredicateResult {
   const geo = geographyOf(a, lists);
   if (geo.band === "unresolved") {
     return cannotEvaluate(
       "K-GEO-01",
       geo.missing_fields.map((f) => `address_${f}`),
-      a.address_country
-        ? `the recorded country "${a.address_country}" matches nothing this module recognises, and no other field places the account; an unrecognised value is never a kill (§2.3)`
-        : "no country is recorded; a missing country is never a kill (§2.3)",
+      // Branch on the EVIDENCE, not on whether a country string is present. Since rule 3 made
+      // `canada_other` require positive corroboration, `unresolved` is reachable with a
+      // perfectly good country recorded, and the old text sent a human to fix a correct field.
+      // `contrary` is unreachable here: it resolves outside_canada.
+      geo.evidence.country === "known"
+        ? `the recorded country "${a.address_country}" is Canada, but nothing on the row places the account within it; an unplaced account is never a kill (§2.3)`
+        : a.address_country
+          ? `the recorded country "${a.address_country}" matches nothing this module recognises, and no other field places the account; an unrecognised value is never a kill (§2.3)`
+          : "no country is recorded; a missing country is never a kill (§2.3)",
     );
   }
   if (geo.band !== "outside_canada") return pass("K-GEO-01");
+
+  // §5's LOCAL_AUTHORITY carve-out: test the LOCATION, not the brand. A scraped franchisee row
+  // carries the international brand's corporate country, and killing on it drops exactly the
+  // local storefront §5 exists to protect.
+  if (franchiseExempts(franchise, "K-GEO-01")) return pass("K-GEO-01");
 
   const detail = a.address_country ?? "";
   return {
@@ -2658,9 +2692,46 @@ export function kRep02SensitiveSector(
 
 export type FranchiseStatus = "LOCAL_AUTHORITY" | "HEAD_OFFICE" | "UNPROVEN" | "NOT_APPLICABLE";
 
+/**
+ * The kills §5's LOCAL_AUTHORITY verdict is allowed to switch off, as a CLOSED UNION.
+ *
+ * Report §5 line 702: "Returns `LOCAL_AUTHORITY` (exempt from K-SIZE-01 and K-GEO-01/02)".
+ * K-GEO-02 was retired by the 2026-08-06 supersession recorded in A6, so two ids remain.
+ *
+ * Adding an id here is a compile error until `EXEMPTIBLE_RULE_IDS` lists it, and the rule it
+ * names must take a `FranchiseReport` and ask `franchiseExempts` — the exempted predicates each
+ * REQUIRE that argument, so no call site can evaluate one without the verdict in hand.
+ */
+export type ExemptibleRuleId = "K-SIZE-01" | "K-GEO-01";
+
+/** The union, enumerable at runtime. The annotation makes a missing id a compile error. */
+export const EXEMPTIBLE_RULE_IDS: readonly [ExemptibleRuleId, ExemptibleRuleId] = [
+  "K-SIZE-01",
+  "K-GEO-01",
+];
+
+/**
+ * The penalties §5's verdict can ENABLE, as the mirror of `ExemptibleRuleId`.
+ *
+ * Derived from the render path rather than from a list of known defects: walking every message
+ * this module produces showed the NOT_APPLICABLE and UNPROVEN sentences each asserting what
+ * P-04 would do, with nothing carrying it. UNPROVEN's also overclaimed — it said the row "takes
+ * P-04 (-30)" when P-04 needs both of its other §4 clauses as well.
+ */
+export type EnablableRuleId = "P-04";
+
+/** The union, enumerable at runtime. */
+export const ENABLABLE_RULE_IDS: readonly [EnablableRuleId] = ["P-04"];
+
 interface FranchiseReportBase {
   /** The signal ids that fired, e.g. ["S1", "S2", "S4"]. */
   signals: string[];
+  /**
+   * The penalties this verdict opens the door to, as DATA. Required on every variant, so a new
+   * status cannot be added without saying what it enables, and the sentence is rendered from it.
+   * Opening the door is not firing: the penalty's own §4 clauses still decide.
+   */
+  enables: readonly EnablableRuleId[];
   message: string;
 }
 
@@ -2679,7 +2750,17 @@ interface FranchiseReportBase {
  */
 export type FranchiseReport =
   | (FranchiseReportBase & { status: "NOT_APPLICABLE" })
-  | (FranchiseReportBase & { status: "LOCAL_AUTHORITY" })
+  | (FranchiseReportBase & {
+      status: "LOCAL_AUTHORITY";
+      /**
+       * The kills this verdict switches off, as DATA the sentence is rendered FROM. §5's message
+       * used to assert "exempt from K-SIZE-01 and K-GEO-01/02" in free text while `status` was
+       * read by K-SIZE-01 alone, so a franchise location with proven local authority took an
+       * account-scoped `outside_canada` terminal — invisible forever — beside a sentence saying
+       * it was exempt. A claim rendered from the list cannot name a rule the list omits.
+       */
+      exempts: readonly ExemptibleRuleId[];
+    })
   | (FranchiseReportBase & { status: "UNPROVEN" })
   | (FranchiseReportBase & {
       status: "HEAD_OFFICE";
@@ -2720,7 +2801,7 @@ function isChainOrBranchLocation(a: Account): boolean {
       o.corporate_owned_all_locations ||
       // A store locator listing more than one location is direct evidence of a network.
       (o.store_locator_location_count ?? 0) >= 2 ||
-      // K-GEO-02's carve-out already established that a local branch of this account exists.
+      // the flag records a CONFIRMED local branch of an out-of-province head office, which is a location of something bigger.
       o.bc_branch_confirmed,
   );
 }
@@ -2756,8 +2837,9 @@ export function franchiseOrBranchCarveOut(a: Account, opts: FranchiseOptions = {
     return {
       status: "NOT_APPLICABLE",
       signals: [],
+      enables: [],
       message:
-        "No franchise or branch signal was observed, so this row is not a location of a chain and §5 does not apply to it. The franchise question is NOT APPLICABLE rather than unproven, and P-04 does not fire: an independent single-location business cannot have unproven autonomy as a branch of nothing.",
+        "No franchise or branch signal was observed, so this row is not a location of a chain and §5 does not apply to it. The franchise question is NOT APPLICABLE rather than unproven, and this verdict enables no penalty: an independent single-location business cannot have unproven autonomy as a branch of nothing.",
     };
   }
 
@@ -2776,10 +2858,13 @@ export function franchiseOrBranchCarveOut(a: Account, opts: FranchiseOptions = {
   // S6 alone only proves the network is franchised at all, which is weaker than the others.
   const decisivePositive = positive.filter((s) => s !== "S6");
   if (decisivePositive.length > 0) {
+    const exempts = EXEMPTIBLE_RULE_IDS;
     return {
       status: "LOCAL_AUTHORITY",
       signals: positive,
-      message: `Local decision-making authority proven by ${decisivePositive.join(", ")}. Test the location, not the brand: this is a small local business that happens to share a logo, and it is exempt from K-SIZE-01 and K-GEO-01/02.`,
+      exempts,
+      enables: [],
+      message: `Local decision-making authority proven by ${decisivePositive.join(", ")}. Test the location, not the brand: this is a small local business that happens to share a logo, and it is exempt from ${exempts.join(" and ")}.`,
     };
   }
 
@@ -2794,17 +2879,19 @@ export function franchiseOrBranchCarveOut(a: Account, opts: FranchiseOptions = {
     return {
       status: "HEAD_OFFICE",
       signals: [...positive, ...negative],
+      enables: [],
       message: `Head office holds the decision (${negative.join(", ")}). The ask belongs to whatever channel head office publishes, so the row is REROUTED, not dropped.`,
       reroute: headOfficeReroute(a, negative, publishedChannel(a, now, opts), now),
     };
   }
 
   // Step 3 — neither fires.
+  const enables = ENABLABLE_RULE_IDS;
   return {
     status: "UNPROVEN",
     signals: positive,
-    message:
-      "Neither a local-autonomy nor a head-office signal was observed. This takes P-04 (-30) and stays in the queue with franchise_status=unproven. \"We couldn't tell\" is not evidence of \"no\" (§2.3).",
+    enables,
+    message: `Neither a local-autonomy nor a head-office signal was observed. The row stays in the queue with franchise_status=unproven and becomes eligible for ${enables.join(", ")}, which fires only if its own §4 clauses hold as well. "We couldn't tell" is not evidence of "no" (§2.3).`,
   };
 }
 
@@ -2820,7 +2907,7 @@ export function franchiseOrBranchCarveOut(a: Account, opts: FranchiseOptions = {
 export interface PenaltyContext {
   lists: QualificationLists;
   now: Date;
-  franchise?: FranchiseStatus;
+  franchise?: FranchiseReport;
 }
 
 /**
@@ -2879,6 +2966,28 @@ function headOfficeReroute(
       now,
     }),
   };
+}
+
+/**
+ * Does §5's verdict switch this kill off for this row?
+ *
+ * The ONLY reader of `exempts`, and the only way an exempted rule may consult §5. The exempted
+ * predicates take the report as a REQUIRED parameter, so the compiler will not let a caller
+ * evaluate K-SIZE-01 or K-GEO-01 without the verdict — the same lever that made K-REL-08's
+ * free-mail exemption unreachable-around.
+ */
+export function franchiseEnables(
+  report: FranchiseReport | undefined,
+  rule: EnablableRuleId,
+): boolean {
+  return report !== undefined && report.enables.includes(rule);
+}
+
+export function franchiseExempts(
+  report: FranchiseReport | undefined,
+  rule: ExemptibleRuleId,
+): boolean {
+  return report?.status === "LOCAL_AUTHORITY" && report.exempts.includes(rule);
 }
 
 /**
@@ -3014,7 +3123,7 @@ export function evaluatePenalties(a: Account, ctx: PenaltyContext): PenaltyResul
   // P-04 — ENTRY CONDITION, from §4's own definition: "Head office outside BC, local branch
   // exists but branch autonomy unproven". All three clauses are required. §5's bare UNPROVEN
   // fall-through implements only the third; see the REPORT CONTRADICTIONS note.
-  if (ctx.franchise === "UNPROVEN" && headOfficeOutsideBc(a, lists) && localBranchExists(a)) {
+  if (franchiseEnables(ctx.franchise, "P-04") && headOfficeOutsideBc(a, lists) && localBranchExists(a)) {
     out.push(
       penalty(
         a,
@@ -3092,7 +3201,7 @@ export function evaluatePenalties(a: Account, ctx: PenaltyContext): PenaltyResul
         "unresolved_geography",
         -15,
         `${o.geography_resolution_attempts} resolution attempts`,
-        "no geography evidence of any kind was found after a retry. Absence of evidence is never a kill, so this is a penalty",
+        `the geography did not resolve after a retry (unplaced: ${geographyOf(a, lists).missing_fields.join(", ") || "none recorded"}). Absence of evidence is never a kill, so this is a penalty`,
       ),
     );
   }
@@ -3323,9 +3432,9 @@ export function killPredicateSequence(
     () => kRep01StatutorySector(a, lists, now),
     () => kRep02SensitiveSector(a, lists, now),
     // 6. geography
-    () => kGeo01OutsideCanada(a, lists, now),
+    () => kGeo01OutsideCanada(a, lists, now, franchise),
     // 7. size
-    () => kSize01EnterpriseScale(a, now, franchise.status),
+    () => kSize01EnterpriseScale(a, now, franchise),
     () => kChan01ApplicationChannel(a, now, { application_path_found: opts.application_path_found }),
     () => kChan02IneligibleRequiresCharity(a, now),
     // §5 step 2's reroute, AFTER K-CHAN-02: the report's own caveat is "rerouted, not dropped,
@@ -3485,7 +3594,7 @@ export function runFilter(
 
   // Step 10 — penalties. Skipped when a TERMINAL fired, because the row is out of the queue and
   // a score on a rejected row means nothing.
-  const penalties = kills.length > 0 ? [] : dedupePenalties([...inlinePenalties, ...evaluatePenalties(account, { lists, now, franchise: franchise.status })]);
+  const penalties = kills.length > 0 ? [] : dedupePenalties([...inlinePenalties, ...evaluatePenalties(account, { lists, now, franchise })]);
 
   // The surviving record. A field terminal clears its field so the account goes back to
   // discovery with the unusable value gone, rather than being carried forward or dropped.

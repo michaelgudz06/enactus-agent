@@ -16,6 +16,10 @@ import {
   evaluateKillPredicates,
   evaluatePenalties,
   franchiseOrBranchCarveOut,
+  franchiseExempts,
+  EXEMPTIBLE_RULE_IDS,
+  ENABLABLE_RULE_IDS,
+  type FranchiseReport,
   isReversible,
   isRoleAccount,
   kChan01ApplicationChannel,
@@ -57,6 +61,31 @@ const NOW = new Date("2026-08-06T12:00:00.000Z");
 
 function account(over: Partial<Account> & { legal_name: string }): Account {
   return over;
+}
+
+/** A real §5 verdict, built from a row that proves local autonomy — never a hand-made object. */
+/** A real UNPROVEN verdict — a chain location with no autonomy signal and no head-office one. */
+function unproven(): FranchiseReport {
+  const report = franchiseOrBranchCarveOut(
+    account({ legal_name: "A Chain Location", observations: { chain_has_franchise_page: true } }),
+  );
+  if (report.status !== "UNPROVEN") throw new Error(`expected UNPROVEN, got ${report.status}`);
+  return report;
+}
+
+function localAuthority(): FranchiseReport {
+  const report = franchiseOrBranchCarveOut(
+    account({
+      legal_name: "A Chain Location",
+      observations: {
+        chain_has_franchise_page: true,
+        location_has_own_domain_with_mx: true,
+        named_local_owner: "Jane Smith",
+      },
+    }),
+  );
+  if (report.status !== "LOCAL_AUTHORITY") throw new Error(`expected LOCAL_AUTHORITY, got ${report.status}`);
+  return report;
 }
 
 /** Every fixture below is a company named by one of the two reports. */
@@ -307,7 +336,7 @@ describe("K-ORG-06 · self and internal units → TERMINAL", () => {
 
 describe("K-SIZE-01 · enterprise scale — the one predicate with a real data problem", () => {
   it("CANNOT EVALUATE when no headcount and no proxy is available", () => {
-    const r = kSize01EnterpriseScale(account({ legal_name: "Red Bull" }), NOW, "UNPROVEN");
+    const r = kSize01EnterpriseScale(account({ legal_name: "Red Bull" }), NOW, undefined);
     expect(r.kind).toBe("cannot_evaluate");
     if (r.kind !== "cannot_evaluate") return;
     expect(r.missing_fields).toEqual(
@@ -316,29 +345,115 @@ describe("K-SIZE-01 · enterprise scale — the one predicate with a real data p
   });
 
   it("kills at the ISED large threshold of 500, not at 100", () => {
-    expect(kSize01EnterpriseScale(account({ legal_name: "Big Co", headcount: 500 }), NOW, "UNPROVEN").kind).toBe(
+    expect(kSize01EnterpriseScale(account({ legal_name: "Big Co", headcount: 500 }), NOW, undefined).kind).toBe(
       "terminal",
     );
-    expect(kSize01EnterpriseScale(account({ legal_name: "Mid Co", headcount: 499 }), NOW, "UNPROVEN").kind).toBe(
+    expect(kSize01EnterpriseScale(account({ legal_name: "Mid Co", headcount: 499 }), NOW, undefined).kind).toBe(
       "pass",
     );
     // 100 would kill every converted sponsor the club has.
-    expect(kSize01EnterpriseScale(account({ legal_name: "Local Co", headcount: 120 }), NOW, "UNPROVEN").kind).toBe(
+    expect(kSize01EnterpriseScale(account({ legal_name: "Local Co", headcount: 120 }), NOW, undefined).kind).toBe(
       "pass",
     );
   });
 
+  // THE EXEMPTION IS HONOURED BY EVERY RULE IT NAMES, and the list is walked rather than
+  // hand-copied: EXEMPTIBLE_RULE_IDS is the runtime form of the union the verdict carries, so a
+  // new id added to the union without a rule that consults it fails HERE, not in review.
+  //
+  // What the type can and cannot do, stated honestly: the compiler forces every call site to
+  // pass the verdict (both predicates take it as a required parameter), but it cannot force the
+  // body to READ it. That half is this test.
+  it.each(EXEMPTIBLE_RULE_IDS)("LOCAL_AUTHORITY actually switches off %s, not just claims to", (rule) => {
+    const exempt = localAuthority();
+    expect(exempt.status === "LOCAL_AUTHORITY" && exempt.exempts).toContain(rule);
+
+    // A row that WOULD take this kill without the verdict.
+    const rows: Record<typeof rule, Account> = {
+      "K-SIZE-01": account({ legal_name: "Modo Yoga Vancouver", headcount: 900 }),
+      "K-GEO-01": account({
+        legal_name: "Chain BC Location",
+        registrable_domain: "loc.ca",
+        address_municipality: "Vancouver",
+        address_region: "BC",
+        address_country: "US",
+      }),
+    };
+    const evaluate: Record<typeof rule, (f: FranchiseReport | undefined) => PredicateResult> = {
+      "K-SIZE-01": (f) => kSize01EnterpriseScale(rows["K-SIZE-01"], NOW, f),
+      "K-GEO-01": (f) => kGeo01OutsideCanada(rows["K-GEO-01"], lists, NOW, f),
+    };
+
+    expect(evaluate[rule](undefined).kind, `${rule} must kill without the carve-out`).toBe("terminal");
+    expect(evaluate[rule](exempt).kind, `${rule} must honour the carve-out`).toBe("pass");
+  });
+
+  // The mirror of the exemption walk, for the penalty §5 ENABLES. The distinction the old
+  // sentence lost: enabling is not firing, so an eligible row with no other §4 clause takes
+  // nothing.
+  it.each(ENABLABLE_RULE_IDS)("UNPROVEN enables %s without firing it on its own", (rule) => {
+    const enabling = unproven();
+    expect(enabling.enables).toContain(rule);
+    expect(localAuthority().enables).not.toContain(rule);
+
+    const chainInOntario = account({
+      legal_name: "Ontario Chain Co",
+      address_municipality: "Toronto",
+      address_region: "ON",
+      address_country: "CA",
+      observations: { chain_has_franchise_page: true, bc_branch_confirmed: true },
+    });
+    // Enabled AND the other clauses hold.
+    expect(
+      evaluatePenalties(chainInOntario, { lists, now: NOW, franchise: enabling }).find(
+        (p) => p.rule_id === rule,
+      )?.delta,
+    ).toBe(-30);
+    // Enabled, but the head office is in BC — the clause the sentence used to skip over.
+    expect(
+      evaluatePenalties(
+        account({ ...chainInOntario, address_region: "BC" }),
+        { lists, now: NOW, franchise: enabling },
+      ).map((p) => p.rule_id),
+    ).not.toContain(rule);
+    // Not enabled at all.
+    expect(
+      evaluatePenalties(chainInOntario, { lists, now: NOW, franchise: localAuthority() }).map(
+        (p) => p.rule_id,
+      ),
+    ).not.toContain(rule);
+  });
+
+  // End to end, on the row §5 was written for: a scraped franchisee record carrying the
+  // international brand's corporate country. It used to take an account-scoped terminal — gone
+  // forever — beside a franchise message asserting it was exempt.
+  it("keeps a local franchisee whose record carries the brand's foreign country", () => {
+    const result = run(
+      account({
+        legal_name: "Chain BC Location",
+        registrable_domain: "loc.ca",
+        address_municipality: "Vancouver",
+        address_region: "BC",
+        address_country: "US",
+        observations: { location_has_own_domain_with_mx: true, named_local_owner: "Jane Smith" },
+      }),
+    );
+    expect(result.franchise.status).toBe("LOCAL_AUTHORITY");
+    expect(result.decision).not.toBe("terminal");
+    expect(result.kills.map((k) => k.reason)).not.toContain("outside_canada");
+  });
+
   it("is overridden by a §5 LOCAL_AUTHORITY franchise finding", () => {
     const a = account({ legal_name: "Modo Yoga Vancouver", headcount: 900 });
-    expect(kSize01EnterpriseScale(a, NOW, "UNPROVEN").kind).toBe("terminal");
-    expect(kSize01EnterpriseScale(a, NOW, "LOCAL_AUTHORITY").kind).toBe("pass");
+    expect(kSize01EnterpriseScale(a, NOW, undefined).kind).toBe("terminal");
+    expect(kSize01EnterpriseScale(a, NOW, localAuthority()).kind).toBe("pass");
   });
 
   it("never kills on a SINGLE enterprise proxy — Cactus Club Cafe publishes Suppliers and is a past partner", () => {
     const r = kSize01EnterpriseScale(
       account({ legal_name: "Cactus Club Cafe", observations: { has_supplier_procurement_path: true } }),
       NOW,
-      "UNPROVEN",
+      franchiseOrBranchCarveOut(account({ legal_name: "X" })),
     );
     expect(r.kind).toBe("pass");
   });
@@ -350,7 +465,7 @@ describe("K-SIZE-01 · enterprise scale — the one predicate with a real data p
         observations: { has_investor_relations: true, store_locator_location_count: 40 },
       }),
       NOW,
-      "UNPROVEN",
+      franchiseOrBranchCarveOut(account({ legal_name: "X" })),
     );
     expect(r.kind).toBe("terminal");
     if (r.kind !== "terminal") return;
@@ -501,6 +616,7 @@ describe("K-GEO · geography, under the 2026-08-06 supersession", () => {
       }),
       lists,
       NOW,
+      undefined,
     );
     expect(r.kind).toBe("terminal");
     if (r.kind !== "terminal") return;
@@ -517,7 +633,7 @@ describe("K-GEO · geography, under the 2026-08-06 supersession", () => {
         address_region: region,
         address_country: "CA",
       });
-      expect(kGeo01OutsideCanada(a, lists, NOW).kind).toBe("pass");
+      expect(kGeo01OutsideCanada(a, lists, NOW, undefined).kind).toBe("pass");
       expect(run(a).kills).toHaveLength(0);
     },
   );
@@ -599,7 +715,7 @@ describe("K-GEO · geography, under the 2026-08-06 supersession", () => {
   });
 
   it("never kills on a missing country", () => {
-    expect(kGeo01OutsideCanada(account({ legal_name: "Unknown Co" }), lists, NOW).kind).toBe(
+    expect(kGeo01OutsideCanada(account({ legal_name: "Unknown Co" }), lists, NOW, undefined).kind).toBe(
       "cannot_evaluate",
     );
   });
@@ -616,7 +732,7 @@ describe("K-GEO · geography, under the 2026-08-06 supersession", () => {
       address_region: "ON",
       address_country: "CA",
     });
-    expect(kGeo01OutsideCanada(remoteFirst, lists, NOW).kind).toBe("pass");
+    expect(kGeo01OutsideCanada(remoteFirst, lists, NOW, undefined).kind).toBe("pass");
     expect(bandOf(remoteFirst)).toBe("canada_other");
 
     const result = run(remoteFirst);
@@ -642,7 +758,7 @@ describe("K-GEO · geography, under the 2026-08-06 supersession", () => {
       observations: { decision_maker_municipality: "Vancouver", operating_municipality: "Vancouver" },
     } as unknown as Account;
 
-    const verdict = kGeo01OutsideCanada(usRegistered, lists, NOW);
+    const verdict = kGeo01OutsideCanada(usRegistered, lists, NOW, undefined);
     expect(verdict.kind).toBe("terminal");
     expect(verdict.kind === "terminal" && verdict.scope).toBe("account");
     expect(run(usRegistered).decision).toBe("terminal");
@@ -1957,7 +2073,7 @@ describe("§5 · franchise or branch — test the LOCATION, not the brand", () =
     const penalties = evaluatePenalties(account({ ...redBullLocation }), {
       lists,
       now: NOW,
-      franchise: "UNPROVEN",
+      franchise: unproven(),
     });
     const p04 = penalties.find((p) => p.rule_id === "P-04");
     expect(p04?.delta).toBe(-30);
@@ -1991,7 +2107,7 @@ describe("§5 · franchise or branch — test the LOCATION, not the brand", () =
       const penalties = evaluatePenalties(account({ ...independentBakery }), {
         lists,
         now: NOW,
-        franchise: "UNPROVEN",
+        franchise: unproven(),
       });
       expect(penalties.map((p) => p.rule_id)).not.toContain("P-04");
     });
@@ -2015,7 +2131,7 @@ describe("§5 · franchise or branch — test the LOCATION, not the brand", () =
       return evaluatePenalties(account({ ...branch, ...over }), {
         lists,
         now: NOW,
-        franchise: "UNPROVEN",
+        franchise: unproven(),
       }).find((p) => p.rule_id === "P-04");
     }
 
@@ -2055,7 +2171,7 @@ describe("§5 · franchise or branch — test the LOCATION, not the brand", () =
         ...ontarioChain,
         observations: { ...ontarioChain.observations, operating_municipality: "Richmond" },
       } as unknown as Account;
-      const penalties = evaluatePenalties(withNamesake, { lists, now: NOW, franchise: "UNPROVEN" });
+      const penalties = evaluatePenalties(withNamesake, { lists, now: NOW, franchise: unproven() });
       expect(penalties.map((p) => p.rule_id)).not.toContain("P-04");
 
       const confirmed = evaluatePenalties(
@@ -2063,7 +2179,7 @@ describe("§5 · franchise or branch — test the LOCATION, not the brand", () =
           ...ontarioChain,
           observations: { ...ontarioChain.observations, bc_branch_confirmed: true },
         }),
-        { lists, now: NOW, franchise: "UNPROVEN" },
+        { lists, now: NOW, franchise: unproven() },
       );
       expect(confirmed.find((p) => p.rule_id === "P-04")?.delta).toBe(-30);
     });
@@ -2143,7 +2259,9 @@ describe("P-03 · publicly traded, on evidence of being publicly traded", () => 
       legal_name: "A Real Enterprise",
       observations: { has_supplier_procurement_path: true, careers_open_postings: 40 },
     });
-    expect(kSize01EnterpriseScale(twoProxies, NOW, "UNPROVEN").kind).toBe("terminal");
+    expect(
+      kSize01EnterpriseScale(twoProxies, NOW, franchiseOrBranchCarveOut(twoProxies)).kind,
+    ).toBe("terminal");
   });
 });
 

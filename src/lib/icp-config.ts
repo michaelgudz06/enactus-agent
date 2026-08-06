@@ -166,7 +166,6 @@ export const SCORE_BLOCKS = ["fit_score", "affinity_score", "access_score"] as c
 /** Slack allowed on a weight sum, to absorb binary floating-point error on fractional weights. */
 export const WEIGHT_SUM_TOLERANCE = 1e-6;
 
-/** Every band `scoreFit`'s geography term can resolve to. All four must carry a weight. */
 /**
  * The weight bands, in the captain's ORDERING (2026-08-06): metro_vancouver > bc_other >
  * canada_other. `core` splits the top band for the three campuses; `outside_canada` and
