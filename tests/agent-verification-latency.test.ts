@@ -69,7 +69,7 @@ describe("contact-detail verification latency", () => {
       rawLead({ company: `Dead ${i}`, website: null, source_index: 99, contact_email: `hello@${domain}` })
     );
     stub.chatJSON.mockImplementationOnce(respondsWith(PLAN)).mockImplementationOnce(respondsWith({ leads }));
-    const { emit, out } = collector();
+    const { emit } = collector();
 
     await runAgent({ prompt: "burnaby cafes near sfu", mode: "sponsor", userName: "Tester", skipClarify: true }, emit);
 
