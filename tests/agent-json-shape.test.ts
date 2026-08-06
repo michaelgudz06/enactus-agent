@@ -175,3 +175,56 @@ describe("structuring step JSON shape", () => {
     expect(productive).toBe(17);
   });
 });
+
+// The same single reading recoverValue applies to every other field, one level
+// up at the envelope: a lone lead where a list was asked for is a slip, not an
+// ambiguity. This payload arrives after the searches and the reasoning stage, so
+// discarding it costs the whole run's work.
+describe("a lone lead where a list was asked for", () => {
+  test("produces the lead when the envelope wraps a single object", async () => {
+    const out = await runWithStructuredResponse({ leads: rawLead() });
+
+    expect(out.errors).toEqual([]);
+    expect(out.leads.map((l) => l.company)).toEqual(["Renaissance Coffee"]);
+    expect(out.events.some((e) => e.type === "done" && e.count === 1)).toBe(true);
+  });
+
+  test("produces the lead when the response is a bare single lead object", async () => {
+    const out = await runWithStructuredResponse(
+      rawLead({ company: "Gabi & Jules", website: "https://gabiandjules.com/pages/about-us", source_index: 2 })
+    );
+
+    expect(out.errors).toEqual([]);
+    expect(out.leads.map((l) => l.company)).toEqual(["Gabi & Jules"]);
+    expect(out.events.some((e) => e.type === "done" && e.count === 1)).toBe(true);
+  });
+
+  test("announces the reading instead of repairing it silently", async () => {
+    const out = await runWithStructuredResponse({ leads: rawLead() });
+
+    expect(out.statuses.some((s) => s.includes("leads"))).toBe(true);
+  });
+
+  test("says nothing when the list arrives as a list", async () => {
+    const out = await runWithStructuredResponse({ leads: [rawLead()] });
+
+    expect(out.statuses.some((s) => s.includes("list of one"))).toBe(false);
+  });
+
+  // Nothing lead-shaped means the next step has nothing to act on, which is a
+  // real stop and stays one.
+  test("stops when the lone object is not a lead", async () => {
+    const out = await runWithStructuredResponse({ leads: { note: "nothing found" } });
+
+    expect(out.leads).toEqual([]);
+    expect(out.errors).toHaveLength(1);
+    expect(out.events.some((e) => e.type === "done")).toBe(false);
+  });
+
+  test("stops when the envelope carries a lone non-object", async () => {
+    const out = await runWithStructuredResponse({ leads: "no suitable sponsors" });
+
+    expect(out.leads).toEqual([]);
+    expect(out.errors).toHaveLength(1);
+  });
+});

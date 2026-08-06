@@ -113,6 +113,53 @@ describe("a defective plan field costs that field only", () => {
   });
 });
 
+// Dropping an entry is a degradation like any other, and the run says so. A
+// silent repair teaches nobody that the model is misbehaving.
+describe("an unusable entry in a plan list is announced", () => {
+  test("searches the usable queries and says what it dropped", async () => {
+    const out = await runWithPlan({
+      ...PLAN,
+      searchQueries: ["burnaby cafes near sfu", "   ", "sfu campus coffee"],
+    });
+
+    expect(out.errors).toEqual([]);
+    expect(queriesSearched()).toEqual(["burnaby cafes near sfu", "sfu campus coffee"]);
+    expect(out.statuses.some((s) => s.includes("searchQueries"))).toBe(true);
+  });
+
+  test("asks the questions that survived and says what it dropped", async () => {
+    const out = await runWithPlan(
+      { ...PLAN, needClarification: true, questions: ["Which city?", "  "] },
+      {}
+    );
+
+    expect(out.events.some((e) => e.type === "clarify" && e.questions.length === 1)).toBe(true);
+    expect(out.statuses.some((s) => s.includes("questions"))).toBe(true);
+  });
+});
+
+// criteria is degradable, so an empty one is reachable. A labelled field with
+// nothing after it tells the next model less than no field at all.
+describe("the prompt sent onward carries no empty ideal-lead field", () => {
+  function promptsSent(): string[] {
+    const reasoning = stub.streamReasoner.mock.calls[0][0][1].content as string;
+    const structuring = stub.chatJSON.mock.calls[1][0][1].content as string;
+    return [reasoning, structuring];
+  }
+
+  test("omits the line entirely when criteria degraded away", async () => {
+    await runWithPlan({ ...PLAN, criteria: 42 });
+
+    for (const prompt of promptsSent()) expect(prompt).not.toContain("Ideal lead:");
+  });
+
+  test("still carries criteria when the model supplied one", async () => {
+    await runWithPlan(PLAN);
+
+    for (const prompt of promptsSent()) expect(prompt).toContain(`Ideal lead: ${PLAN.criteria}`);
+  });
+});
+
 // A wrong type with exactly one possible reading is a slip, not an ambiguity --
 // the same rule the per-lead review already applies to fit_score.
 describe("a recoverable plan value is read rather than thrown away", () => {
@@ -194,6 +241,15 @@ describe("no search queries at all is a real stop", () => {
     const out = await runWithPlan({ ...PLAN, searchQueries: [] });
 
     expect(out.errors[0]).toContain("searchQueries");
+  });
+
+  // The blocker message already names what the model sent, so the entries it
+  // dropped on the way there are not reported a second time.
+  test("reports a fully blank query list once", async () => {
+    const out = await runWithPlan({ ...PLAN, searchQueries: ["   ", "\t"] });
+
+    expect(out.errors).toHaveLength(1);
+    expect(out.statuses.some((s) => s.includes("searchQueries"))).toBe(false);
   });
 
   // A transport or parse failure is still a stop: there is no plan at all.
