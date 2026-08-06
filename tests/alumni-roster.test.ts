@@ -1178,11 +1178,13 @@ describe("refreshing what the README says about the roster", () => {
     dropRowsFor = null,
     dropYear = null,
     csvText = null,
+    removals = null,
     env = {},
   }: {
     dropRowsFor?: string | null;
     dropYear?: string | null;
     csvText?: string | null;
+    removals?: string | null;
     env?: Record<string, string>;
   } = {}) {
     const root = mkdtempSync(path.join(tmpdir(), "alumni-refresh-"));
@@ -1200,6 +1202,8 @@ describe("refreshing what the README says about the roster", () => {
       csvText ?? (dropRowsFor === null && dropYear === null ? committed : preamble + toCsv(kept)),
     );
     writeFileSync(readme, readFileSync(README, "utf8"));
+    // Beside the roster, where the student edits it.
+    if (removals !== null) writeFileSync(path.join(root, "removed.txt"), removals);
 
     const before = { csv: readFileSync(csv, "utf8"), readme: readFileSync(readme, "utf8") };
     const run = spawnSync(
@@ -1289,6 +1293,37 @@ describe("refreshing what the README says about the roster", () => {
     });
 
     expect(run.status).not.toBe(0);
+    expect(readFileSync(run.readme, "utf8")).toBe(run.before.readme);
+  });
+
+  test("a name on the removal list whose row is still there stops the refresh", () => {
+    const run = runRefresh({ removals: "Minna Van\n" });
+
+    expect(run.status).not.toBe(0);
+    // Names the person, so the student knows which row is still to go.
+    expect(run.stderr).toContain("Minna Van");
+    expect(readFileSync(run.readme, "utf8")).toBe(run.before.readme);
+    expect(readFileSync(run.csv, "utf8")).toBe(run.before.csv);
+  });
+
+  test("a removal carried through to the roster passes, and refreshes", () => {
+    const run = runRefresh({ dropRowsFor: "Minna Van", removals: "Minna Van\n" });
+    const after = claimsIn(readFileSync(run.readme, "utf8"));
+
+    expect(run.status).toBe(0);
+    expect(run.stderr).not.toContain("Minna Van");
+    expect(after.people).toBe(parseRosterCsv(readFileSync(run.csv, "utf8")).length);
+  });
+
+  test.each([
+    ["a list nobody is on", "# nobody yet\n"],
+    ["an empty list", ""],
+    ["no list at all", null],
+  ])("%s leaves the refresh exactly as it was", (_case, removals) => {
+    const run = runRefresh({ removals });
+
+    expect(run.status).toBe(0);
+    expect(run.stderr).not.toContain("unfinished removal");
     expect(readFileSync(run.readme, "utf8")).toBe(run.before.readme);
   });
 

@@ -28,6 +28,7 @@ import {
   coverageByYear,
   findNearDuplicates,
   mergeSightings,
+  nameKey,
   parseRemovalList,
   parseRosterCsv,
   refreshCoverageClaims,
@@ -44,6 +45,7 @@ import {
   parseWordpressRoster,
   toCsv,
   type Confidence,
+  type RosterRow,
   type Sighting,
   type Source,
 } from "./parse.ts";
@@ -55,6 +57,35 @@ import {
  * deleting the row by hand is allowed at all — so the report that describes the
  * file has to be fixable the same way.
  */
+/**
+ * Honouring a removal is two edits — the name onto removed.txt, the row out of
+ * the roster — and only the second one takes the person out of the file that
+ * ships. The first without the second leaves someone who asked to be taken off
+ * a list still on it, with nothing to say so. So when the refresh reads the
+ * roster it also reads the list beside it, and stops if it finds a name on both.
+ *
+ * It fails on that and nothing else: no list, an empty list, or a listed name
+ * whose row is properly gone all pass exactly as before, silently. It reads two
+ * files in one directory, so it stays as cache-free and offline as the refresh
+ * it runs inside, and it adds no step to the procedure a student follows.
+ */
+function refuseUnfinishedRemoval(rows: RosterRow[], csvFile: string, removalPath: string): void {
+  if (!existsSync(removalPath)) return;
+
+  const removed = parseRemovalList(readFileSync(removalPath, "utf8"));
+  const stillListed = rows.filter((row) => removed.has(nameKey(row.name)));
+  if (!stillListed.length) return;
+
+  console.error(
+    `unfinished removal: ${stillListed.map((row) => row.name).join(", ")}\n` +
+      `Named on ${removalPath}, but ${csvFile} still carries a row for each of them.\n` +
+      `Deleting the row is what takes someone out of the file that ships, so the\n` +
+      `removal is not done yet. Delete those rows and run this command again —\n` +
+      `nothing else is needed, and no cache or network either way.`,
+  );
+  process.exit(1);
+}
+
 if (process.argv[2] === "--refresh-readme") {
   const csvFile = process.argv[3] ?? "config/alumni/past-executives.csv";
   const readmeFile = process.argv[4] ?? "config/alumni/README.md";
@@ -64,6 +95,7 @@ if (process.argv[2] === "--refresh-readme") {
   let coverage: ReturnType<typeof coverageByYear>;
   try {
     const rows = parseRosterCsv(readFileSync(csvFile, "utf8"));
+    refuseUnfinishedRemoval(rows, csvFile, path.join(path.dirname(csvFile), "removed.txt"));
     people = rows.length;
     coverage = coverageByYear(rows);
     refreshed = refreshCoverageClaims(
