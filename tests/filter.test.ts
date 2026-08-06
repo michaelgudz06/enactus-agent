@@ -1184,6 +1184,25 @@ describe("P-08's paired hard constraint · a role account may not claim conspicu
     expect(result.penalties.find((p) => p.rule_id === "P-08")?.delta).toBe(-15);
   });
 
+  // THE WALK MUST BE WALKABLE. An Ottawa-area business whose municipality happens to collide
+  // with a Metro Vancouver alias was routed onto the Greater Vancouver walk list, because the
+  // postal district that places it in Ontario was never read as contrary province evidence.
+  it("does not route an out-of-province namesake onto the Vancouver walk list", () => {
+    const result = run({
+      legal_name: "Richmond Ontario Bakery",
+      registrable_domain: "robakery.ca",
+      email: "info@robakery.ca",
+      address_municipality: "Richmond",
+      postal_code: "K0A 2Z0",
+      lawful_basis: "conspicuous_pub",
+      observations: { has_consumer_storefront: true },
+    });
+    expect(result.kills).toHaveLength(0);
+    expect(result.required_channel).not.toBe("in_person");
+    expect(result.email_channel_open).toBe(false);
+    expect(result.flags.map((f) => f.flag_reason)).toContain("role_account_channel_unresolved");
+  });
+
   it("leaves the email channel open for the same account on a basis it can carry", () => {
     const result = run({ ...roleClaimingConspicuousPub, lawful_basis: "express" });
     expect(result.email_channel_open).toBe(true);
@@ -2175,6 +2194,35 @@ describe("P-10 · social-only presence, on evidence rather than on an empty fiel
       now: NOW,
     });
     expect(attempted.map((p) => p.rule_id)).toContain(ruleId);
+  });
+
+  // P-09 asks whether the geography RESOLVED, which is the shared verdict's question, not
+  // whether the fields are blank. Deciding it from raw truthiness was a second geography reading
+  // inside the module, and it disagreed: an unrecognised municipality is present but unresolved.
+  it.each([
+    ["an unrecognised municipality", { address_municipality: "Nowheresville" }],
+    ["an unrecognised region", { address_region: "Freedonia" }],
+    ["an unparseable postal code", { postal_code: "not a postal code" }],
+    ["nothing at all", {}],
+  ])("fires P-09 on %s once a resolution attempt is recorded", (_label, over) => {
+    const penalties = evaluatePenalties(
+      account({ legal_name: "Y", ...over, observations: { geography_resolution_attempts: 1 } }),
+      { lists, now: NOW },
+    );
+    expect(penalties.find((p) => p.rule_id === "P-09")?.delta).toBe(-15);
+  });
+
+  it("does not fire P-09 once the geography actually resolves", () => {
+    const penalties = evaluatePenalties(
+      account({
+        legal_name: "Y",
+        address_municipality: "Burnaby",
+        address_region: "BC",
+        observations: { geography_resolution_attempts: 1 },
+      }),
+      { lists, now: NOW },
+    );
+    expect(penalties.map((p) => p.rule_id)).not.toContain("P-09");
   });
 
   it("charges a bare, unenriched row nothing at all", () => {

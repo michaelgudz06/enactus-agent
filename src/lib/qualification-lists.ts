@@ -376,10 +376,33 @@ function candidates(value: string | null | undefined): string[] {
 /** A Canadian postal code, by FORMAT — `A1A 1A1`. The first letter is the postal district. */
 const CANADIAN_POSTAL_RE = /^([a-z])\d[a-z]\s*\d[a-z]\d$/i;
 
+/**
+ * THE POSTAL DISTRICT IS AN EXHAUSTIVE, UNAMBIGUOUS PROVINCE MAPPING, and it is read in BOTH
+ * directions: `v` is positive evidence of British Columbia, and any OTHER recognised district is
+ * positive evidence the row is NOT in British Columbia. Reading it only in the permissive
+ * direction let a Richmond with an Ottawa postal code resolve as Metro Vancouver — the same
+ * "contrary evidence sitting on the row and never read" shape closed twice for `region`.
+ *
+ * This is province EVIDENCE, not membership: a district can reach `bc_other` or `canada_other`,
+ * never `metro_vancouver` and never `outside_canada`. Report §8's rejection of FSA-prefix
+ * geography stands — which municipality a row is in is decided by metro-vancouver.csv alone.
+ *
+ * D, F, I, O, Q, U, W and Z are not assigned, so a format match on one of them is not a Canadian
+ * postal code at all and says nothing about the country either.
+ */
+const POSTAL_DISTRICT_PROVINCES: ReadonlyMap<string, string> = new Map([
+  ["a", "nl"], ["b", "ns"], ["c", "pe"], ["e", "nb"],
+  ["g", "qc"], ["h", "qc"], ["j", "qc"],
+  ["k", "on"], ["l", "on"], ["m", "on"], ["n", "on"], ["p", "on"],
+  ["r", "mb"], ["s", "sk"], ["t", "ab"], ["v", "bc"],
+  ["x", "nt_nu"], ["y", "yt"],
+]);
+
 function canadianPostalDistrict(postal: string | null | undefined): string | null {
   const key = (postal ?? "").trim();
   const m = CANADIAN_POSTAL_RE.exec(key.replace(/\s+/g, " "));
-  return m ? m[1].toLowerCase() : null;
+  const district = m ? m[1].toLowerCase() : null;
+  return district && POSTAL_DISTRICT_PROVINCES.has(district) ? district : null;
 }
 
 /** IS THIS ROW IN CANADA? Country first, then a Canadian postal FORMAT, then a province name. */
@@ -396,12 +419,16 @@ export function countryEvidence(facts: GeographyFacts): Evidence {
   return "unknown";
 }
 
-/** IS THIS ROW IN BRITISH COLUMBIA? `V` is BC's postal district, which is a province fact. */
+/**
+ * IS THIS ROW IN BRITISH COLUMBIA? A recorded province is read first; the postal district is the
+ * same question asked of a different field, and answers it in BOTH directions.
+ */
 export function regionEvidence(facts: GeographyFacts): Evidence {
   const keys = candidates(facts.region);
   if (keys.some((k) => BC_REGION_SPELLINGS.has(k))) return "known";
   if (keys.some((k) => CANADA_OTHER_PROVINCES.has(k))) return "contrary";
-  if (canadianPostalDistrict(facts.postal_code) === "v") return "known";
+  const district = canadianPostalDistrict(facts.postal_code);
+  if (district) return district === "v" ? "known" : "contrary";
   return "unknown";
 }
 

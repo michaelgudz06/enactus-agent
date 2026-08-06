@@ -976,7 +976,12 @@ describe("geographyBand", () => {
 });
 
 describe("filter and scoring never disagree about where a company is", () => {
-  const ROWS: { municipality?: string; region?: string; country?: string }[] = [
+  const ROWS: {
+    municipality?: string;
+    region?: string;
+    country?: string;
+    postal_code?: string;
+  }[] = [
     { municipality: "Burnaby" },
     { municipality: "Burnaby", region: "BC" },
     { municipality: "Burnaby", region: "BC", country: "CA" },
@@ -1013,6 +1018,30 @@ describe("filter and scoring never disagree about where a company is", () => {
     { municipality: undefined, region: "BC", country: undefined },
     { municipality: undefined, region: undefined, country: "CA" },
     { municipality: undefined, region: undefined, country: "US" },
+    // POSTAL CODES. The column was absent for two rounds, and a column that is not there cannot
+    // disagree — which is exactly how a Richmond with an Ottawa postal code went on scoring as
+    // Metro Vancouver. A district is read in BOTH directions, so a non-V district CONTRADICTS a
+    // colliding municipality alias rather than merely failing to support it.
+    { municipality: "Vancouver", postal_code: "V6B 1A1" },
+    { municipality: "Burnaby", postal_code: "V5A 1S6" },
+    { postal_code: "V5A 1S6" },
+    { municipality: "Richmond", postal_code: "K0A 2Z0" },
+    { municipality: "Richmond", postal_code: "J0B 2H0" },
+    { municipality: "Delta", postal_code: "K0E 1S0" },
+    { municipality: "Vancouver", postal_code: "M5V 1A1" },
+    { municipality: "Surrey", postal_code: "T2P 1J9" },
+    { postal_code: "M5V 1A1" },
+    { postal_code: "T2P 1J9" },
+    // The postal district and the recorded province agreeing, and disagreeing.
+    { municipality: "Burnaby", region: "BC", postal_code: "V5A 1S6" },
+    { municipality: "Abbotsford", region: "BC", postal_code: "V3G 2J5" },
+    { municipality: "Richmond", region: "ON", postal_code: "K0A 2Z0" },
+    { municipality: "Richmond", region: "BC", postal_code: "K0A 2Z0" },
+    // A recognised country outranks the postal district, in both directions.
+    { municipality: "Vancouver", country: "US", postal_code: "V6B 1A1" },
+    // Unassigned district letters are not Canadian postal codes at all.
+    { municipality: "Burnaby", postal_code: "D1D 1D1" },
+    { municipality: "Burnaby", postal_code: "not a postal code" },
   ];
 
   it.each(ROWS.map((r) => [JSON.stringify(r), r] as const))(
@@ -1024,6 +1053,7 @@ describe("filter and scoring never disagree about where a company is", () => {
           municipality: row.municipality ?? null,
           region: row.region ?? null,
           country: row.country ?? null,
+          postal_code: row.postal_code ?? null,
         }),
         lists,
       ).band;
@@ -1034,6 +1064,7 @@ describe("filter and scoring never disagree about where a company is", () => {
           address_municipality: row.municipality ?? null,
           address_region: row.region ?? null,
           address_country: row.country ?? null,
+          postal_code: row.postal_code ?? null,
         },
         lists,
         { now: NOW },
@@ -2071,7 +2102,7 @@ describe("the seed corpus survives the K-GEO-05 cut", () => {
   });
 
   it.each(seeded.map((r) => [r.company, r] as const))(
-    "%s is not dropped on geographic grounds",
+    "%s is not dropped on geographic grounds — it records no address, so the band is unresolved",
     (_name, row) => {
       expect(row.filtered.kills.map((k) => k.reason)).not.toContain("outside_canada");
       // The band is UNRESOLVED for every seeded row — none records an address — and unresolved
@@ -2084,7 +2115,7 @@ describe("the seed corpus survives the K-GEO-05 cut", () => {
   );
 
   it.each(seeded.map((r) => [r.company, r] as const))(
-    "%s is not blocked on geographic grounds",
+    "%s is not blocked on geographic grounds — G_GEO cannot evaluate an addressless row",
     (_name, row) => {
       const scored = scoreCompany(
         company({ legal_name: row.company, ...gateInputsFromFilterResult(row.filtered) }),
@@ -2096,10 +2127,12 @@ describe("the seed corpus survives the K-GEO-05 cut", () => {
     },
   );
 
-  // The row the rescue existed for, given the address the captain's framing describes: a
-  // remote-first company registered outside BC whose founder is in Vancouver. Under the cut it
-  // must stay in scope at canada_other, on the band alone.
-  it("keeps the Superpilot shape in scope at canada_other", () => {
+  // WHAT THIS PROVES AND WHAT IT DOES NOT. The row is given the address the captain's framing
+  // describes — registered outside BC, in Canada — because the SEEDED Superpilot record has no
+  // address at all and therefore resolves `unresolved` like every other seeded row. So this
+  // asserts the BAND-ONLY path for an out-of-province Canadian company; the actual seeded shape
+  // is covered above, and neither case exercises a row whose geography resolves to metro.
+  it("keeps an out-of-province Canadian company in scope at canada_other, on the band alone", () => {
     const filtered = runFilter(
       {
         legal_name: "Superpilot",

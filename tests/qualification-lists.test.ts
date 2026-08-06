@@ -338,6 +338,41 @@ describe("resolveGeography · an unrecognised value behaves exactly as an omitte
 
   // Report §8 rejected FSA-prefix geography in writing, and a coarse V3-V7 set proved it: V3G
   // and V4X are Abbotsford, not Metro Vancouver. A postal code must move nothing.
+  // THE DISTRICT IS READ IN BOTH DIRECTIONS. `V` supports British Columbia and any other
+  // ASSIGNED district contradicts it, because the mapping is exhaustive and unambiguous. Read
+  // only permissively, an Ottawa postal code left a colliding `Richmond` alias scoring metro.
+  it.each([
+    ["K0A 2Z0", "Ottawa area, Ontario"],
+    ["M5V 1A1", "Toronto, Ontario"],
+    ["J0B 2H0", "Richmond, Quebec"],
+    ["T2P 1J9", "Calgary, Alberta"],
+    ["B3H 4R2", "Halifax, Nova Scotia"],
+  ])("reads %s (%s) as contrary evidence against British Columbia", (postal) => {
+    expect(resolveGeography({ postal_code: postal }, lists).evidence.region).toBe("contrary");
+    // And it therefore overrules a colliding municipality alias rather than supporting it.
+    expect(band({ municipality: "Richmond", postal_code: postal })).toBe("canada_other");
+    expect(band({ municipality: "Delta", postal_code: postal })).toBe("canada_other");
+  });
+
+  it("still reads a V district as British Columbia, and never as membership", () => {
+    expect(resolveGeography({ postal_code: "V5A 1S6" }, lists).evidence.region).toBe("known");
+    expect(band({ municipality: "Burnaby", postal_code: "V5A 1S6" })).toBe("metro_vancouver");
+    // V3G is Abbotsford: the district places the province, never the municipality.
+    expect(band({ municipality: "Abbotsford", postal_code: "V3G 2J5" })).toBe("bc_other");
+  });
+
+  // D, F, I, O, Q, U, W and Z are unassigned, so a format match on one is not a Canadian postal
+  // code — it decides neither the country nor the province.
+  it.each(["D1D 1D1", "F1F 1F1", "O1O 1O1", "Z1Z 1Z1"])(
+    "treats the unassigned district in %s as no evidence at all",
+    (postal) => {
+      const verdict = resolveGeography({ municipality: "Burnaby", postal_code: postal }, lists);
+      expect(verdict).toEqual(resolveGeography({ municipality: "Burnaby" }, lists));
+      expect(verdict.evidence.country).toBe("unknown");
+      expect(verdict.evidence.region).toBe("unknown");
+    },
+  );
+
   // A postal code is read ONLY for its country and province FORMAT — a Canadian postal code
   // says Canada, and the V district says British Columbia. It never decides Metro Vancouver
   // MEMBERSHIP: report §8 rejected FSA-prefix geography, and V3G/V4X are Abbotsford.

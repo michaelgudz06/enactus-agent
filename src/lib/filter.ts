@@ -3082,8 +3082,7 @@ export function evaluatePenalties(a: Account, ctx: PenaltyContext): PenaltyResul
   }
 
   // P-09 — unresolved geography after one retry.
-  const noGeo =
-    !a.address_country && !a.address_region && !a.address_municipality && !a.postal_code;
+  const noGeo = geographyOf(a, lists).band === "unresolved";
   if (noGeo && (o.geography_resolution_attempts ?? 0) >= 1) {
     out.push(
       penalty(
