@@ -1251,7 +1251,8 @@ export function gateInputsFromFilterResult(
 ): Pick<
   CompanyFacts,
   "is_excluded" | "exclusion_reason" | "suppressed" | "no_solicitation_found" | "deliverable_contact"
-> {
+> &
+  Partial<Pick<CompanyFacts, "lawful_basis_strength">> {
   const suppressed = result.kills.some(
     (k) => k.reason === "suppressed_do_not_contact" || k.reason === "declined_permanently",
   );
@@ -1276,6 +1277,15 @@ export function gateInputsFromFilterResult(
     suppressed,
     no_solicitation_found: noSolicit,
     deliverable_contact: deliverabilityKilled ? false : deliverabilityUnknown ? undefined : true,
+    // Every email-scoped terminal is a CASL finding that destroys the basis for sending: L-02
+    // because s.10(9)(b) withdraws implied consent where the publication carries a
+    // no-solicitation notice, L-04 because a third-party directory is not conspicuous
+    // publication. G_LAWFUL_BASIS is the gate that answers exactly that question, so the closed
+    // channel is carried there. The account still survives — this blocks the SEND, not the row.
+    //
+    // Reported only when the filter actually closed the channel, so a caller's own recorded
+    // basis stands when it did not.
+    ...(result.email_channel_open ? {} : { lawful_basis_strength: "none" as const }),
   };
 }
 

@@ -257,6 +257,18 @@ export interface SiblingPenalty {
   tag: string;
   /** Negative. Applied to each matching sibling, which stays in the queue. */
   delta: number;
+  /** When the address that caused this hard-bounced. */
+  occurred_at: string;
+  /** The address that bounced. `""` when the bouncing row records no address. */
+  cause_address: string;
+  /**
+   * A sentence true of WHICHEVER row this is applied to.
+   *
+   * It cannot name the bouncing account as its subject and cannot assert a rejection: the
+   * recipient is penalised and STAYS IN THE QUEUE. §2.5 requires the sentence on a row to
+   * explain that row, so a caller that knows the recipient should re-render from the structured
+   * fields above rather than reuse the bouncing row's own terminal sentence.
+   */
   message: string;
 }
 
@@ -1474,9 +1486,8 @@ export function kRel05DeclinedRecently(a: Account, now: Date): PredicateResult {
   if (!at) return pass("K-REL-05");
   const reason = a.rel?.declined_reason ?? null;
   if (reason === "timing" || reason === "budget_cycle") return pass("K-REL-05");
-  const days = daysBetween(now, at);
-  if (days > DECLINE_SUPPRESSION_MONTHS * 30.4375) return pass("K-REL-05");
   const clearsAt = addMonthsUtc(at, DECLINE_SUPPRESSION_MONTHS);
+  if (now.getTime() >= clearsAt.getTime()) return pass("K-REL-05");
   return {
     kind: "terminal",
     scope: "account",
@@ -1566,14 +1577,7 @@ export function kRel08HardBounced(a: Account, now: Date): PredicateResult {
   const at = a.rel?.bounced_hard_at;
   if (!at) return pass("K-REL-08");
   const domain = emailDomain(a);
-  const message = sentence("undeliverable", {
-    account: a,
-    rule_id: "K-REL-08",
-    verb: "rejected at this address",
-    because: `mail to it hard-bounced on ${at}. The address is dead forever; every other lead sharing ${domain || "this email domain"} takes a ${HARD_BOUNCE_SIBLING_DELTA} penalty but stays in the queue`,
-    evidence_url: "rel.bounced_hard_at",
-    now,
-  });
+  const address = a.email ?? "";
   return {
     kind: "terminal",
     scope: "address",
@@ -1582,7 +1586,14 @@ export function kRel08HardBounced(a: Account, now: Date): PredicateResult {
     detail: at,
     evidence_url: "rel.bounced_hard_at",
     duration: { kind: "forever" },
-    message,
+    message: sentence("undeliverable", {
+      account: a,
+      rule_id: "K-REL-08",
+      verb: "rejected at this address",
+      because: `mail to it hard-bounced on ${at}. The address is dead forever; every other lead sharing ${domain || "this email domain"} takes a ${HARD_BOUNCE_SIBLING_DELTA} penalty but stays in the queue`,
+      evidence_url: "rel.bounced_hard_at",
+      now,
+    }),
     // No domain means nothing to match a sibling on, so there is no penalty to emit.
     sibling_penalty: domain
       ? {
@@ -1592,10 +1603,33 @@ export function kRel08HardBounced(a: Account, now: Date): PredicateResult {
           reason: "undeliverable",
           tag: "sibling_domain_hard_bounced",
           delta: HARD_BOUNCE_SIBLING_DELTA,
-          message,
+          occurred_at: at,
+          cause_address: address,
+          message: siblingBounceSentence(domain, address, at, now),
         }
       : undefined,
   };
+}
+
+/**
+ * The §2.5 sentence for the row the sibling penalty is APPLIED to, which is never the row that
+ * bounced. Its subject is the shared domain and the bounce event, so it stays true whichever
+ * sibling receives it, and it states the outcome that row actually gets: a lower score, not a
+ * rejection.
+ */
+function siblingBounceSentence(
+  domain: string,
+  causeAddress: string,
+  occurredAt: string,
+  now: Date,
+): string {
+  const cause = causeAddress ? `${causeAddress}, another address on ${domain},` : `another address on ${domain}`;
+  return (
+    `sibling_domain_hard_bounced — this lead is penalised ${HARD_BOUNCE_SIBLING_DELTA} because ` +
+    `${cause} hard-bounced on ${occurredAt}, which is evidence that mail to ${domain} may not ` +
+    `be delivered. This lead is NOT rejected: it stays in the queue with a lower score. ` +
+    `(rule K-REL-08, evidence: rel.bounced_hard_at, checked ${iso(now)})`
+  );
 }
 
 // ===========================================================================
@@ -2616,6 +2650,9 @@ export interface FilterResult {
    * False once an email-scoped terminal has fired: this account must not be sent a CEM. The
    * address itself is untouched, because the business is still reachable by form, phone or a
    * human — that routing is exactly what §2.2's CHANNEL outcome exists to preserve.
+   *
+   * `gateInputsFromFilterResult` in src/lib/scoring.ts reads this and reports
+   * `lawful_basis_strength: "none"`, which fails G_LAWFUL_BASIS.
    */
   email_channel_open: boolean;
   /**

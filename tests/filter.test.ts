@@ -1087,6 +1087,47 @@ describe("address-scoped terminals · the address dies, the account does not", (
   it("a row with no hard bounce levies nothing on its siblings", () => {
     expect(run(account({ ...base, email: "info@example.ca" })).sibling_penalties).toEqual([]);
   });
+
+  // §2.5: the sentence on a row explains THAT row. A sibling penalty is applied to a DIFFERENT
+  // account, so it must not name the bouncing account or assert a rejection that never happened
+  // to the recipient — the recipient is down-weighted and stays in the queue.
+  it("renders the sibling sentence about the shared domain, not about the bouncing account", () => {
+    const bouncer = account({
+      ...base,
+      legal_name: "Acme Ltd",
+      email: "info@example.ca",
+      rel: { bounced_hard_at: "2026-05-01" },
+    });
+    const [sibling] = run(bouncer).sibling_penalties;
+    expect(sibling).toBeDefined();
+
+    // The bouncing account is not the subject of the recipient's sentence.
+    expect(sibling.message).not.toContain("Acme Ltd");
+    // And it makes no affirmative rejection claim — `sentence()` renders those as "was <verb>".
+    expect(sibling.message).not.toMatch(/\bwas (rejected|killed|dropped)\b/i);
+
+    // The facts a caller needs to re-render for a named recipient travel structurally.
+    expect(sibling).toMatchObject({
+      match_field: "email_domain",
+      match_value: "example.ca",
+      occurred_at: "2026-05-01",
+      cause_address: "info@example.ca",
+    });
+
+    // It is NOT the bouncing row's own terminal sentence.
+    const terminal = run(bouncer).field_terminals.find((t) => t.rule_id === "K-REL-08");
+    expect(sibling.message).not.toBe(terminal?.message);
+  });
+
+  it("still names the shared domain when the bouncing row records no address", () => {
+    const [sibling] = run(
+      account({ ...base, email_domain: "example.ca", rel: { bounced_hard_at: "2026-05-01" } }),
+    ).sibling_penalties;
+    expect(sibling).toBeDefined();
+    expect(sibling).toMatchObject({ match_value: "example.ca", cause_address: "" });
+    expect(sibling.message).toContain("example.ca");
+    expect(sibling.message).not.toMatch(/\bwas (rejected|killed|dropped)\b/i);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1163,19 +1204,27 @@ describe("terminal duration", () => {
     expect(isReversible(r)).toBe(true);
   });
 
-  it("K-REL-05 actually CLEARS once its window has passed", () => {
-    const declined = account({
-      legal_name: "X",
-      rel: { declined_at: "2026-06-01", declined_reason: "no_budget" },
-    });
-    const suppressing = kRel05DeclinedRecently(declined, NOW);
-    expect(suppressing.kind).toBe("terminal");
-    if (suppressing.kind !== "terminal" || suppressing.duration.kind !== "until") return;
+  // A scheduler wakes a row at the `clears_at` the terminal itself published. If the guard and
+  // the published date disagree by even a fraction of a day, that wake-up re-suppresses the row.
+  it.each(["2026-06-01", "2026-03-01", "2026-08-06", "2025-12-31"])(
+    "K-REL-05 clears EXACTLY at the clears_at it published, for a decline on %s",
+    (declined_at) => {
+      const declined = account({
+        legal_name: "X",
+        rel: { declined_at, declined_reason: "no_budget" },
+      });
+      const justBefore = new Date(Date.parse(declined_at) + 1000);
+      const suppressing = kRel05DeclinedRecently(declined, justBefore);
+      expect(suppressing.kind).toBe("terminal");
+      if (suppressing.kind !== "terminal" || suppressing.duration.kind !== "until") return;
 
-    // One day after the date the terminal itself published, the same account passes.
-    const afterClear = new Date(Date.parse(suppressing.duration.clears_at) + 86_400_000);
-    expect(kRel05DeclinedRecently(declined, afterClear).kind).toBe("pass");
-  });
+      const clearsAt = Date.parse(suppressing.duration.clears_at);
+      // One millisecond before the published instant it is still suppressed...
+      expect(kRel05DeclinedRecently(declined, new Date(clearsAt - 1)).kind).toBe("terminal");
+      // ...and at that exact instant it is not.
+      expect(kRel05DeclinedRecently(declined, new Date(clearsAt)).kind).toBe("pass");
+    },
+  );
 
   it("a forever terminal never clears, no matter how much time passes", () => {
     const suppressed = account({ legal_name: "X", rel: { suppressed_at: "2020-01-01" } });

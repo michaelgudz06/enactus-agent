@@ -1303,6 +1303,58 @@ describe("gateInputsFromFilterResult", () => {
     expect(scored.blocking_gates).not.toContain("G_EXCLUDED");
   });
 
+  // L-04 is the finding that the CLAIMED CASL basis is invalid — a third-party directory URL is
+  // not conspicuous publication — so G_LAWFUL_BASIS is the gate that owns it. Without this the
+  // rescope from `account` to `email` silently removed L-04's only enforcement.
+  it("L-04 closes the email channel and FAILS G_LAWFUL_BASIS, with the account surviving", () => {
+    const result = runFilter(
+      {
+        ...base,
+        email: "info@example.ca",
+        lawful_basis: "conspicuous_pub",
+        lawful_basis_url: "https://some-directory.example.org/listing/123",
+      },
+      lists,
+      { now: NOW },
+    );
+
+    // The account survives and keeps accruing penalties.
+    expect(result.decision).not.toBe("terminal");
+    expect(result.kills).toEqual([]);
+    expect(result.penalties.length).toBeGreaterThan(0);
+    expect(result.email_channel_open).toBe(false);
+
+    // The closed channel reaches the adapter...
+    const inputs = gateInputsFromFilterResult(result);
+    expect(inputs.is_excluded).toBe(false);
+    expect(inputs.lawful_basis_strength).toBe("none");
+
+    // ...and blocks at G_LAWFUL_BASIS rather than at G_EXCLUDED.
+    const scored = scoreCompany({ ...company({ legal_name: base.legal_name }), ...inputs }, config, {
+      lists,
+      now: NOW,
+    });
+    expect(scored.segment).not.toBe("EXCLUDED");
+    expect(scored.blocking_gates).not.toContain("G_EXCLUDED");
+    expect(scored.blocking_gates).toContain("G_LAWFUL_BASIS");
+    expect(scored.blocked).toBe(true);
+  });
+
+  it("leaves a caller's recorded lawful basis alone when the email channel stays open", () => {
+    const result = runFilter({ ...base, email: "info@example.ca" }, lists, { now: NOW });
+    expect(result.email_channel_open).toBe(true);
+
+    const inputs = gateInputsFromFilterResult(result);
+    expect(inputs.lawful_basis_strength).toBeUndefined();
+
+    const scored = scoreCompany(
+      { ...company({ legal_name: base.legal_name, lawful_basis_strength: "express" }), ...inputs },
+      config,
+      { lists, now: NOW },
+    );
+    expect(scored.blocking_gates).not.toContain("G_LAWFUL_BASIS");
+  });
+
   it("a PERSON-scoped terminal never excludes the account", () => {
     const result = runFilter(
       { ...base, email: "info@example.ca", contact_name: "Owner / GM" },
