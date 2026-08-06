@@ -225,6 +225,16 @@ a row, and leave `value` blank with a note rather than asserting an unverified d
   now reports that instead of showing leads it did not save, but the leads are
   still lost. The statements are listed at the top of the file for whoever
   deploys, and repeated with the other migrations.
+- The run belongs to the `(app)` layout, not the agent page. `src/lib/run-store.ts`
+  owns the fetch to `/api/agent/run`, the reader loop and the accumulated state;
+  `RunProvider` mounts it above both the agent view and the board so a search
+  survives navigating between them. Two consequences to keep: a second run while
+  one is in flight is **refused** rather than started, because two readers writing
+  one state is a data-mixing bug and aborting the fetch would not stop `runAgent`
+  on the server anyway — only orphan it; and the run is deliberately **not**
+  durable, since it executes inside the browser's own request. A refresh ends it,
+  `maxDuration = 60` caps it regardless, and making it outlive either needs a job
+  queue — a separate decision, not a quiet addition.
 - Credentials live in `.env.local`, which is gitignored. Never print, log, or
   commit a secret value.
 

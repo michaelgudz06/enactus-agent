@@ -1,8 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { Search, RefreshCw } from "lucide-react";
 import { useApp } from "@/components/AppShell";
+import { useRunActivity } from "@/components/RunProvider";
 import { Lead, Mode, Status, STATUS_COLUMNS } from "@/lib/types";
 import LeadCard from "@/components/LeadCard";
 import EmailModal from "@/components/EmailModal";
@@ -48,6 +50,11 @@ export function boardIsLoading(mode: Mode, loadedMode: Mode | null, refreshing: 
 
 export default function BoardPage() {
   const { mode } = useApp();
+  // A run started on the agent view keeps streaming while the board is on
+  // screen, because it is owned by the `(app)` layout rather than that page.
+  // This is the board's cheap view of it: three primitives, so a run streaming
+  // reasoning tokens does not re-render every lead card on the board.
+  const activity = useRunActivity();
   const [leads, setLeads] = useState<Lead[]>([]);
   // The mode `leads` was read for; null until the first read lands.
   const [loadedMode, setLoadedMode] = useState<Mode | null>(null);
@@ -79,10 +86,14 @@ export default function BoardPage() {
     setLoadedMode(result.mode);
   }, [reads]);
 
+  // `leadSignal` ticks once per lead the run has already tried to write, so the
+  // board reads again and the student watches leads land while the search is
+  // still going. It goes through the same ticket sequence as every other read,
+  // which is what stops a tick mid-flight from landing out of order.
   useEffect(() => {
     readLeads().then(applyLeads);
     return () => reads.abandon();
-  }, [readLeads, applyLeads, reads]);
+  }, [readLeads, applyLeads, reads, activity.leadSignal]);
 
   async function refresh() {
     setRefreshing(true);
@@ -139,20 +150,29 @@ export default function BoardPage() {
         </div>
       </div>
 
+      {activity.running && (
+        <div className="mx-5 mt-3 text-xs rounded-lg px-3 py-2 flex items-center gap-2 border" style={{ background: "rgba(245,200,66,.08)", borderColor: "rgba(245,200,66,.35)", color: "var(--text)" }}>
+          <span className="dot-pulse" style={{ color: "var(--gold)" }}>●</span>
+          The agent is still searching{activity.found > 0 ? ` — ${activity.found} lead${activity.found !== 1 ? "s" : ""} so far` : ""}. New leads appear here as they are saved.
+        </div>
+      )}
+
       {warning && (
         <div className="mx-5 mt-3 text-xs rounded-lg px-3 py-2" style={{ background: "rgba(230,57,70,.1)", color: "var(--text)" }}>
           {warning} — leads can’t load until the Supabase service-role key is added to the environment.
         </div>
       )}
 
-      {!loading && !warning && leads.length === 0 && (
+      {/* Not while a run is going: the banner above already says what is
+          happening, and "your pipeline is empty" would contradict it. */}
+      {!loading && !warning && !activity.running && leads.length === 0 && (
         <div className="mx-5 mt-4 rounded-xl border p-4 flex items-center gap-3 animate-in" style={{ background: "var(--surface)", borderColor: "var(--border)" }}>
           <span className="text-xl">🎯</span>
           <div className="text-sm">
             <div className="font-semibold">Your pipeline is empty.</div>
             <div style={{ color: "var(--muted)" }}>
               Head to the{" "}
-              <a href="/agent" className="font-medium" style={{ color: "var(--gold)" }}>Agent</a>{" "}
+              <Link href="/agent" className="font-medium" style={{ color: "var(--gold)" }}>Agent</Link>{" "}
               tab and describe the sponsors you want. Found leads land here in Prospects, and you drag them across the stages as you go.
             </div>
           </div>
