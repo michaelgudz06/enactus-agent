@@ -1,0 +1,14 @@
+# People who have asked not to appear in past-executives.csv.
+#
+# One name per line. `#` starts a comment. Matching ignores case, accents and
+# punctuation, so write the name however they wrote it.
+#
+# scripts/alumni-roster/build.ts reads this file and drops every sighting of a
+# name on it, so a removal survives regeneration instead of reappearing the next
+# time someone rebuilds the roster. Add the name here AND delete their row from
+# past-executives.csv, then commit the same day.
+#
+# Do not record why anyone is on this list, who they are, or when they asked.
+# The name is all that is needed and all that may be kept.
+#
+# See README.md in this directory for the full procedure.
