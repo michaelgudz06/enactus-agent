@@ -11,16 +11,26 @@
 
 import { promises as dns } from "node:dns";
 
+// "domain" is a conclusion the code reached: the resolver answered, and there is
+// nothing there. "unverified" is the absence of a conclusion: the lookup never
+// completed. They are kept apart because the second must never be reported as
+// the first -- a slow resolver is not evidence that a real business is fake.
 export type EmailCheck =
   | { ok: true; email: string }
-  | { ok: false; email: string; reason: "format" | "domain" };
+  | { ok: false; email: string; reason: "format" | "domain" | "unverified" };
 
 export type WebsiteCheck =
   | { ok: true; url: string }
-  | { ok: false; url: string; reason: "format" | "aggregator" | "domain" };
+  | { ok: false; url: string; reason: "format" | "aggregator" | "domain" | "unverified" };
 
-/** Resolves true when a domain has a record that can accept mail. */
+/**
+ * Resolves true when a domain has a record that can accept mail, false when the
+ * lookup completed and there is none, and REJECTS when the lookup could not be
+ * completed at all (a soft DNS failure). A rejection is not a negative answer.
+ */
 export type DomainResolver = (domain: string) => Promise<boolean>;
+
+type DomainVerdict = "usable" | "absent" | "unverified";
 
 // Deliberately conservative: one @, no whitespace, a dotted TLD of 2+ letters.
 // This is a plausibility gate, not RFC 5322.
@@ -37,28 +47,54 @@ export function isAggregatorHost(host: string): boolean {
   return AGGREGATOR_HOST.test(host);
 }
 
+// A resolver failure that says nothing about the domain: the server was busy,
+// unreachable, or gave up. NXDOMAIN and ENODATA are absent from this list on
+// purpose -- those are real answers.
+const SOFT_DNS_FAILURE = new Set([
+  "EAI_AGAIN",
+  "ESERVFAIL",
+  "ETIMEOUT",
+  "ETIMEDOUT",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EREFUSED",
+  "ECANCELLED",
+  "ELOOP",
+  "ENOMEM",
+]);
+
+function softFailure(e: unknown): boolean {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === "string" && SOFT_DNS_FAILURE.has(code);
+}
+
 /**
  * MX first, then A/AAAA: a domain with an address record but no MX still accepts
  * mail under RFC 5321's implicit-MX rule, so treating it as undeliverable would
- * reject real small-business addresses.
+ * reject real small-business addresses. Returns false only when every lookup
+ * came back with a real answer and none of them found a record; if any lookup
+ * failed softly, that is rethrown so the caller records "not checked" rather
+ * than "does not exist".
  */
 export const dnsMailResolver: DomainResolver = async (domain) => {
+  let soft: unknown = null;
   try {
     const mx = await dns.resolveMx(domain);
     if (mx.some((r) => r.exchange)) return true;
-  } catch {
-    // fall through to address records
+  } catch (e) {
+    if (softFailure(e)) soft = e;
   }
   try {
     if ((await dns.resolve4(domain)).length) return true;
-  } catch {
-    // fall through to IPv6
+  } catch (e) {
+    if (soft === null && softFailure(e)) soft = e;
   }
   try {
     if ((await dns.resolve6(domain)).length) return true;
-  } catch {
-    // no usable record
+  } catch (e) {
+    if (soft === null && softFailure(e)) soft = e;
   }
+  if (soft !== null) throw soft;
   return false;
 };
 
@@ -111,12 +147,19 @@ export interface Verifiers {
 export function createVerifiers(opts: { resolve?: DomainResolver; timeoutMs?: number } = {}): Verifiers {
   const resolve = opts.resolve ?? dnsMailResolver;
   const timeoutMs = opts.timeoutMs ?? 2500;
-  const seen = new Map<string, Promise<boolean>>();
+  const seen = new Map<string, Promise<DomainVerdict>>();
 
-  const resolves = (domain: string): Promise<boolean> => {
+  const resolves = (domain: string): Promise<DomainVerdict> => {
     let pending = seen.get(domain);
     if (!pending) {
-      pending = withTimeout(resolve(domain), timeoutMs, false);
+      pending = withTimeout<DomainVerdict>(
+        resolve(domain).then(
+          (found) => (found ? "usable" : "absent"),
+          () => "unverified"
+        ),
+        timeoutMs,
+        "unverified"
+      );
       seen.set(domain, pending);
     }
     return pending;
@@ -133,7 +176,9 @@ export function createVerifiers(opts: { resolve?: DomainResolver; timeoutMs?: nu
       if (!EMAIL_SHAPE.test(normalized)) return { ok: false, email: value, reason: "format" };
 
       const domain = normalized.slice(normalized.lastIndexOf("@") + 1);
-      return (await resolves(domain)) ? { ok: true, email: normalized } : { ok: false, email: normalized, reason: "domain" };
+      const verdict = await resolves(domain);
+      if (verdict === "usable") return { ok: true, email: normalized };
+      return { ok: false, email: normalized, reason: verdict === "absent" ? "domain" : "unverified" };
     },
 
     async website(value: unknown): Promise<WebsiteCheck> {
@@ -144,7 +189,9 @@ export function createVerifiers(opts: { resolve?: DomainResolver; timeoutMs?: nu
       const parsed = parseWebsite(raw);
       if (!parsed) return { ok: false, url: raw, reason: "format" };
       if (isAggregatorHost(parsed.domain)) return { ok: false, url: raw, reason: "aggregator" };
-      return (await resolves(parsed.domain)) ? { ok: true, url: parsed.url } : { ok: false, url: raw, reason: "domain" };
+      const verdict = await resolves(parsed.domain);
+      if (verdict === "usable") return { ok: true, url: parsed.url };
+      return { ok: false, url: raw, reason: verdict === "absent" ? "domain" : "unverified" };
     },
   };
 }

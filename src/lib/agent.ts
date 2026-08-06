@@ -343,7 +343,7 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
     return;
   }
 
-  const { leads: reviewed, defects } = reviewLeads(parsed.leads ?? []);
+  const { leads: reviewed, defects } = reviewLeads(parsed.leads ?? [], candidates.length);
   for (const defect of defects) {
     emit({ type: "status", step: "structure", message: defectMessage(defect) });
   }
@@ -413,7 +413,7 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
 // `source_index` is the model's claim about which candidate it used. Trust it
 // only when it actually indexes a candidate we researched: an out-of-range or
 // absent index used to silently attribute a lead to another company's page.
-export function resolveSource(candidates: ExaResult[], sourceIndex: unknown): ExaResult | undefined {
+function resolveSource(candidates: ExaResult[], sourceIndex: unknown): ExaResult | undefined {
   if (typeof sourceIndex !== "number" || !Number.isInteger(sourceIndex)) return undefined;
   if (sourceIndex < 1 || sourceIndex > candidates.length) return undefined;
   return candidates[sourceIndex - 1];
@@ -425,7 +425,7 @@ export function resolveSource(candidates: ExaResult[], sourceIndex: unknown): Ex
 // domain code could not resolve. A claim that fails is recorded as unverified
 // instead of being trusted or thrown away -- the lead is always kept, because
 // the company may still be worth pursuing.
-export function websiteFor(
+function websiteFor(
   claimed: WebsiteCheck | null,
   src?: ExaResult
 ): { website: string | null; websiteStatus: string | null } {
@@ -449,20 +449,23 @@ function sourceWebsite(src?: ExaResult): string | null {
 // from somewhere else, so it has to name the model as the source of the string
 // rather than read as a warning about the site on the card.
 function unverifiedWebsiteNote(check: Exclude<WebsiteCheck, { ok: true }>): string {
-  const why =
-    check.reason === "format"
-      ? "which is not a usable web address"
-      : check.reason === "aggregator"
-        ? "which is a social or directory page rather than a company site"
-        : "which does not resolve";
-  return `rejected: the model claimed ${check.url}, ${why}`;
+  switch (check.reason) {
+    case "format":
+      return `rejected: the model claimed ${check.url}, which is not a usable web address`;
+    case "aggregator":
+      return `rejected: the model claimed ${check.url}, which is a social or directory page rather than a company site`;
+    case "domain":
+      return `rejected: the model claimed ${check.url}, which does not resolve`;
+    default:
+      return `not verified: the model claimed ${check.url}, and the domain lookup did not complete`;
+  }
 }
 
 // The structuring model returns `{"leads":[...]}` most of the time and a bare
 // top-level array the rest of the time. Live testing measured the bare array at
 // 53% of completed runs, and every lead in those runs used to be thrown away.
 // Accept both shapes.
-export function coerceLeadsPayload(p: unknown): { leads: unknown[] } | null {
+function coerceLeadsPayload(p: unknown): { leads: unknown[] } | null {
   if (Array.isArray(p)) return { leads: p };
   if (p && typeof p === "object") {
     const leads = (p as { leads?: unknown }).leads;
@@ -512,7 +515,7 @@ function recoverValue(schema: Record<string, unknown>, value: unknown): { value:
   return null;
 }
 
-export function defectMessage(defect: LeadDefect): string {
+function defectMessage(defect: LeadDefect): string {
   switch (defect.action) {
     case "dropped":
       return `Dropped ${defect.lead}: ${defect.detail}.`;
@@ -533,7 +536,7 @@ export function defectMessage(defect: LeadDefect): string {
  * unusable -- no company name to put on a card. A defect in one lead never
  * touches another lead in the same response.
  */
-export function reviewLeads(entries: unknown[]): { leads: RawLead[]; defects: LeadDefect[] } {
+function reviewLeads(entries: unknown[], candidateCount: number): { leads: RawLead[]; defects: LeadDefect[] } {
   const leads: RawLead[] = [];
   const defects: LeadDefect[] = [];
 
@@ -600,6 +603,32 @@ export function reviewLeads(entries: unknown[]): { leads: RawLead[]; defects: Le
       delete raw.connection_type;
     }
 
+    // An index that points at no candidate is a fabricated attribution, which is
+    // a louder slip than a mistyped field, so it cannot be the one that passes
+    // unannounced. The lead is still kept, with no source rather than a wrong one.
+    const claimedSource = raw.source_index;
+    if (claimedSource == null) {
+      defects.push({
+        lead: company,
+        field: "source_index",
+        detail: "the model named no source, so this lead is kept without one",
+        action: "ignored",
+      });
+    } else if (
+      typeof claimedSource !== "number" ||
+      !Number.isInteger(claimedSource) ||
+      claimedSource < 1 ||
+      claimedSource > candidateCount
+    ) {
+      defects.push({
+        lead: company,
+        field: "source_index",
+        detail: `the model cited candidate ${describeValue(claimedSource)}, but only ${candidateCount} were researched`,
+        action: "ignored",
+      });
+      delete raw.source_index;
+    }
+
     leads.push(raw as unknown as RawLead);
   });
 
@@ -627,7 +656,12 @@ interface RawLead {
 // An address the model produced that code could not verify. Kept on the record
 // so a human can chase it down, never handed to the drafting or Gmail path.
 function unverifiedNote(check: Exclude<EmailCheck, { ok: true }>): string {
-  const why = check.reason === "format" ? "not a valid email address" : "domain has no mail record";
+  const why =
+    check.reason === "format"
+      ? "not a valid email address"
+      : check.reason === "domain"
+        ? "domain has no mail record"
+        : "the domain lookup did not complete, so this was never checked";
   return `unverified (${why}): ${check.email}`;
 }
 

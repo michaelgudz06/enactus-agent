@@ -164,6 +164,32 @@ describe("a recoverable value is read rather than thrown away", () => {
     expect(out.statuses.some((s) => s.includes("source_index"))).toBe(true);
   });
 
+  // A fabricated attribution is a louder slip than a mistyped field, so it must
+  // not be the one that passes unannounced.
+  test("reports a cited candidate that does not exist, and keeps the lead", async () => {
+    const out = await runWithLeads([
+      rawLead({ company: "Gabi & Jules", source_index: 99, website: null }),
+      rawLead(),
+    ]);
+
+    expect(out.leads.map((l) => l.company)).toEqual(["Gabi & Jules", "Renaissance Coffee"]);
+    expect(out.leads[0].sources).toEqual([]);
+    const reported = out.statuses.filter((s) => s.includes("Gabi & Jules") && s.includes("source_index"));
+    expect(reported).toHaveLength(1);
+    expect(reported[0]).toContain("99");
+    expect(reported[0]).toContain("3");
+  });
+
+  test("distinguishes a source the model never named from one that does not exist", async () => {
+    const out = await runWithLeads([rawLead({ company: "Gabi & Jules", source_index: null, website: null })]);
+
+    expect(out.leads[0].sources).toEqual([]);
+    const reported = out.statuses.filter((s) => s.includes("source_index"));
+    expect(reported).toHaveLength(1);
+    expect(reported[0]).toMatch(/named no source/i);
+    expect(reported[0]).not.toContain("cited candidate");
+  });
+
   test("leaves a value with no single reading alone", async () => {
     const out = await runWithLeads([
       rawLead({ fit_score: "high" }),

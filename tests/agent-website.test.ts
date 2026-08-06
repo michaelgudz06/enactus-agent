@@ -74,6 +74,25 @@ describe("model-claimed company website", () => {
     expect(out.leads[0].website_status).toContain("(example website)");
   });
 
+  // A resolver that never answered is not evidence the company invented its
+  // domain, so the card must not say it was rejected.
+  test("says a website was not checked when the lookup did not complete", async () => {
+    const out = await runWithLead({ website: "https://slow-resolver.example", source_index: 99 });
+
+    expect(out.leads[0].website).toBeNull();
+    expect(out.leads[0].website_status).toContain("slow-resolver.example");
+    expect(out.leads[0].website_status).toMatch(/not verified/i);
+    expect(out.leads[0].website_status).not.toMatch(/does not resolve/i);
+  });
+
+  test("says an address was not checked when the lookup did not complete", async () => {
+    const out = await runWithLead({ website: null, contact_email: "hello@slow-resolver.example" });
+
+    expect(out.leads[0].contact_email).toBeNull();
+    expect(out.leads[0].contact_email_status).toContain("never checked");
+    expect(out.leads[0].contact_email_status).not.toMatch(/no mail record/i);
+  });
+
   test("keeps the lead itself when its claimed website cannot be verified", async () => {
     const out = await runWithLead({ website: "https://momentenergy.co", source_index: 99 });
 

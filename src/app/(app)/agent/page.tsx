@@ -255,7 +255,7 @@ export default function AgentPage() {
               {reasoning && (
                 <div>
                   <div className="text-[11px] font-medium mb-1.5 flex items-center gap-1" style={{ color: "var(--faint)" }}>
-                    <Brain size={12} /> DeepSeek R1 reasoning
+                    <Brain size={12} /> Analyst reasoning
                   </div>
                   <div ref={reasonRef} className="text-[11px] leading-relaxed whitespace-pre-wrap max-h-72 overflow-y-auto reason-scroll p-2.5 rounded-lg" style={{ background: "var(--bg)", color: "var(--muted)" }}>
                     {reasoning}

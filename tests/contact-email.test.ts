@@ -67,7 +67,9 @@ describe("contact email verification", () => {
     expect(resolve).toHaveBeenCalledTimes(1);
   });
 
-  test("treats a resolver that fails as unverified rather than throwing", async () => {
+  // A lookup that never completed is not evidence that the domain is fake, and
+  // must not be recorded as though it were.
+  test("treats a resolver that fails as not checked rather than as a bad domain", async () => {
     const { email: verify } = createVerifiers({
       resolve: async () => {
         throw new Error("EAI_AGAIN");
@@ -77,11 +79,11 @@ describe("contact email verification", () => {
     expect(await verify("hello@renaissancecoffeesfu.com")).toEqual({
       ok: false,
       email: "hello@renaissancecoffeesfu.com",
-      reason: "domain",
+      reason: "unverified",
     });
   });
 
-  test("gives up on a hanging resolver instead of stalling the run", async () => {
+  test("gives up on a hanging resolver instead of stalling the run, and says it never checked", async () => {
     vi.useFakeTimers();
     const { email: verify } = createVerifiers({
       resolve: () => new Promise<boolean>(() => {}),
@@ -94,6 +96,16 @@ describe("contact email verification", () => {
     expect(await pending).toEqual({
       ok: false,
       email: "hello@renaissancecoffeesfu.com",
+      reason: "unverified",
+    });
+  });
+
+  test("keeps calling a completed no-records answer a bad domain", async () => {
+    const { email: verify } = createVerifiers({ resolve: async () => false });
+
+    expect(await verify("hello@momentenergy.co")).toEqual({
+      ok: false,
+      email: "hello@momentenergy.co",
       reason: "domain",
     });
   });
@@ -158,6 +170,26 @@ describe("company website verification", () => {
     expect((await website("their storefront")).ok).toBe(false);
     expect((await website("")).ok).toBe(false);
     expect((await website(null)).ok).toBe(false);
+  });
+
+  test("separates a domain that does not resolve from one it could not check", async () => {
+    const answered = createVerifiers({ resolve: async () => false });
+    const unreachable = createVerifiers({
+      resolve: async () => {
+        throw Object.assign(new Error("queryMx ESERVFAIL"), { code: "ESERVFAIL" });
+      },
+    });
+
+    expect(await answered.website("https://momentenergy.co")).toEqual({
+      ok: false,
+      url: "https://momentenergy.co",
+      reason: "domain",
+    });
+    expect(await unreachable.website("https://momentenergy.co")).toEqual({
+      ok: false,
+      url: "https://momentenergy.co",
+      reason: "unverified",
+    });
   });
 
   test("shares one lookup between an address and a website on the same domain", async () => {
