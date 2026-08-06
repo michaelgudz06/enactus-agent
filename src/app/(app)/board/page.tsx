@@ -12,9 +12,9 @@ type LeadsResult = { ticket: number; mode: Mode; leads: Lead[]; warning?: string
 
 /**
  * Every read of the board takes a ticket, and only the newest ticket may write
- * what is on screen. A read that a later one superseded — a mode switch, a
- * second Refresh, the modal being closed — is dropped rather than landing as
- * the wrong mode's leads. One sequence covers every path that reads, so the
+ * what is on screen. A read that a later one superseded — a mode switch, or a
+ * second Refresh — is dropped rather than landing as the wrong mode's leads.
+ * One sequence covers both paths that read, the mode effect and Refresh, so the
  * rule cannot drift apart between them, and it compares tickets rather than
  * modes captured in a closure, which would be the mode of the render that
  * started the read rather than the current one.
