@@ -132,6 +132,31 @@ function runBuild({
   return { ...run, outFile };
 }
 
+/**
+ * The coverage report config/alumni/README.md carries: a generated block, so
+ * reading it back is reading an owned output contract, not implementation text.
+ */
+function parseCoverageReport(block: string) {
+  const [table, ...rest] = block.split(/\n\s*\n/);
+  const totals = rest.join("\n");
+
+  const years: Array<[string, number]> = [];
+  for (const [, year, count] of table.matchAll(/(\d{4}(?:-\d{2})?)\s+(\d+)/g)) {
+    years.push([year, Number(count)]);
+  }
+
+  const field = (name: string) => new RegExp(`${name} (\\S+)`).exec(totals)?.[1];
+  return {
+    years: years.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+    people: Number(field("people")),
+    yearsCovered: Number(field("years covered")),
+    span: Number(/years covered \d+ of (\d+)/.exec(totals)?.[1]),
+    earliest: field("earliest"),
+    latest: field("latest"),
+    undated: Number(field("with no year")),
+  };
+}
+
 /** Entity-encoded JSON on an attribute, the way Squarespace serves its cards. */
 const squarespaceContext = (payload: unknown) =>
   JSON.stringify(payload).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
@@ -655,13 +680,21 @@ describe("merging sightings into people", () => {
     expect(row.sourceUrl).toBe("u1 | u2");
   });
 
-  test("a single distinct capture date is written once, not repeated per role", () => {
-    const [row] = mergeSightings([
+  test("role, source_url and captured_at can be split and zipped by index", () => {
+    const [two] = mergeSightings([
       sighting({ role: "Director", year: "2015-16" }),
       sighting({ role: "President", year: "2016-17" }),
     ]);
 
-    expect(row.capturedAt).toBe("2026-08-06");
+    // Both roles came off the same page on the same day; the entry is still
+    // written per role, because a consumer pairs these three columns by index.
+    expect(two.role.split("; ")).toHaveLength(2);
+    expect(two.sourceUrl.split(" | ")).toHaveLength(2);
+    expect(two.capturedAt.split(" | ")).toHaveLength(2);
+
+    const [one] = mergeSightings([sighting()]);
+    expect(one.sourceUrl.split(" | ")).toHaveLength(1);
+    expect(one.capturedAt).toBe("2026-08-06");
   });
 
   test("the strongest sighting sets the confidence — one direct read establishes a name", () => {
@@ -918,20 +951,32 @@ describe("the committed roster and the README that describes it", () => {
   const committedRows = () =>
     parseRosterCsv(readFileSync(repoFile("config/alumni/past-executives.csv"), "utf8"));
 
-  const readmeCoverage = () => {
+  /**
+   * The generated block under "Gaps in the record": the per-year table and the
+   * totals line beneath it. Every count this README states about the roster is
+   * in there, so this is the whole of what can drift.
+   */
+  const readmeReport = () => {
     const readme = readFileSync(repoFile("config/alumni/README.md"), "utf8");
-    const table = /## Gaps in the record[\s\S]*?```\n([\s\S]*?)```/.exec(readme)?.[1];
-    expect(table).toBeDefined();
-
-    const counts: Array<[string, number]> = [];
-    for (const [, year, people] of table!.matchAll(/(\d{4}(?:-\d{2})?)\s+(\d+)/g)) {
-      counts.push([year, Number(people)]);
-    }
-    return counts.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    const block = /## Gaps in the record[\s\S]*?```\n([\s\S]*?)```/.exec(readme)?.[1];
+    expect(block).toBeDefined();
+    return parseCoverageReport(block!);
   };
 
   test("the coverage table is what the committed CSV actually contains", () => {
-    expect(readmeCoverage()).toEqual(coverageByYear(committedRows()).years);
+    expect(readmeReport().years).toEqual(coverageByYear(committedRows()).years);
+  });
+
+  test("the totals line is what the committed CSV actually contains", () => {
+    const rows = committedRows();
+    const coverage = coverageByYear(rows);
+    const report = readmeReport();
+
+    expect(report.people).toBe(rows.length);
+    expect(report.yearsCovered).toBe(coverage.years.length);
+    expect(report.undated).toBe(coverage.undated);
+    expect(report.earliest).toBe(coverage.years[0][0]);
+    expect(report.latest).toBe(coverage.years.at(-1)![0]);
   });
 
   test("every person in the file reaches the coverage report, dated or not", () => {
@@ -942,36 +987,12 @@ describe("the committed roster and the README that describes it", () => {
     expect(dated + coverage.undated).toBe(rows.length);
   });
 
-  /** The sentences around the table make the same claim in prose. */
-  const readmeClaims = () => {
-    const readme = readFileSync(repoFile("config/alumni/README.md"), "utf8");
-    const headline = /([\d,]+) people,\s+across (\d+) of the \d+ years/.exec(readme);
-    const undated = /(\w+) more (?:people carry|person carries) no year at all/.exec(readme);
-    expect(headline).not.toBeNull();
-    expect(undated).not.toBeNull();
-
-    const words: Record<string, number> = {
-      No: 0, One: 1, Two: 2, Three: 3, Four: 4, Five: 5, Six: 6, Seven: 7, Eight: 8, Nine: 9, Ten: 10,
-    };
-    const spelled = undated![1];
-    expect(Object.keys(words)).toContain(spelled);
-
-    return {
-      people: Number(headline![1].replace(/,/g, "")),
-      years: Number(headline![2]),
-      undated: words[spelled],
-    };
-  };
-
-  test("the headline the section opens with is the file it describes", () => {
-    const rows = committedRows();
-    const coverage = coverageByYear(rows);
-
-    expect(readmeClaims()).toEqual({
-      people: rows.length,
-      years: coverage.years.length,
-      undated: coverage.undated,
-    });
+  test("the roster pairs a source and a capture date with every role it lists", () => {
+    for (const row of committedRows()) {
+      const roles = row.role === "" ? 1 : row.role.split("; ").length;
+      expect(row.sourceUrl.split(" | ")).toHaveLength(roles);
+      expect(row.capturedAt.split(" | ")).toHaveLength(roles);
+    }
   });
 });
 
@@ -1164,20 +1185,8 @@ describe("refreshing what the README says about the roster", () => {
     return { ...run, csv, readme, before };
   }
 
-  const claimsIn = (readme: string) => {
-    const table = /## Gaps in the record[\s\S]*?```\n([\s\S]*?)```/.exec(readme)?.[1] ?? "";
-    const years: Array<[string, number]> = [];
-    for (const [, year, people] of table.matchAll(/(\d{4}(?:-\d{2})?)\s+(\d+)/g)) {
-      years.push([year, Number(people)]);
-    }
-    const headline = /([\d,]+) people,\s+across (\d+) of the \d+ years/.exec(readme);
-    const undated = /(\w+) more (?:people carry|person carries) no year at all/.exec(readme);
-    return {
-      years: years.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
-      people: Number(headline?.[1].replace(/,/g, "")),
-      spelled: undated?.[1],
-    };
-  };
+  const claimsIn = (readme: string) =>
+    parseCoverageReport(/## Gaps in the record[\s\S]*?```\n([\s\S]*?)```/.exec(readme)?.[1] ?? "");
 
   test("the committed README already matches the committed roster, so a refresh changes nothing", () => {
     const run = runRefresh();
@@ -1225,20 +1234,61 @@ describe("refreshing what the README says about the roster", () => {
   });
 });
 
-describe("the coverage claims, as text", () => {
+describe("the coverage report, as text", () => {
   const readme = [
     "## Gaps in the record",
     "",
-    "A gap is a gap — 3 people,",
-    "across 2 of the 36 years since the chapter was founded:",
+    "A gap is a gap, and this is the only place that counts anybody:",
     "",
     "```",
     "2015-16   2    2024-25   1  ← coaches only",
+    "",
+    "people 3    years covered 2 of 10    earliest 2015-16    latest 2024-25    with no year 6",
     "```",
     "",
-    "Six more people carry no year at all — the Community Spotlight names.",
+    "The people with no year are the Community Spotlight names.",
     "",
   ].join("\n");
+
+  const reportIn = (text: string) =>
+    parseCoverageReport(/## Gaps in the record[\s\S]*?```\n([\s\S]*?)```/.exec(text)?.[1] ?? "");
+
+  test("the table and the totals beneath it are rewritten together", () => {
+    const refreshed = reportIn(
+      refreshCoverageClaims(readme, 9, {
+        years: [
+          ["2015-16", 4],
+          ["2024-25", 5],
+        ],
+        undated: 2,
+      }),
+    );
+
+    expect(refreshed.years).toEqual([
+      ["2015-16", 4],
+      ["2024-25", 5],
+    ]);
+    expect(refreshed.people).toBe(9);
+    expect(refreshed.yearsCovered).toBe(2);
+    expect(refreshed.undated).toBe(2);
+    expect(refreshed.earliest).toBe("2015-16");
+    expect(refreshed.latest).toBe("2024-25");
+  });
+
+  test("the span is the years the roster reaches across, covered or not", () => {
+    const refreshed = reportIn(
+      refreshCoverageClaims(readme, 2, {
+        years: [
+          ["1991", 1],
+          ["2026-27", 1],
+        ],
+        undated: 0,
+      }),
+    );
+
+    expect(refreshed.yearsCovered).toBe(2);
+    expect(refreshed.span).toBe(36);
+  });
 
   test("a note beside a year survives a refresh that changes its count", () => {
     const refreshed = refreshCoverageClaims(readme, 9, {
@@ -1250,26 +1300,20 @@ describe("the coverage claims, as text", () => {
     });
 
     expect(refreshed).toContain("2015-16   4    2024-25   5  ← coaches only");
-    expect(refreshed).toContain("9 people,\nacross 2 of the 36 years");
-    expect(refreshed).toContain("Two more people carry no year at all");
-  });
-
-  test("one undated person reads as one person, not as one people", () => {
-    const refreshed = refreshCoverageClaims(readme, 9, { years: [["2015-16", 9]], undated: 1 });
-    expect(refreshed).toContain("One more person carries no year at all");
   });
 
   test("a year with no note is written without one", () => {
     const refreshed = refreshCoverageClaims(readme, 2, { years: [["1991", 2]], undated: 0 });
-    expect(refreshed).toContain("```\n1991      2\n```");
+    expect(refreshed).toContain("```\n1991      2\n");
   });
 
-  test.each([
-    ["the coverage table", readme.replace("## Gaps in the record", "## Gaps")],
-    ["the headline", readme.replace("3 people,", "some people,")],
-    ["the undated sentence", readme.replace("Six more people carry", "Six more people held")],
-  ])("a README missing %s throws rather than silently leaving a number stale", (_case, text) => {
-    expect(() => refreshCoverageClaims(text, 3, { years: [["2015-16", 3]], undated: 0 })).toThrow();
+  test("a README whose report has moved throws rather than leaving it stale", () => {
+    expect(() =>
+      refreshCoverageClaims(readme.replace("## Gaps in the record", "## Gaps"), 3, {
+        years: [["2015-16", 3]],
+        undated: 0,
+      }),
+    ).toThrow();
   });
 });
 

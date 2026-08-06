@@ -642,18 +642,16 @@ export function mergeSightings(sightings: Sighting[]): RosterRow[] {
       }))
       .sort((a, b) => (a.years < b.years ? -1 : a.years > b.years ? 1 : a.order - b.order));
 
-    // One provenance entry per role, in role order — but a single distinct value
-    // is written once rather than repeated, so the common case stays readable.
-    const uniqueJoin = (values: string[]) =>
-      new Set(values).size === 1 ? values[0] : values.join(" | ");
-
+    // One provenance entry per role, in role order, even where two roles were
+    // read off the same page: role, source_url and captured_at are read by
+    // index, so a value written once for two roles would mis-pair them.
     const single = roles.length === 1;
     rows.push({
       name: bucket[0].name,
       role: single ? roles[0].role : roles.map((r) => `${r.role} (${r.years})`).join("; "),
       yearsActive: compressYears(raw.map((s) => s.year)),
-      sourceUrl: uniqueJoin(roles.map((r) => r.earliest.sourceUrl)),
-      capturedAt: uniqueJoin(roles.map((r) => r.earliest.capturedAt)),
+      sourceUrl: roles.map((r) => r.earliest.sourceUrl).join(" | "),
+      capturedAt: roles.map((r) => r.earliest.capturedAt).join(" | "),
       confidence: raw
         .map((s) => s.confidence)
         .reduce((best, next) => (CONFIDENCE_RANK[next] > CONFIDENCE_RANK[best] ? next : best)),
@@ -738,20 +736,15 @@ export function parseRosterCsv(contents: string): RosterRow[] {
   return rows;
 }
 
-// --- the README's derived numbers ------------------------------------------
+// --- the README's coverage report ------------------------------------------
 
-const COUNT_IN_WORDS = [
-  "No", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
-];
-
-const COVERAGE_TABLE = /(## Gaps in the record[\s\S]*?```\n)([\s\S]*?)(```)/;
-const HEADLINE = /([\d,]+) people,(\s+)across (\d+) of the (\d+) years/;
-const UNDATED = /(\w+) more (?:people carry|person carries) no year at all/;
+const COVERAGE_BLOCK = /(## Gaps in the record[\s\S]*?```\n)([\s\S]*?)(```)/;
 
 /** "2024-25  12  ← coaches only" -> the note beside the count, if there is one. */
-function notesInTable(table: string): Map<string, string> {
+function notesInTable(block: string): Map<string, string> {
   const notes = new Map<string, string>();
-  for (const line of table.split("\n")) {
+  for (const line of block.split("\n")) {
+    if (line.trim() === "") break;
     const cells = [...line.matchAll(/(\d{4}(?:-\d{2})?)\s+\d+/g)];
     for (const [index, cell] of cells.entries()) {
       const from = cell.index + cell[0].length;
@@ -763,58 +756,69 @@ function notesInTable(table: string): Map<string, string> {
   return notes;
 }
 
-function renderCoverageTable(years: Array<[string, number]>, notes: Map<string, string>): string {
+/**
+ * The whole coverage report, table and totals together, as config/alumni/README.md
+ * carries it. Every count the file states about the roster is in here and nowhere
+ * else: a number that appears in one place cannot disagree with itself, so there
+ * is nothing to keep in sync and nothing to go quietly stale.
+ */
+export function renderCoverageReport(
+  people: number,
+  coverage: { years: Array<[string, number]>; undated: number },
+  notes: Map<string, string> = new Map(),
+): string {
   const columns = 4;
-  const rows = Math.ceil(years.length / columns);
+  const rows = Math.ceil(coverage.years.length / columns);
   const lines: string[] = [];
 
   for (let row = 0; row < rows; row += 1) {
     const cells: string[] = [];
     for (let column = 0; column < columns; column += 1) {
-      const entry = years[column * rows + row];
+      const entry = coverage.years[column * rows + row];
       if (!entry) continue;
-      const [year, people] = entry;
+      const [year, count] = entry;
       const note = notes.get(year);
-      cells.push(year.padEnd(7) + String(people).padStart(4) + (note ? `  ${note}` : ""));
+      cells.push(year.padEnd(7) + String(count).padStart(4) + (note ? `  ${note}` : ""));
     }
     lines.push(cells.join("    ").trimEnd());
   }
+
+  const first = coverage.years[0]?.[0];
+  const last = coverage.years.at(-1)?.[0];
+  const span = first && last ? Number(last.slice(0, 4)) - Number(first.slice(0, 4)) + 1 : 0;
+
+  if (lines.length) lines.push("");
+  lines.push(
+    [
+      `people ${people}`,
+      `years covered ${coverage.years.length} of ${span}`,
+      `earliest ${first ?? "-"}`,
+      `latest ${last ?? "-"}`,
+      `with no year ${coverage.undated}`,
+    ].join("    "),
+  );
 
   return lines.join("\n") + "\n";
 }
 
 /**
- * Rewrite the three numbers config/alumni/README.md derives from the roster:
- * the coverage table, the headline above it, and the undated-people sentence.
- * Everything else in the file — including the note beside a year — is carried
- * over untouched. A section that has moved throws rather than being silently
- * left stale, because a stale number here is the file misreporting its own gaps.
+ * Rewrite that report in place from the roster. A note beside a year is carried
+ * over; nothing else in the file is touched, because nothing else in the file
+ * states a count. A report that has moved throws rather than being left stale.
  */
 export function refreshCoverageClaims(
   readme: string,
   people: number,
   coverage: { years: Array<[string, number]>; undated: number },
 ): string {
-  const table = COVERAGE_TABLE.exec(readme);
-  if (!table) throw new Error('no fenced coverage table under "## Gaps in the record"');
-  if (!HEADLINE.test(readme)) throw new Error('no "N people, across M of the K years" headline');
-  if (!UNDATED.test(readme)) throw new Error('no "N more people carry no year at all" sentence');
+  const block = COVERAGE_BLOCK.exec(readme);
+  if (!block) throw new Error('no fenced coverage report under "## Gaps in the record"');
 
-  const spelled = COUNT_IN_WORDS[coverage.undated] ?? String(coverage.undated);
-  const carry = coverage.undated === 1 ? "person carries" : "people carry";
-
-  return readme
-    .replace(
-      COVERAGE_TABLE,
-      (_match, open: string, body: string, close: string) =>
-        open + renderCoverageTable(coverage.years, notesInTable(body)) + close,
-    )
-    .replace(
-      HEADLINE,
-      (_match, _people: string, gap: string, _years: string, total: string) =>
-        `${people} people,${gap}across ${coverage.years.length} of the ${total} years`,
-    )
-    .replace(UNDATED, `${spelled} more ${carry} no year at all`);
+  return readme.replace(
+    COVERAGE_BLOCK,
+    (_match, open: string, body: string, close: string) =>
+      open + renderCoverageReport(people, coverage, notesInTable(body)) + close,
+  );
 }
 
 /**

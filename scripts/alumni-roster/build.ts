@@ -402,3 +402,7 @@ if (unexpectedlyEmpty.length) {
 mkdirSync(path.dirname(outFile), { recursive: true });
 writeFileSync(outFile, HEADER + toCsv(rows));
 console.log(`wrote:     ${outFile}`);
+console.log(
+  `next:      node --experimental-strip-types scripts/alumni-roster/build.ts --refresh-readme\n` +
+    `           (brings the coverage report in config/alumni/README.md back in line)`,
+);

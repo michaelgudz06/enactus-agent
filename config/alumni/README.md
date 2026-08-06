@@ -57,9 +57,8 @@ They can. There is no threshold to meet, no form, and no reason required.
    node --experimental-strip-types scripts/alumni-roster/build.ts --refresh-readme
    ```
 
-   That rewrites the numbers this README derives from the roster — the coverage
-   table under "Gaps in the record", the count above it, and the
-   people-with-no-year sentence — from the CSV you just edited. It reads nothing
+   That rewrites the coverage report under "Gaps in the record" — the only place
+   in this file that counts anybody — from the CSV you just edited. It reads nothing
    else: no snapshot cache, no network, no archive. It takes a second on a fresh
    clone, it never touches the roster itself, and it is what keeps the tests
    passing so that honouring a removal never leaves you with a red branch to
@@ -125,17 +124,32 @@ share of the recovered names and for the whole of 2023-24.
 ```bash
 scripts/alumni-roster/fetch-snapshots.sh          # populate .cache/alumni-roster
 node --experimental-strip-types scripts/alumni-roster/build.ts
+node --experimental-strip-types scripts/alumni-roster/build.ts --refresh-readme
 ```
+
+The third line is not optional when the second one changed anything: it brings
+the coverage report in this file back in line with the roster. The build prints
+it as its own last line, for the same reason.
 
 **`scripts/alumni-roster/sources.tsv` declares every source, and both scripts
 read it.** The fetcher retrieves exactly the rows it lists; the build checks
 every key it lists for a yield, whether or not that source produced a cached
 page, and refuses a cached page whose prefix no row claims. Neither script keeps
 its own copy of the list, because two lists drift and a source declared in one
-place only is a source the checks below cannot see. **Adding a source is one
-row** — key, kind (`archived`, `spotlight` or `live`), cache prefix, CDX
-pattern, URL — plus its parser in `build.ts`, which the build demands rather
-than quietly skipping. A missing or malformed registry stops both scripts.
+place only is a source the checks below cannot see. A missing or malformed
+registry stops both scripts.
+
+**Adding a source is three things**, and the build and the tests demand all
+three rather than quietly skipping any:
+
+1. **A row in `sources.tsv`** — six tab-separated columns: key, kind
+   (`archived`, `spotlight` or `live`), cache prefix, CDX pattern, URL, and the
+   post filter a `spotlight` sweep matches its posts by. Write `-` in a column
+   the kind does not use; an empty column is a malformed row.
+2. **A parser for it in `build.ts`**, dispatched on the key. A declared source
+   the build cannot parse is a hard failure, not a skip.
+3. **A fixture page in `tests/alumni-roster.test.ts`**, so the test that runs
+   every declared source through the build has a page for it to read.
 
 The fetcher caches one snapshot per *unique content digest* — the Wayback CDX
 index reports a digest per capture, and captures with the same digest are
@@ -222,8 +236,8 @@ Then six columns:
 | `name` | As the club published it. ALL CAPS is title-cased; nothing else is changed. |
 | `role` | The role label the page carried. Where one person held several, each is listed with its own years: `Director of Program Innovation (2015-16); President (2016-17)`. Empty means the source named the person but stated no role. |
 | `years_active` | Academic years, `2016-17`. Consecutive years collapse to a run (`2015-16..2017-18`); a break in service is kept (`2022-23;2025-26..2026-27`). A bare `1991` is a single calendar year, because that is all the source stated. Empty means the source stated no year. |
-| `source_url` | The archived (or live) URL the row was read from. Where a person has several roles, one URL per role in the same order, `\|`-separated. |
-| `captured_at` | The date **we** fetched the page. The date the *Internet Archive* captured it is the 14-digit stamp inside `source_url`. |
+| `source_url` | The archived (or live) URL the row was read from — one URL per role, in the same order as `role`, `\|`-separated. |
+| `captured_at` | The date **we** fetched the page, one entry per role in the same order as `role` and `source_url`, `\|`-separated — repeated even where two roles came off the same page on the same day, so the three columns can always be split and zipped by index. The date the *Internet Archive* captured it is the 14-digit stamp inside `source_url`. |
 | `confidence` | How firmly the name was recovered. See below. |
 
 ### What `years_active` actually means
@@ -251,7 +265,7 @@ its "2026 Regionals" block to the 2025-26 season.
 |---|---|
 | `high` | Name **and** role read directly out of a structured roster record on a club page — a team card, a titled roster entry, a stated term. This is the great majority of the file. |
 | `medium` | The club named the person, but not as a structured roster record. Competition coaches (a comma-separated run inside a sentence, under a year heading) and one alumni-page entry whose role had to be read out of prose. |
-| `low` | The club named the person and nothing else. These are the "Community Spotlight" alumni: the post title gives a name, the post body is an interview we do not read, and no role or term is stated anywhere. `role` and `years_active` are empty for these, honestly. (There are seven such posts but six such rows — Anoop Aulakh is also on the alumni page as a president, so he is `high`.) |
+| `low` | The club named the person and nothing else. These are the "Community Spotlight" alumni: the post title gives a name, the post body is an interview we do not read, and no role or term is stated anywhere. `role` and `years_active` are empty for these, honestly. (The sweep yields one fewer row than it has posts: one of them names Anoop Aulakh, who is also on the alumni page as a president, so his row is `high` rather than `low`.) |
 
 A person seen more than once takes the **best** confidence of their sightings:
 one direct read off a roster page establishes the name, and a later weaker
@@ -290,32 +304,35 @@ contact detail the real pages carried.
 
 ## Gaps in the record
 
-A gap is a gap. This is what the file covers, by academic year — 199 people,
-across 16 of the 36 years since the chapter was founded:
+A gap is a gap. This is what the file covers, by academic year, and it is the
+**only place in this README that counts anybody** — every other sentence about
+the roster is written without a number, so there is no second count anywhere
+that could quietly disagree with it:
 
 ```
 1991      1    2012-13  14    2016-17  37    2023-24  14
 2004-05   1    2013-14  28    2017-18  32    2024-25  12  ← coaches only
 2008-09   1    2014-15  17    2018-19  16    2025-26  38
 2009-10   1    2015-16  36    2022-23   6    2026-27  33
+
+people 199    years covered 16 of 36    earliest 1991    latest 2026-27    with no year 6
 ```
 
-Six more people carry no year at all — the Community Spotlight names, whose
-posts state none — so they appear in no column above. A person counts once in
-every year their `years_active` spans, including the years inside a `..` run, so
-the columns sum to more than 199.
+The people with no year at all are the Community Spotlight names, whose posts
+state none, so they appear in no column above. A person counts once in every
+year their `years_active` spans, including the years inside a `..` run, so the
+columns sum to more than the number of people.
 
-**This table is generated, not maintained.** Do not edit a number here by hand:
+**That block is generated, not maintained.** Do not edit a number in it by hand:
 
 ```bash
 node --experimental-strip-types scripts/alumni-roster/build.ts --refresh-readme
 ```
 
-recomputes this table, the count above it and the sentence below it from the
-committed CSV alone — no cache, no network — and writes them back.
-`tests/alumni-roster.test.ts` recomputes the same numbers and fails if they
-disagree with the roster, so a stale gap report cannot survive a review. The fix
-when it fails is that command.
+recomputes the whole block from the committed CSV alone — no cache, no network —
+and writes it back. `tests/alumni-roster.test.ts` recomputes the same numbers and
+fails if they disagree with the roster, so a stale gap report cannot survive a
+review. The fix when it fails is that command.
 
 These are the gaps we know about:
 
@@ -323,10 +340,10 @@ These are the gaps we know about:
   being captured after May 2019 and the next site's earliest capture is March
   2023. No archived page names those three cohorts. That is a real hole in the
   club's institutional memory, not a shortfall in the retrieval.
-- **2024-25 has no executive roster** — all twelve names are competition coaches
-  only. `/the-team` was last captured in April 2024 and `/team` first in January
+- **2024-25 has no executive roster** — every name under it is a competition
+  coach. `/the-team` was last captured in April 2024 and `/team` first in January
   2026, so no roster page from that year survives.
-- **2022-23 is only its six executives.** The Wix page's "LEADERSHIP TEAM",
+- **2022-23 is only its executives.** The Wix page's "LEADERSHIP TEAM",
   "EVENTS TEAM", "EXTERNAL RELATIONS TEAM" and other sections rendered as photos
   with no names in the HTML, so that layer of that year is unrecoverable from it.
 - **The 2025-26 coordinator layer is not in the file.** The `enactus-org`
@@ -335,10 +352,11 @@ These are the gaps we know about:
   without provenance is not a row. Recovering them means parsing that PDF and
   citing it, which this task did not do.
 - **1992 to 2003, 2005-2007 and 2010-2011 are unrecoverable.** The 2012 alumni
-  page is the only source reaching before 2012, and it names four people in an
+  page is the only source reaching before 2012, and it names its people in an
   "Alumni Business Owners" list rather than a roster: the founder, against the
-  1991 the page states in prose, and three presidents with their terms. That is
-  the whole of the pre-2012 record. The rest of that page, in every one of its
+  1991 the page states in prose, and the pre-2012 presidents it lists, each with
+  their term. That is the whole of the pre-2012 record — the years it covers are
+  in the block above. The rest of that page, in every one of its
   55 captures, is a call to action asking alumni to write in: **no public alumni
   roster ever existed.**
 

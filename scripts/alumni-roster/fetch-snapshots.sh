@@ -134,15 +134,28 @@ bad_row() { # bad_row <line-number> <complaint>
 line=0
 seen_keys=""
 seen_prefixes=""
-while IFS=$'\t' read -r key kind prefix pattern url filter extra <&3 \
-  || [ -n "${key:-}${kind:-}${prefix:-}${pattern:-}${url:-}${filter:-}" ]; do
+while IFS= read -r row <&3 || [ -n "${row:-}" ]; do
   line=$((line + 1))
-  case "$key" in '#'*) continue ;; esac
-  [ -z "$key$kind$prefix$pattern$url$filter$extra" ] && continue
+  case "$row" in '#'*) continue ;; esac
+  [ -z "$row" ] && continue
 
-  if [ -n "$extra" ] || [ -z "$key" ] || [ -z "$kind" ] || [ -z "$prefix" ] \
+  # Counted off the raw line, not off `read`: tab is IFS whitespace, so a
+  # trailing empty column would otherwise vanish and a seven-column row would
+  # pass here and be rejected by build.ts hours of downloads later.
+  tabs="${row//[!$'\t']/}"
+  if [ "${#tabs}" -ne 5 ]; then
+    bad_row "$line" "expected 6 tab-separated fields, found $(( ${#tabs} + 1 ))"
+    continue
+  fi
+  IFS=$'\t' read -r key kind prefix pattern url filter <<< "$row"
+
+  if [ -z "$key" ] || [ -z "$kind" ] || [ -z "$prefix" ] \
     || [ -z "$pattern" ] || [ -z "$url" ] || [ -z "$filter" ]; then
-    bad_row "$line" "expected 6 non-empty tab-separated fields (write '-' for an unused column)"
+    bad_row "$line" "every column needs a value; write '-' where a kind does not use one"
+    continue
+  fi
+  if [ "$kind" = spotlight ] && ! printf '%s' "$filter" | grep -qE '^[A-Za-z0-9][A-Za-z0-9-]*$'; then
+    bad_row "$line" "a spotlight source needs a post filter of letters, digits and dashes, not '$filter'"
     continue
   fi
   case "$seen_keys" in *"|$key|"*) bad_row "$line" "duplicate source key '$key'"; continue ;; esac
