@@ -1,10 +1,11 @@
 import crypto from "crypto";
 import { AgentEvent, ConnectionType, Lead, Mode } from "./types";
-import { chatJSON, streamReasoner, validateAgainstSchema, REASONER } from "./llm";
+import { chatJSON, streamReasoner, REASONER } from "./llm";
 import { exaSearch, dedupeByDomain, ExaResult } from "./exa";
 import { supabaseAdmin, LEADS, SEARCHES, hasServiceKey } from "./supabase";
 import { createVerifiers, isAggregatorHost, EmailCheck, WebsiteCheck } from "./contact";
 import { ENACTUS_ORG, ENACTUS_PROJECTS, ENACTUS_VENTURES } from "./enactus";
+import { ValueDefect, defectMessage, describeValue, readEnvelope, recoverValue, reviewFields } from "./review";
 
 type Emit = (e: AgentEvent) => void;
 
@@ -23,11 +24,13 @@ interface Plan {
 // structured output means: every property listed in `required`, no extras, and
 // optionality expressed as a nullable union so "present" is satisfiable by null.
 //
-// The local check covers the envelope only. Type-checking the leads array here
-// would make one wrong-typed field anywhere in it fatal to every lead in the
-// batch, which is the failure class this whole change exists to remove. The
-// leads themselves are checked field by field in reviewLeads, where a defect
-// costs the field it is in and is reported rather than swallowed.
+// The local check covers the envelope only, for the plan exactly as for the
+// leads. Type-checking the properties here would make one wrong-typed field
+// fatal to everything beside it -- a cosmetic `altAngle` used to end the run
+// before a single search -- which is the failure class this whole change exists
+// to remove. Both payloads are instead checked field by field, by reviewPlan and
+// reviewLeads, where a defect costs the field it is in and is reported rather
+// than swallowed.
 const NULLABLE_STRING = { type: ["string", "null"] };
 const NULLABLE_STRING_ARRAY = { type: ["array", "null"], items: { type: "string" } };
 
@@ -37,7 +40,7 @@ function strictObject(properties: Record<string, unknown>): Record<string, unkno
   return { type: "object", additionalProperties: false, required: Object.keys(properties), properties };
 }
 
-const PLAN_PROPERTIES = {
+const PLAN_PROPERTIES: Record<string, Record<string, unknown>> = {
   needClarification: { type: ["boolean", "null"] },
   questions: NULLABLE_STRING_ARRAY,
   searchQueries: { type: "array", items: { type: "string" } },
@@ -49,7 +52,13 @@ const PLAN_PROPERTIES = {
 const PLAN_SCHEMA = {
   name: "search_plan",
   schema: strictObject(PLAN_PROPERTIES),
-  validate: { type: "object", required: ["searchQueries", "criteria"], properties: PLAN_PROPERTIES },
+  // Envelope only, and both shapes a plan can arrive in: `searchQueries` is the
+  // one thing the run cannot continue without, and reviewPlan decides that after
+  // every field has had its own chance to be recovered -- listing it as required
+  // here would reject a plan whose queries arrived in a recoverable form, and
+  // rejecting a list here would reject a plan wrapped in a list of one before
+  // reviewPlan could read it out.
+  validate: { type: ["object", "array"] },
 };
 
 // The per-field contract for one lead. reviewLeads checks each field against
@@ -149,9 +158,9 @@ export async function runAgent(
 
   // ── 1. Understand + plan ────────────────────────────────────────────────
   emit({ type: "status", step: "understand", message: "Understanding your request and planning searches" });
-  let plan: Plan;
+  let planned: unknown;
   try {
-    plan = await chatJSON<Plan>(
+    planned = await chatJSON<unknown>(
       [
         { role: "system", content: `${planPrompt(mode)}\n\nRespond ONLY with JSON of shape: {"needClarification": boolean, "questions": string[], "searchQueries": string[], "criteria": string, "altAngle": string, "location": string}. Provide 3 focused searchQueries. Only set needClarification true (with up to 2 short questions) if the request is too vague to search well. altAngle is a different angle to try if this search was already done before.` },
         { role: "user", content: fullPrompt },
@@ -159,11 +168,22 @@ export async function runAgent(
       { maxTokens: 800, schema: PLAN_SCHEMA }
     );
   } catch (e) {
+    // No plan came back at all, so there is nothing to degrade to.
     emit({ type: "error", message: `Planning failed: ${(e as Error).message}` });
     return;
   }
 
-  if (plan.needClarification && !answers && !input.skipClarify && plan.questions?.length) {
+  const review = reviewPlan(planned);
+  for (const defect of review.defects) {
+    emit({ type: "status", step: "understand", message: defectMessage(defect, "plan") });
+  }
+  if (!review.plan) {
+    emit({ type: "error", message: `Nothing to search: ${review.blocker}.` });
+    return;
+  }
+  const plan = review.plan;
+
+  if (plan.needClarification && !answers && !input.skipClarify && plan.questions.length) {
     emit({ type: "clarify", questions: plan.questions.slice(0, 2) });
     return;
   }
@@ -230,10 +250,13 @@ export async function runAgent(
       ? `You are a sales-lead analyst. Assess each candidate organization as a potential CUSTOMER for the user's product.\n\n${ENACTUS_VENTURES}`
       : `You are a sponsorship-lead analyst for Enactus SFU. Assess each candidate organization as a potential SPONSOR. Detect any Simon Fraser University (SFU) or Enactus alumni connection, or past-sponsor / SFU-ecosystem tie, strictly from the provided text.\n\n${ENACTUS_ORG}\n\n${ENACTUS_PROJECTS}\n\nFor each strong sponsor, identify which specific Enactus SFU project best matches their industry or values, so outreach can pitch that project.\n\nHARD EXCLUSIONS — drop these candidates entirely (do not output them at all): other student clubs, university clubs, or student associations (at SFU or any school); anything that would require Enactus to PAY (paid memberships, paid directory or association listings, ticketed programs, fee-based accelerators). Enactus is asking companies to give, not to join or pay. Only keep real companies, businesses, or grant-making foundations.`;
 
+  // criteria is degradable, so it can legitimately be empty here. An empty
+  // labelled field tells the model less than no field at all.
+  const idealLead = plan.criteria ? `\nIdeal lead: ${plan.criteria}` : "";
+
   // Stage A — the reasoning model thinks out loud (visible), no JSON. Capped so
   // it stays snappy.
-  const reasoningUser = `User request: ${fullPrompt}
-Ideal lead: ${plan.criteria}
+  const reasoningUser = `User request: ${fullPrompt}${idealLead}
 
 Candidates:
 ${context}
@@ -294,8 +317,7 @@ Reason candidate by candidate: which are the strongest ${mode === "sales" ? "cus
 
   // Stage B — the structured-output model turns the analysis into JSON (fast).
   emit({ type: "status", step: "structure", message: "Structuring the shortlisted leads" });
-  const structureUser = `User request: ${fullPrompt}
-Ideal lead: ${plan.criteria}
+  const structureUser = `User request: ${fullPrompt}${idealLead}
 Mode: ${mode}
 
 Candidates:
@@ -316,7 +338,10 @@ Rules:
 ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student club, university club/association, or anything requiring Enactus to pay a membership/fee. Only real companies, businesses, or grant-making foundations."}`;
 
   // chatJSON already normalises the known shape variance through `coerce`, so
-  // whatever comes back is the envelope or nothing.
+  // whatever comes back is the envelope or nothing. The coercion runs inside
+  // chatJSON and cannot emit, so it records what it read into this list and the
+  // run announces it below, through the same mechanism every other level uses.
+  const envelopeDefects: ValueDefect[] = [];
   let parsed: { leads: unknown[] } | null = null;
   let structuringError = "";
   try {
@@ -326,12 +351,15 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
           { role: "system", content: `${scoreSystem} Output only the JSON described, nothing else.` },
           { role: "user", content: structureUser },
         ],
-        { maxTokens: 2800, schema: LEADS_SCHEMA, coerce: coerceLeadsPayload }
+        { maxTokens: 2800, schema: LEADS_SCHEMA, coerce: (raw) => coerceLeadsPayload(raw, envelopeDefects) }
       )) ?? null;
   } catch (e) {
     // Say what actually went wrong. A schema rejection, a rate limit and an
     // unparseable body used to be indistinguishable to the person waiting.
     structuringError = (e as Error).message;
+  }
+  for (const defect of envelopeDefects) {
+    emit({ type: "status", step: "structure", message: defectMessage(defect, "response") });
   }
   if (!parsed) {
     emit({
@@ -345,7 +373,7 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
 
   const { leads: reviewed, defects } = reviewLeads(parsed.leads ?? [], candidates.length);
   for (const defect of defects) {
-    emit({ type: "status", step: "structure", message: defectMessage(defect) });
+    emit({ type: "status", step: "structure", message: defectMessage(defect, "lead") });
   }
 
   // One verifier for the whole run: each domain costs at most one DNS query.
@@ -461,73 +489,171 @@ function unverifiedWebsiteNote(check: Exclude<WebsiteCheck, { ok: true }>): stri
   }
 }
 
+const LEADS_SUBJECT = "The leads response";
+
+// What the envelope has to carry for there to be anything to act on: one lead
+// object with a name to put on a card. Everything else about a lead is checked
+// per field, per lead, by reviewLeads.
+const LEADS_LIST_SCHEMA: Record<string, unknown> = {
+  type: "array",
+  items: { type: "object", required: ["company"], properties: { company: { type: "string" } } },
+};
+
 // The structuring model returns `{"leads":[...]}` most of the time and a bare
 // top-level array the rest of the time. Live testing measured the bare array at
 // 53% of completed runs, and every lead in those runs used to be thrown away.
 // Accept both shapes.
-function coerceLeadsPayload(p: unknown): { leads: unknown[] } | null {
+//
+// A lone lead where a list was asked for -- `{"leads":{...}}`, or the bare lead
+// object on its own -- is the same single reading recoverValue applies to every
+// other field, and it is applied here, at the earliest boundary both shapes pass
+// through, rather than being re-derived downstream. It is recorded on `defects`
+// so the caller announces it: this arrives after the searches and the reasoning
+// stage, and used to discard a usable lead outright. A payload with nothing
+// lead-shaped in it still has nothing to act on, and still stops the run.
+function coerceLeadsPayload(p: unknown, defects: ValueDefect[]): { leads: unknown[] } | null {
   if (Array.isArray(p)) return { leads: p };
-  if (p && typeof p === "object") {
-    const leads = (p as { leads?: unknown }).leads;
-    if (Array.isArray(leads)) return { leads };
-  }
-  return null;
+  if (!p || typeof p !== "object") return null;
+
+  const envelope = p as Record<string, unknown>;
+  if (Array.isArray(envelope.leads)) return { leads: envelope.leads };
+
+  const lone = envelope.leads === undefined ? envelope : envelope.leads;
+  const recovered = recoverValue(LEADS_LIST_SCHEMA, lone);
+  if (!recovered) return null;
+
+  defects.push({
+    subject: LEADS_SUBJECT,
+    field: "leads",
+    detail: `read ${describeValue(lone)} as a list of one lead`,
+    action: "coerced",
+  });
+  return { leads: recovered.value as unknown[] };
 }
 
-export interface LeadDefect {
-  /** The company the defect belongs to, or a positional label when it has no name. */
-  lead: string;
-  field: string;
-  detail: string;
-  /**
-   * What the defect cost: the value was read anyway ("coerced"), the field was
-   * left at its default ("ignored"), or the whole record was unusable ("dropped").
-   */
-  action: "coerced" | "ignored" | "dropped";
-}
+const PLAN_SUBJECT = "The search plan";
 
-function describeValue(value: unknown): string {
-  let text: string;
-  try {
-    text = JSON.stringify(value) ?? String(value);
-  } catch {
-    text = String(value);
-  }
-  return text.length > 80 ? `${text.slice(0, 77)}...` : text;
-}
-
-function expectedTypes(schema: Record<string, unknown>): string {
-  const declared = schema.type;
-  return Array.isArray(declared) ? (declared as string[]).join(" or ") : String(declared);
-}
-
-// A value the model sent in the wrong type but with only one possible reading:
-// "88" for a number is a slip, not an ambiguity. Recovering it keeps a lead off
-// the board with no fit score for a typo, and the slip is still reported.
-function recoverValue(schema: Record<string, unknown>, value: unknown): { value: unknown } | null {
-  const declared = schema.type;
-  const allowed = Array.isArray(declared) ? (declared as string[]) : [String(declared)];
-  if (allowed.includes("number") && typeof value === "string") {
-    const trimmed = value.trim();
-    const asNumber = Number(trimmed);
-    if (trimmed && Number.isFinite(asNumber)) return { value: asNumber };
-  }
-  return null;
-}
-
-function defectMessage(defect: LeadDefect): string {
-  switch (defect.action) {
-    case "dropped":
-      return `Dropped ${defect.lead}: ${defect.detail}.`;
-    case "coerced":
-      return `${defect.lead}: ${defect.detail}. The model sent the wrong type for it.`;
-    default:
-      return `${defect.lead}: ignoring ${defect.field} — ${defect.detail}. The rest of the lead was kept.`;
-  }
+interface PlanReview {
+  /** Null only when the next step has nothing to act on. */
+  plan: Plan | null;
+  defects: ValueDefect[];
+  /** Why the run cannot continue, when it cannot. */
+  blocker: string | null;
 }
 
 /**
- * Checks each lead on its own, field by field.
+ * Checks the plan field by field, on the same contract reviewLeads uses.
+ *
+ * A malformed optional field -- `altAngle` is a cosmetic hint about a different
+ * search angle -- costs that field and nothing else. A wrong type with one
+ * possible reading is recovered. Only `searchQueries` can stop the run, and only
+ * when it yields no query at all: at that point there is genuinely nothing to
+ * search, which is a real stop rather than a degradation.
+ */
+function reviewPlan(entry: unknown): PlanReview {
+  const defects: ValueDefect[] = [];
+  const raw = readEnvelope(entry, PLAN_SUBJECT, "plan", defects);
+  if (!raw) {
+    return { plan: null, defects, blocker: `the model returned ${describeValue(entry)} instead of a plan` };
+  }
+
+  const claimedQueries = raw.searchQueries;
+  reviewFields(PLAN_SUBJECT, raw, PLAN_PROPERTIES, defects);
+
+  // When no query survives, the blocker names what the model sent and is the one
+  // report of that loss, however the list arrived -- recovered entry by entry
+  // here or by reviewFields above. Reporting the same loss twice is its own kind
+  // of noise.
+  const searchQueries = stringList(raw.searchQueries, "searchQueries", defects);
+  if (!searchQueries.length) {
+    return {
+      plan: null,
+      defects: defects.filter((d) => d.field !== "searchQueries"),
+      blocker: missingQueriesReason(claimedQueries),
+    };
+  }
+
+  // criteria only sharpens the ranking prompt, which also carries the user's own
+  // request, so losing it degrades the run rather than ending it. Announce it,
+  // unless reviewFields already reported the value it arrived as.
+  const criteria = typeof raw.criteria === "string" ? raw.criteria.trim() : "";
+  if (!criteria && !defects.some((d) => d.field === "criteria")) {
+    defects.push({
+      subject: PLAN_SUBJECT,
+      field: "criteria",
+      detail: "the model described no ideal lead, so ranking runs on the request alone",
+      action: "ignored",
+    });
+  }
+
+  return {
+    plan: {
+      needClarification: raw.needClarification === true,
+      questions: stringList(raw.questions, "questions", defects),
+      searchQueries,
+      criteria,
+      altAngle: typeof raw.altAngle === "string" ? raw.altAngle : "",
+      location: typeof raw.location === "string" ? raw.location : "",
+    },
+    defects,
+    blocker: null,
+  };
+}
+
+// Say what was actually missing. "Planning failed" told the user nothing about
+// which part of the plan was unusable, or that the rest of it was fine.
+function missingQueriesReason(claimed: unknown): string {
+  if (claimed === undefined) return "the plan came back with no searchQueries at all";
+  if (Array.isArray(claimed) && !claimed.length) return "the plan came back with an empty searchQueries list";
+  return `no usable query survived in searchQueries (the model sent ${describeValue(claimed)})`;
+}
+
+// An entry with nothing in it costs that entry and nothing else -- but it is
+// still a loss, and a silent repair teaches nobody that the model is misbehaving,
+// so what was dropped is reported like every other degradation.
+function stringList(value: unknown, field: string, defects: ValueDefect[]): string[] {
+  if (!Array.isArray(value)) return [];
+  const kept: string[] = [];
+  const dropped: unknown[] = [];
+  for (const entry of value) {
+    if (typeof entry === "string" && entry.trim().length > 0) kept.push(entry);
+    else dropped.push(entry);
+  }
+  if (dropped.length) {
+    defects.push({
+      subject: PLAN_SUBJECT,
+      field,
+      detail: `${dropped.length} of ${value.length} ${field} entries were empty (${describeValue(dropped)}), leaving ${kept.length}`,
+      action: "ignored",
+    });
+  }
+  return kept;
+}
+
+// The name is what decides whether this record can be put on a card at all, so
+// it is read on the same single-reading rule as every field behind it: a lone
+// name in a list of one is that name. A name with no single reading leaves the
+// field as it arrived, and the caller drops the lead naming what it got.
+function readCompany(raw: Record<string, unknown>, defects: ValueDefect[]): string {
+  const claimed = raw.company;
+  if (typeof claimed === "string" && claimed.trim()) return claimed.trim();
+
+  const recovered = recoverValue(LEAD_PROPERTIES.company, claimed);
+  if (!recovered || typeof recovered.value !== "string" || !recovered.value.trim()) return "";
+
+  defects.push({
+    subject: recovered.value.trim(),
+    field: "company",
+    detail: `read company ${describeValue(claimed)} as ${describeValue(recovered.value)}`,
+    action: "coerced",
+  });
+  raw.company = recovered.value;
+  return recovered.value.trim();
+}
+
+/**
+ * Checks each lead on its own, field by field, through the shared mechanism in
+ * `src/lib/review.ts`.
  *
  * One bad field costs that field and nothing else. A wrong type with a single
  * possible reading is recovered; anything else is removed so persistLead's
@@ -536,15 +662,16 @@ function defectMessage(defect: LeadDefect): string {
  * unusable -- no company name to put on a card. A defect in one lead never
  * touches another lead in the same response.
  */
-function reviewLeads(entries: unknown[], candidateCount: number): { leads: RawLead[]; defects: LeadDefect[] } {
+function reviewLeads(entries: unknown[], candidateCount: number): { leads: RawLead[]; defects: ValueDefect[] } {
   const leads: RawLead[] = [];
-  const defects: LeadDefect[] = [];
+  const defects: ValueDefect[] = [];
 
   entries.forEach((entry, i) => {
     const position = `lead ${i + 1}`;
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    const raw = readEnvelope(entry, position, "lead", defects);
+    if (!raw) {
       defects.push({
-        lead: position,
+        subject: position,
         field: "lead",
         detail: `expected an object, got ${describeValue(entry)}`,
         action: "dropped",
@@ -552,50 +679,26 @@ function reviewLeads(entries: unknown[], candidateCount: number): { leads: RawLe
       return;
     }
 
-    const raw = { ...(entry as Record<string, unknown>) };
-    const company = typeof raw.company === "string" ? raw.company.trim() : "";
+    const claimedCompany = raw.company;
+    const company = readCompany(raw, defects);
     if (!company) {
       defects.push({
-        lead: position,
+        subject: position,
         field: "company",
-        detail: `no usable company name (got ${describeValue(raw.company)})`,
+        detail: `no usable company name (got ${describeValue(claimedCompany)})`,
         action: "dropped",
       });
       return;
     }
 
-    for (const [field, schema] of Object.entries(LEAD_PROPERTIES)) {
-      if (raw[field] === undefined) continue;
-      try {
-        validateAgainstSchema(raw[field], schema, field);
-      } catch {
-        const recovered = recoverValue(schema, raw[field]);
-        if (recovered) {
-          defects.push({
-            lead: company,
-            field,
-            detail: `read ${field} ${describeValue(raw[field])} as ${describeValue(recovered.value)}`,
-            action: "coerced",
-          });
-          raw[field] = recovered.value;
-        } else {
-          defects.push({
-            lead: company,
-            field,
-            detail: `expected ${expectedTypes(schema)}, got ${describeValue(raw[field])}`,
-            action: "ignored",
-          });
-          delete raw[field];
-        }
-      }
-    }
+    reviewFields(company, raw, LEAD_PROPERTIES, defects);
 
     // The schema this run sends permits null, so null is the model saying it
     // found no tie, not a defect. Any other unrecognised value is a claim about
     // a real relationship, and is reported rather than quietly becoming "none".
     if (raw.connection_type != null && !(CONNECTION_TYPES as string[]).includes(raw.connection_type as string)) {
       defects.push({
-        lead: company,
+        subject: company,
         field: "connection_type",
         detail: `expected one of ${CONNECTION_TYPES.join(", ")}, got ${describeValue(raw.connection_type)}`,
         action: "ignored",
@@ -609,7 +712,7 @@ function reviewLeads(entries: unknown[], candidateCount: number): { leads: RawLe
     const claimedSource = raw.source_index;
     if (claimedSource == null) {
       defects.push({
-        lead: company,
+        subject: company,
         field: "source_index",
         detail: "the model named no source, so this lead is kept without one",
         action: "ignored",
@@ -621,7 +724,7 @@ function reviewLeads(entries: unknown[], candidateCount: number): { leads: RawLe
       claimedSource > candidateCount
     ) {
       defects.push({
-        lead: company,
+        subject: company,
         field: "source_index",
         detail: `the model cited candidate ${describeValue(claimedSource)}, but only ${candidateCount} were researched`,
         action: "ignored",

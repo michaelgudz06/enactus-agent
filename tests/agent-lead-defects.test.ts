@@ -120,8 +120,8 @@ describe("a defective field costs that field only", () => {
     expect(out.statuses.some((s) => s.includes("reasoning") && s.includes("42"))).toBe(true);
   });
 
-  test("keeps a wrongly typed list from reaching the record", async () => {
-    const out = await runWithLeads([rawLead({ company: "Gabi & Jules", sponsorship_type: "in_kind" })]);
+  test("keeps a list that is the wrong type entirely out of the record", async () => {
+    const out = await runWithLeads([rawLead({ company: "Gabi & Jules", sponsorship_type: 42 })]);
 
     expect(out.leads).toHaveLength(1);
     expect(out.leads[0].sponsorship_type).toEqual([]);
@@ -190,6 +190,28 @@ describe("a recoverable value is read rather than thrown away", () => {
     expect(reported[0]).not.toContain("cited candidate");
   });
 
+  // A lone value where a list was asked for reads as a list of one, on the same
+  // rule that reads "88" as 88. Losing a usable sponsorship angle to a typo is
+  // the same defect as losing a usable score to one.
+  test("reads a single list entry sent as a bare string", async () => {
+    const out = await runWithLeads([rawLead({ company: "Gabi & Jules", sponsorship_type: "in_kind" })]);
+
+    expect(out.leads).toHaveLength(1);
+    expect(out.leads[0].sponsorship_type).toEqual(["in_kind"]);
+    expect(out.statuses.some((s) => s.includes("sponsorship_type"))).toBe(true);
+  });
+
+  // One unusable entry may not cost the entries beside it, exactly as one
+  // unusable lead may not cost the leads beside it.
+  test("keeps the usable entries of a partly malformed list", async () => {
+    const out = await runWithLeads([
+      rawLead({ company: "Gabi & Jules", sponsorship_type: ["monetary", 42, "in_kind"] }),
+    ]);
+
+    expect(out.leads[0].sponsorship_type).toEqual(["monetary", "in_kind"]);
+    expect(out.statuses.some((s) => s.includes("sponsorship_type"))).toBe(true);
+  });
+
   test("leaves a value with no single reading alone", async () => {
     const out = await runWithLeads([
       rawLead({ fit_score: "high" }),
@@ -200,6 +222,65 @@ describe("a recoverable value is read rather than thrown away", () => {
     expect(out.leads.map((l) => l.fit_score)).toEqual([null, null, null]);
     expect(out.statuses.filter((s) => s.includes("ignoring fit_score"))).toHaveLength(3);
   });
+});
+
+// What decides whether a lead survives is read on the same rule as the fields
+// behind it, so a single-reading slip cannot cost a fully researched lead.
+describe("a single-reading slip in what decides survival costs no lead", () => {
+  test("keeps a lead whose company arrived as a list of one", async () => {
+    const out = await runWithLeads([rawLead({ company: ["Gabi & Jules"], source_index: 2 })]);
+
+    expect(out.errors).toEqual([]);
+    expect(out.leads.map((l) => l.company)).toEqual(["Gabi & Jules"]);
+  });
+
+  test("keeps a lead that arrived wrapped in a list of one", async () => {
+    const out = await runWithLeads([[rawLead()]]);
+
+    expect(out.errors).toEqual([]);
+    expect(out.leads.map((l) => l.company)).toEqual(["Renaissance Coffee"]);
+  });
+
+  // Each recovery is whatever the run says that the same batch, arriving in the
+  // shape that was asked for, does not say.
+  test("announces the company it read", async () => {
+    const clean = await runWithLeads([rawLead({ company: "Gabi & Jules", source_index: 2 })]);
+    const recovered = await runWithLeads([rawLead({ company: ["Gabi & Jules"], source_index: 2 })]);
+
+    expect(recovered.leads.map((l) => l.company)).toEqual(clean.leads.map((l) => l.company));
+    expect(recovered.statuses.filter((s) => !clean.statuses.includes(s))).toHaveLength(1);
+  });
+
+  test("announces the lead it unwrapped", async () => {
+    const clean = await runWithLeads([rawLead()]);
+    const wrapped = await runWithLeads([[rawLead()]]);
+
+    expect(wrapped.leads.map((l) => l.company)).toEqual(clean.leads.map((l) => l.company));
+    expect(wrapped.statuses.filter((s) => !clean.statuses.includes(s))).toHaveLength(1);
+  });
+
+  // Recovery applies only where there is exactly one reading. Everything else is
+  // still a drop, and still costs only the record that carries it.
+  const NO_SINGLE_READING: Record<string, unknown> = {
+    "a blank company name": rawLead({ company: "   ", source_index: 2 }),
+    "a company that is a list of several": rawLead({ company: ["Gabi & Jules", "BAK'D Cookies"], source_index: 2 }),
+    "a company that is an empty list": rawLead({ company: [], source_index: 2 }),
+    "an entry that is a list of several leads": [
+      rawLead({ company: "Gabi & Jules", source_index: 2 }),
+      rawLead({ company: "BAK'D Cookies", source_index: 1 }),
+    ],
+    "an entry that is an empty list": [],
+    "an entry that is not an object": "Gabi & Jules",
+  };
+
+  for (const [shape, entry] of Object.entries(NO_SINGLE_READING)) {
+    test(`still drops ${shape}, and only that record`, async () => {
+      const out = await runWithLeads([rawLead(), entry]);
+
+      expect(out.leads.map((l) => l.company)).toEqual(["Renaissance Coffee"]);
+      expect(out.statuses.some((s) => /Dropped lead 2/.test(s))).toBe(true);
+    });
+  }
 });
 
 // Dropping is reserved for a record that cannot be put on a card at all.

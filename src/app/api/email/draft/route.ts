@@ -4,9 +4,27 @@ import { chatJSON } from "@/lib/llm";
 import { sanitizeEmail } from "@/lib/sanitize";
 import { Lead } from "@/lib/types";
 import { ENACTUS_PROJECTS } from "@/lib/enactus";
+import { ValueDefect, defectMessage, describeValue, readEnvelope, reviewFields } from "@/lib/review";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+// Checked field by field, on the same contract the plan and the leads use. A
+// subject that came back as the wrong type used to reach sanitizeEmail as a
+// non-string and throw out of the handler, so the request failed with an opaque
+// 500 and the body a human could have sent went with it.
+const DRAFT_PROPERTIES: Record<string, Record<string, unknown>> = {
+  subject: { type: "string" },
+  body: { type: "string" },
+};
+
+// A field that is a string and still says nothing costs the human the same
+// thing a wrong-typed one does: the subject below is the code's, not the
+// model's, and nobody may read it as something the model wrote.
+const EMPTY_DRAFT_DETAIL: Record<string, string> = {
+  subject: "the model wrote no subject line, so this draft carries a generated one",
+  body: "the model wrote no body, so this draft is yours to write",
+};
 
 const STYLE = `Write outreach emails that sound like a real person wrote them.
 Hard rules:
@@ -44,9 +62,9 @@ export async function POST(req: Request) {
     l.sponsorship_type?.length ? `Angle: ${l.sponsorship_type.join(", ")}` : "",
   ].filter(Boolean).join("\n");
 
-  let out: { subject: string; body: string };
+  let out: unknown;
   try {
-    out = await chatJSON<{ subject: string; body: string }>(
+    out = await chatJSON<unknown>(
       [
         { role: "system", content: `${goal}\n\n${STYLE}\n\nRespond ONLY as JSON: {"subject": string, "body": string}` },
         { role: "user", content: `Draft a first-touch outreach email to this lead.\n\n${facts}` },
@@ -57,8 +75,27 @@ export async function POST(req: Request) {
     return Response.json({ error: `Draft failed: ${(e as Error).message}` }, { status: 500 });
   }
 
-  const subject = sanitizeEmail(out.subject || `Enactus SFU x ${l.company}`);
-  const body = sanitizeEmail(out.body || "");
+  // A malformed subject costs the subject, never the body beside it.
+  const defects: ValueDefect[] = [];
+  // A draft wrapped in a list of one is still a draft. Anything else carries no
+  // single draft to keep, so it is a real stop.
+  const raw = readEnvelope(out, l.company, "draft", defects);
+  if (!raw) {
+    return Response.json({ error: `The model did not return a draft: got ${describeValue(out)}` }, { status: 502 });
+  }
+
+  reviewFields(l.company, raw, DRAFT_PROPERTIES, defects);
+
+  for (const [field, detail] of Object.entries(EMPTY_DRAFT_DETAIL)) {
+    const value = raw[field];
+    if (typeof value === "string" && value.trim()) continue;
+    if (defects.some((d) => d.field === field)) continue;
+    defects.push({ subject: l.company, field, detail, action: "ignored" });
+  }
+
+  const subject = sanitizeEmail(typeof raw.subject === "string" && raw.subject.trim() ? raw.subject : `Enactus SFU x ${l.company}`);
+  const body = sanitizeEmail(typeof raw.body === "string" ? raw.body : "");
+  const notes = defects.map((d) => defectMessage(d, "draft"));
 
   const { data: draft } = await supabaseAdmin
     .from(DRAFTS)
@@ -66,5 +103,5 @@ export async function POST(req: Request) {
     .select("*")
     .single();
 
-  return Response.json({ subject, body, draftId: draft?.id ?? null, to: l.contact_email });
+  return Response.json({ subject, body, notes, draftId: draft?.id ?? null, to: l.contact_email });
 }
