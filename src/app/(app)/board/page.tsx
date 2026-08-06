@@ -1,32 +1,65 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Search, RefreshCw } from "lucide-react";
 import { useApp } from "@/components/AppShell";
-import { Lead, Status, STATUS_COLUMNS } from "@/lib/types";
+import { Lead, Mode, Status, STATUS_COLUMNS } from "@/lib/types";
 import LeadCard from "@/components/LeadCard";
 import EmailModal from "@/components/EmailModal";
+
+/** One read of `/api/leads`, tagged with the mode it was read for. */
+type LeadsResult = { mode: Mode; leads: Lead[]; warning?: string };
+
+/**
+ * The board is loading while the leads on screen are not the ones the current
+ * mode asked for, or while a refresh is in flight. That is a fact about this
+ * render, so it is derived here rather than announced by an effect a commit
+ * later — which is what `setLoading(true)` inside the mount effect was doing.
+ */
+export function boardIsLoading(mode: Mode, loadedMode: Mode | null, refreshing: boolean) {
+  return refreshing || loadedMode !== mode;
+}
 
 export default function BoardPage() {
   const { mode } = useApp();
   const [leads, setLeads] = useState<Lead[]>([]);
-  const [loading, setLoading] = useState(true);
+  // The mode `leads` was read for; null until the first read lands.
+  const [loadedMode, setLoadedMode] = useState<Mode | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [query, setQuery] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
   const [overCol, setOverCol] = useState<Status | null>(null);
   const [emailLead, setEmailLead] = useState<Lead | null>(null);
   const [warning, setWarning] = useState("");
 
-  async function load() {
-    setLoading(true);
+  const loading = boardIsLoading(mode, loadedMode, refreshing);
+
+  const readLeads = useCallback(async (): Promise<LeadsResult> => {
     const res = await fetch(`/api/leads?mode=${mode}`);
     const data = await res.json();
-    setLeads(data.leads || []);
-    if (data.warning) setWarning(data.warning);
-    setLoading(false);
-  }
+    return { mode, leads: data.leads || [], warning: data.warning };
+  }, [mode]);
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [mode]);
+  // Reading and applying are separate so the effect can drop a response that a
+  // mode switch has already superseded: a stale result would otherwise land as
+  // the wrong mode's leads and leave the board reading as loading forever.
+  const applyLeads = useCallback((result: LeadsResult) => {
+    setLeads(result.leads);
+    if (result.warning) setWarning(result.warning);
+    setLoadedMode(result.mode);
+  }, []);
+
+  useEffect(() => {
+    let live = true;
+    readLeads().then((result) => { if (live) applyLeads(result); });
+    return () => { live = false; };
+  }, [readLeads, applyLeads]);
+
+  async function refresh() {
+    setRefreshing(true);
+    applyLeads(await readLeads());
+    setRefreshing(false);
+  }
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -69,7 +102,7 @@ export default function BoardPage() {
         </div>
         <div className="flex items-center gap-3">
           <span className="text-xs" style={{ color: "var(--faint)" }}>{filtered.length} {filtered.length === 1 ? "lead" : "leads"}</span>
-          <button onClick={load} className="p-1.5 rounded-lg hover:bg-[var(--surface3)]" style={{ color: "var(--muted)" }} title="Refresh">
+          <button onClick={refresh} className="p-1.5 rounded-lg hover:bg-[var(--surface3)]" style={{ color: "var(--muted)" }} title="Refresh">
             <RefreshCw size={15} className={loading ? "animate-spin" : ""} />
           </button>
         </div>

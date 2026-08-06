@@ -4,8 +4,52 @@ import { useEffect, useState, useCallback } from "react";
 import { X, RefreshCw, Copy, Check, Mail, Send } from "lucide-react";
 import { Lead } from "@/lib/types";
 
+/**
+ * One draft the route returned, tagged with the lead it was drafted for. A
+ * malformed `notes` costs `notes` and nothing else, which is the same rule the
+ * draft route applies to model output.
+ */
+export type DraftResult =
+  | { leadId: string; ok: true; subject: string; body: string; notes: string[]; to: string | null }
+  | { leadId: string; ok: false; error: string };
+
+export async function requestDraft(leadId: string): Promise<DraftResult> {
+  try {
+    const res = await fetch("/api/email/draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ leadId }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Failed to draft");
+    return {
+      leadId,
+      ok: true,
+      subject: data.subject,
+      body: data.body,
+      notes: Array.isArray(data.notes) ? data.notes : [],
+      to: data.to || null,
+    };
+  } catch (e) {
+    return { leadId, ok: false, error: (e as Error).message };
+  }
+}
+
+/**
+ * The modal is loading until the draft on screen is the one this lead asked
+ * for, or while a regenerate is in flight. Deriving it from the lead the draft
+ * belongs to is what the mount effect's `setLoading(true)` stood in for, and it
+ * keeps the skeleton up when the modal is handed a different lead.
+ */
+export function draftIsLoading(leadId: string, draftedFor: string | null, regenerating: boolean) {
+  return regenerating || draftedFor !== leadId;
+}
+
 export default function EmailModal({ lead, onClose }: { lead: Lead; onClose: () => void }) {
-  const [loading, setLoading] = useState(true);
+  // The lead the draft on screen was fetched for; null until the first one
+  // lands. A failed draft still counts: the error belongs to that lead.
+  const [draftedFor, setDraftedFor] = useState<string | null>(null);
+  const [regenerating, setRegenerating] = useState(false);
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [to, setTo] = useState<string | null>(lead.contact_email);
@@ -17,32 +61,34 @@ export default function EmailModal({ lead, onClose }: { lead: Lead; onClose: () 
   // than it looks.
   const [notes, setNotes] = useState<string[]>([]);
 
-  const generate = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    setNotes([]);
-    try {
-      const res = await fetch("/api/email/draft", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ leadId: lead.id }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to draft");
-      setSubject(data.subject);
-      setBody(data.body);
-      if (Array.isArray(data.notes)) setNotes(data.notes);
-      if (data.to) setTo(data.to);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setLoading(false);
+  const loading = draftIsLoading(lead.id, draftedFor, regenerating);
+
+  const applyDraft = useCallback((result: DraftResult) => {
+    if (result.ok) {
+      setSubject(result.subject);
+      setBody(result.body);
+      setNotes(result.notes);
+      if (result.to) setTo(result.to);
+      setError("");
+    } else {
+      setError(result.error);
     }
-  }, [lead.id]);
+    setDraftedFor(result.leadId);
+  }, []);
 
   useEffect(() => {
-    generate();
-  }, [generate]);
+    let live = true;
+    requestDraft(lead.id).then((result) => { if (live) applyDraft(result); });
+    return () => { live = false; };
+  }, [lead.id, applyDraft]);
+
+  async function regenerate() {
+    setRegenerating(true);
+    setError("");
+    setNotes([]);
+    applyDraft(await requestDraft(lead.id));
+    setRegenerating(false);
+  }
 
   function copy() {
     navigator.clipboard.writeText(`Subject: ${subject}\n\n${body}`);
@@ -147,7 +193,7 @@ export default function EmailModal({ lead, onClose }: { lead: Lead; onClose: () 
         </div>
 
         <div className="flex items-center gap-2 px-5 py-3.5 border-t flex-wrap" style={{ borderColor: "var(--border)" }}>
-          <button onClick={generate} disabled={loading} className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium disabled:opacity-50" style={{ background: "var(--surface3)", color: "var(--text)" }}>
+          <button onClick={regenerate} disabled={loading} className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium disabled:opacity-50" style={{ background: "var(--surface3)", color: "var(--text)" }}>
             <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> Regenerate
           </button>
           <button onClick={copy} className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium" style={{ background: "var(--surface3)", color: "var(--text)" }}>
