@@ -133,9 +133,36 @@ guessing a URL for it. A row without real provenance is not a row. The manifest
 whose archive query is rate-limited does not re-enumerate that source: throwing
 the old manifest away would strip the provenance from pages already cached, and
 the roster would quietly come out short. For the same reason `build.ts` **stops
-without writing** if it finds a cached page the manifest does not know about,
-and exits non-zero if a source parsed to no names at all. It leaves the
-committed CSV alone rather than replacing it with a smaller one.
+without writing** if it finds a cached page the manifest does not know about, or
+if a source parsed to no names at all. It leaves the committed CSV alone rather
+than replacing it with a smaller one.
+
+### When a source parses to nothing
+
+That is the shape of the worst failure available here: the club redesigns a page,
+the parser for it matches nothing, and the rebuild drops that page's whole cohort
+while every remaining row still looks right. So it is a hard failure — the run
+reports the source, refuses to write, and exits non-zero. Fix the parser.
+
+A page the club has genuinely retired is the one case where empty is the truth,
+and it has an answer that is not "edit the build script": name the source on
+**`expected-empty-sources.txt`** in this directory, one per line, `#` for a
+comment, using the source key exactly as the run's `sources:` line prints it
+(`competition`, `team (live)`, `program-managers`). It ships with nothing
+exempted.
+
+The list fails closed and stays honest:
+
+- **Only the named sources are exempt.** Any other source that comes back empty
+  is still a hard failure. There is no flag that turns the check off, because a
+  flag is what someone reaches for at 2am and then everything is exempt.
+- **A missing list is not an error**, unlike `removed.txt`. Absence means no
+  source is expected to be empty, which is already the strictest reading. (The
+  asymmetry is deliberate: a missing removal list could silently reinstate
+  someone who asked to be forgotten, so that one has to fail loudly.)
+- **Every exemption the build uses is printed**, naming the source, on the run
+  that uses it. So is an entry that has gone stale — one whose source no longer
+  runs, or which has started producing names again.
 
 `.cache/alumni-roster/` is gitignored, and must stay that way: the raw pages
 carry the role email addresses, phone numbers and employer detail that this file
@@ -251,7 +278,9 @@ the columns sum to more than 199.
 
 **This table is generated, not maintained.** `build.ts` prints exactly these
 counts on its `coverage:` line at the end of every run; transcribe them rather
-than editing a number here, or the file's own gap report drifts from the file.
+than editing a number here. `tests/alumni-roster.test.ts` recomputes the table
+from the committed CSV and fails if the two disagree, so a rebuild nobody
+transcribed cannot leave the file's own gap report quietly wrong.
 
 These are the gaps we know about:
 

@@ -21,6 +21,7 @@ import {
   findNearDuplicates,
   mergeSightings,
   parseRemovalList,
+  parseSourceList,
   parseAlumniBusinessOwners,
   parseCompetitionCoaches,
   parseNextTeam,
@@ -230,8 +231,6 @@ const kept = applyRemovals(sightings, removed);
 const suppressed = sightings.length - kept.length;
 
 const rows = mergeSightings(kept);
-mkdirSync(path.dirname(outFile), { recursive: true });
-writeFileSync(outFile, HEADER + toCsv(rows));
 
 const count = (level: Confidence) => rows.filter((r) => r.confidence === level).length;
 const coverage = coverageByYear(rows);
@@ -247,15 +246,6 @@ console.log(
   `coverage:  ${coverage.years.map(([year, people]) => `${year}=${people}`).join(", ")}` +
     (coverage.undated ? `, no year=${coverage.undated}` : ""),
 );
-console.log(`wrote:     ${outFile}`);
-
-let incomplete = false;
-for (const [source, found] of yielded) {
-  if (found === 0) {
-    incomplete = true;
-    console.warn(`\nsource yielded no names: ${source}`);
-  }
-}
 
 const nearDuplicates = findNearDuplicates(rows);
 if (nearDuplicates.length) {
@@ -266,6 +256,42 @@ if (nearDuplicates.length) {
 }
 
 // A near-duplicate is a known property of the club's own pages. A source that
-// parsed to nothing is not: the file was written, but it is short of what the
-// cache should have held, and the exit code has to say so.
-if (incomplete) process.exit(1);
+// parsed to nothing is not: it is a redesigned page taking its whole cohort with
+// it, and a roster missing that cohort still looks perfectly plausible. Only the
+// sources named on the list below are allowed to come back empty, and a missing
+// list exempts nobody — the strictest reading, which is the safe one here.
+const expectedEmptyPath = path.join(path.dirname(outFile), "expected-empty-sources.txt");
+const expectedEmpty = existsSync(expectedEmptyPath)
+  ? parseSourceList(readFileSync(expectedEmptyPath, "utf8"))
+  : new Set<string>();
+
+const empty = [...yielded].filter(([, found]) => found === 0).map(([source]) => source);
+const unexpectedlyEmpty = empty.filter((source) => !expectedEmpty.has(source));
+
+for (const source of empty) {
+  if (expectedEmpty.has(source)) {
+    console.warn(`\nsource yielded no names, and ${expectedEmptyPath} says to expect that: ${source}`);
+  }
+}
+for (const source of expectedEmpty) {
+  if (!yielded.has(source)) {
+    console.warn(`\nstale entry on ${expectedEmptyPath}: no source called ${source} ran at all`);
+  } else if ((yielded.get(source) ?? 0) > 0) {
+    console.warn(`\nstale entry on ${expectedEmptyPath}: ${source} is producing names again`);
+  }
+}
+
+if (unexpectedlyEmpty.length) {
+  console.error(
+    `\nsource(s) that parsed to no names: ${unexpectedlyEmpty.join(", ")}\n` +
+      `A page whose layout changed parses to nothing and takes its whole cohort with it,\n` +
+      `and the smaller roster that produces looks perfectly plausible. ${outFile} was\n` +
+      `left untouched. Fix the parser — or, if the club has retired the page for good,\n` +
+      `name the source on ${expectedEmptyPath} and re-run.`,
+  );
+  process.exit(1);
+}
+
+mkdirSync(path.dirname(outFile), { recursive: true });
+writeFileSync(outFile, HEADER + toCsv(rows));
+console.log(`wrote:     ${outFile}`);

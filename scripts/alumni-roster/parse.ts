@@ -425,6 +425,20 @@ export function parseRemovalList(contents: string): Set<string> {
 }
 
 /**
+ * Sources the club has retired for good, one per line, `#` for a comment. These
+ * are the source keys the build reports rather than anything a person wrote, so
+ * unlike a removal request they are matched exactly.
+ */
+export function parseSourceList(contents: string): Set<string> {
+  const sources = new Set<string>();
+  for (const line of contents.split("\n")) {
+    const source = line.split("#")[0].trim();
+    if (source) sources.add(source);
+  }
+  return sources;
+}
+
+/**
  * A removal has to survive the next rebuild, or it is not a removal — deleting
  * the row alone would put the person back the moment anyone regenerates the
  * file. This is applied to sightings, before anything is merged or written.

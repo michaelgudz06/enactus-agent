@@ -54,11 +54,25 @@ const CACHED_HTML = `
   <h3> <!-- -->Naia Wong<!-- --> </h3><p class="text-white opacity-[70%]">President</p>
   <h3> <!-- -->Caleb Wu<!-- --> </h3><p class="text-white opacity-[70%]">Director of Web &amp; Tech</p>`;
 
+/** A competition page the club redesigned: it downloads fine and holds no roster. */
+const REDESIGNED_PAGE = "competition-20260114044549.html";
+const REDESIGNED_URL =
+  "https://web.archive.org/web/20260114044549id_/https://www.enactussfu.ca/competition";
+const REDESIGNED_HTML = `<h5 class="text-primary-yellow"> 2026 </h5><h1> Regionals </h1>`;
+
 function runBuild({
   removals = "# nobody yet\n",
   unrecordedPage = false,
+  emptySource = false,
+  expectedEmpty = null,
   seed = null,
-}: { removals?: string | null; unrecordedPage?: boolean; seed?: string | null } = {}) {
+}: {
+  removals?: string | null;
+  unrecordedPage?: boolean;
+  emptySource?: boolean;
+  expectedEmpty?: string | null;
+  seed?: string | null;
+} = {}) {
   const root = mkdtempSync(path.join(tmpdir(), "alumni-roster-"));
   const cacheDir = path.join(root, "cache");
   const outDir = path.join(root, "alumni");
@@ -66,9 +80,17 @@ function runBuild({
   mkdirSync(outDir);
 
   writeFileSync(path.join(cacheDir, CACHED_PAGE), CACHED_HTML);
-  writeFileSync(path.join(cacheDir, "manifest.tsv"), `${CACHED_PAGE}\t${CACHED_URL}\n`);
+  let manifest = `${CACHED_PAGE}\t${CACHED_URL}\n`;
+  if (emptySource) {
+    writeFileSync(path.join(cacheDir, REDESIGNED_PAGE), REDESIGNED_HTML);
+    manifest += `${REDESIGNED_PAGE}\t${REDESIGNED_URL}\n`;
+  }
+  writeFileSync(path.join(cacheDir, "manifest.tsv"), manifest);
   if (unrecordedPage) writeFileSync(path.join(cacheDir, "team-20260301000000.html"), CACHED_HTML);
   if (removals !== null) writeFileSync(path.join(outDir, "removed.txt"), removals);
+  if (expectedEmpty !== null) {
+    writeFileSync(path.join(outDir, "expected-empty-sources.txt"), expectedEmpty);
+  }
 
   const outFile = path.join(outDir, "past-executives.csv");
   if (seed !== null) writeFileSync(outFile, seed);
@@ -739,5 +761,130 @@ describe("building the roster from a cache", () => {
 
   test("the coverage report the README quotes is printed by the run itself", () => {
     expect(runBuild().stdout).toMatch(/coverage:\s+2025-26=2/);
+  });
+});
+
+describe("a source that parses to no names", () => {
+  test("the roster already committed is not replaced by the smaller one", () => {
+    const run = runBuild({ emptySource: true, seed: "the roster from the last good build\n" });
+
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("competition");
+    expect(readFileSync(run.outFile, "utf8")).toBe("the roster from the last good build\n");
+  });
+
+  test("with no exemption list at all it is still a failure, not a pass", () => {
+    const run = runBuild({ emptySource: true, expectedEmpty: null });
+
+    expect(run.status).not.toBe(0);
+    expect(existsSync(run.outFile)).toBe(false);
+  });
+
+  test("a source named on the exemption list is allowed through, and reported", () => {
+    const run = runBuild({ emptySource: true, expectedEmpty: "competition\n" });
+
+    expect(run.status).toBe(0);
+    expect(run.stderr).toContain("competition");
+    expect(readFileSync(run.outFile, "utf8")).toContain("Naia Wong");
+  });
+
+  test("exempting one source does not exempt the others", () => {
+    const run = runBuild({ emptySource: true, expectedEmpty: "program-managers\n" });
+
+    expect(run.status).not.toBe(0);
+    expect(existsSync(run.outFile)).toBe(false);
+  });
+
+  test("an entry for a source that did not run is reported as stale", () => {
+    const run = runBuild({ expectedEmpty: "# retired years ago\nprogram-managers\n" });
+
+    expect(run.status).toBe(0);
+    expect(run.stderr).toMatch(/stale entry[\s\S]*program-managers/);
+  });
+
+  test("an entry for a source that is producing names again is reported as stale", () => {
+    const run = runBuild({ expectedEmpty: "team\n" });
+
+    expect(run.status).toBe(0);
+    expect(run.stderr).toMatch(/stale entry[\s\S]*producing names again/);
+  });
+});
+
+describe("the committed roster and the README that describes it", () => {
+  /**
+   * past-executives.csv is generated output and the README's coverage table is a
+   * claim about it. Recomputing one from the other is the only thing keeping the
+   * file's own gap report honest once someone rebuilds the roster.
+   */
+  const repoFile = (name: string) => fileURLToPath(new URL(`../${name}`, import.meta.url));
+
+  const committedRows = () => {
+    const text = readFileSync(repoFile("config/alumni/past-executives.csv"), "utf8");
+    const body = text
+      .split("\n")
+      .filter((line) => !line.startsWith("#"))
+      .join("\n");
+
+    const records: string[][] = [];
+    let field = "";
+    let record: string[] = [];
+    let quoted = false;
+    for (let i = 0; i < body.length; i += 1) {
+      const char = body[i];
+      if (quoted) {
+        if (char !== '"') field += char;
+        else if (body[i + 1] === '"') (field += '"'), (i += 1);
+        else quoted = false;
+      } else if (char === '"') quoted = true;
+      else if (char === ",") (record.push(field), (field = ""));
+      else if (char === "\n") (record.push(field), records.push(record), (record = []), (field = ""));
+      else field += char;
+    }
+    if (field || record.length) (record.push(field), records.push(record));
+
+    const [header, ...rest] = records;
+    expect(header).toEqual([
+      "name",
+      "role",
+      "years_active",
+      "source_url",
+      "captured_at",
+      "confidence",
+    ]);
+    return rest
+      .filter((r) => r.length === 6)
+      .map(([name, role, yearsActive, sourceUrl, capturedAt, confidence]) => ({
+        name,
+        role,
+        yearsActive,
+        sourceUrl,
+        capturedAt,
+        confidence: confidence as "high" | "medium" | "low",
+      }));
+  };
+
+  const readmeCoverage = () => {
+    const readme = readFileSync(repoFile("config/alumni/README.md"), "utf8");
+    const table = /## Gaps in the record[\s\S]*?```\n([\s\S]*?)```/.exec(readme)?.[1];
+    expect(table).toBeDefined();
+
+    const counts: Array<[string, number]> = [];
+    for (const [, year, people] of table!.matchAll(/(\d{4}(?:-\d{2})?)\s+(\d+)/g)) {
+      counts.push([year, Number(people)]);
+    }
+    return counts.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  };
+
+  test("the coverage table is what the committed CSV actually contains", () => {
+    expect(readmeCoverage()).toEqual(coverageByYear(committedRows()).years);
+  });
+
+  test("every person in the file reaches the coverage report, dated or not", () => {
+    const rows = committedRows();
+    const coverage = coverageByYear(rows);
+    const dated = rows.filter((row) => row.yearsActive !== "").length;
+
+    expect(dated + coverage.undated).toBe(rows.length);
+    expect(coverage.undated).toBe(6);
   });
 });

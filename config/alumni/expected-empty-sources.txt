@@ -1,0 +1,17 @@
+# Sources the club has retired, which are allowed to parse to no names.
+#
+# One source per line. `#` starts a comment. An entry is a source key exactly as
+# scripts/alumni-roster/build.ts prints it on its `sources:` line — `competition`,
+# `team (live)`, `program-managers`, and so on.
+#
+# A source that yields no names is normally a hard failure: a club page whose
+# layout changed parses to nothing and takes its whole cohort with it, and the
+# roster that results looks perfectly plausible. build.ts refuses to write in
+# that case and leaves past-executives.csv exactly as it was.
+#
+# Name a source here only when the club has taken the page down for good and it
+# is never coming back. Everything else is a parser to fix, not an entry to add.
+# Nothing on this list is silent: every exemption the build actually uses is
+# reported on the run, as is an entry whose source has stopped being empty.
+#
+# No source is exempt. Adding one is a decision, not a workaround.
