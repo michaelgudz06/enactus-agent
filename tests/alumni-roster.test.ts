@@ -26,12 +26,14 @@ import {
   parseEmployeeCards,
   parseNextTeam,
   parseRemovalList,
+  parseSourceRegistry,
   parseSpotlightName,
   parseSquarespaceTeam,
   parseStrongThenRole,
   parseWixTeam,
   parseWixTeamYear,
   parseWordpressRoster,
+  sourceOfCacheFile,
   toCsv,
   type Sighting,
 } from "../scripts/alumni-roster/parse.ts";
@@ -60,17 +62,29 @@ const REDESIGNED_URL =
   "https://web.archive.org/web/20260114044549id_/https://www.enactussfu.ca/competition";
 const REDESIGNED_HTML = `<h5 class="text-primary-yellow"> 2026 </h5><h1> Regionals </h1>`;
 
+const STRAY_PAGE = "faculty-advisors-20130205151700.html";
+const STRAY_ROW = "faculty\tarchived\tfaculty-advisors\tenactussfu.com/faculty-advisors/\thttp://enactussfu.com/faculty-advisors/";
+const TEAM_ROW = "team\tarchived\tteam\twww.enactussfu.ca/team\thttps://www.enactussfu.ca/team";
+const COMPETITION_ROW =
+  "competition\tarchived\tcompetition\twww.enactussfu.ca/competition\thttps://www.enactussfu.ca/competition";
+
 function runBuild({
   removals = "# nobody yet\n",
   unrecordedPage = false,
   emptySource = false,
+  strayPage = false,
   expectedEmpty = null,
+  registry = null,
+  registryMissing = false,
   seed = null,
 }: {
   removals?: string | null;
   unrecordedPage?: boolean;
   emptySource?: boolean;
+  strayPage?: boolean;
   expectedEmpty?: string | null;
+  registry?: string | null;
+  registryMissing?: boolean;
   seed?: string | null;
 } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), "alumni-roster-"));
@@ -85,12 +99,92 @@ function runBuild({
     writeFileSync(path.join(cacheDir, REDESIGNED_PAGE), REDESIGNED_HTML);
     manifest += `${REDESIGNED_PAGE}\t${REDESIGNED_URL}\n`;
   }
+  if (strayPage) {
+    // Downloaded, recorded, readable — and belonging to no declared source.
+    writeFileSync(path.join(cacheDir, STRAY_PAGE), CACHED_HTML);
+    manifest += `${STRAY_PAGE}\thttps://web.archive.org/web/20130205151700id_/http://enactussfu.com/faculty-advisors/\n`;
+  }
   writeFileSync(path.join(cacheDir, "manifest.tsv"), manifest);
   if (unrecordedPage) writeFileSync(path.join(cacheDir, "team-20260301000000.html"), CACHED_HTML);
   if (removals !== null) writeFileSync(path.join(outDir, "removed.txt"), removals);
   if (expectedEmpty !== null) {
     writeFileSync(path.join(outDir, "expected-empty-sources.txt"), expectedEmpty);
   }
+
+  // The registry declares exactly the pages this cache holds, so the fixture
+  // exercises the gates rather than tripping over sources it never fetched.
+  const registryPath = path.join(root, "sources.tsv");
+  const rows = registry ?? [TEAM_ROW, ...(emptySource ? [COMPETITION_ROW] : [])].join("\n");
+  if (!registryMissing) writeFileSync(registryPath, `# fixture registry\n${rows}\n`);
+
+  const outFile = path.join(outDir, "past-executives.csv");
+  if (seed !== null) writeFileSync(outFile, seed);
+
+  const run = spawnSync(
+    process.execPath,
+    ["--experimental-strip-types", BUILD_SCRIPT, cacheDir, outFile, registryPath],
+    { encoding: "utf8", env: { ...process.env, ROSTER_CAPTURED_AT: "2026-08-06" } },
+  );
+
+  return { ...run, outFile };
+}
+
+/** Entity-encoded JSON on an attribute, the way Squarespace serves its cards. */
+const squarespaceContext = (payload: unknown) =>
+  JSON.stringify(payload).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+
+/**
+ * One cached page per source the committed registry declares, so a run over
+ * this cache exercises every declared source at once: each has to find a parser
+ * and each has to yield a name.
+ */
+const PAGE_FOR_PREFIX: Record<string, string> = {
+  exec: `<li class="mk-employee-item"><div class="team-info-wrapper">
+    <span class="team-member-name">Rajin Shokar</span><span class="team-member-position">President</span>
+    </div></li>`,
+  pm: `<li class="mk-employee-item"><div class="team-info-wrapper">
+    <span class="team-member-name">Adam Paroo</span><span class="team-member-position">Soap for Hope Program Manager</span>
+    </div></li>`,
+  projectpm: `<li class="mk-employee-item"><div class="team-info-wrapper">
+    <span class="team-member-name">Patrick Juan</span><span class="team-member-position">Startup Homes Project Manager</span>
+    </div></li>`,
+  alumni: `<h2>Enactus SFU Alumni Business Owners</h2><ul>
+    <li><strong>Minna Van</strong> &#8211; President 2004/2005. Co-Founder of Atomic Media</li></ul>`,
+  ourteam: `<p class="font_5"><span>MEET OUR 2022/2023 TEAM</span></p>
+    <p class="font_5"><span>ANDREW MA</span></p><p class="font_8"><span>President</span></p>`,
+  theteam: `<ul data-current-context="${squarespaceContext({
+    userItems: [{ title: "Sandra Chen", description: "<p>President</p>" }],
+  })}" >`,
+  team: CACHED_HTML,
+  competition: `<h5 class="text-primary-yellow"> 2026 </h5><h1> Regionals </h1>
+    <h3>Coaches: Brandon Xu, Eva Yueng</h3>`,
+  spotlight: `<title>Community Spotlight: Ivy So - SIFE Alumni | Enactus SFU</title>`,
+  "live-team": CACHED_HTML,
+  "live-competition": `<h5 class="text-primary-yellow"> 2025 </h5><h1> Nationals </h1>
+    <h3>Coaches: Sam Thiara, Vinay Aery</h3>`,
+};
+
+const REGISTRY_PATH = fileURLToPath(new URL("../scripts/alumni-roster/sources.tsv", import.meta.url));
+const declaredSources = () => parseSourceRegistry(readFileSync(REGISTRY_PATH, "utf8"));
+
+/** A cache holding one page for every declared source, minus those named. */
+function runBuildOverEveryDeclaredSource({ without = [] as string[], seed = null as string | null }) {
+  const root = mkdtempSync(path.join(tmpdir(), "alumni-roster-full-"));
+  const cacheDir = path.join(root, "cache");
+  const outDir = path.join(root, "alumni");
+  mkdirSync(cacheDir);
+  mkdirSync(outDir);
+
+  let manifest = "";
+  for (const source of declaredSources()) {
+    if (without.includes(source.key)) continue;
+    const file =
+      source.kind === "live" ? `${source.prefix}.html` : `${source.prefix}-20260114044549.html`;
+    writeFileSync(path.join(cacheDir, file), PAGE_FOR_PREFIX[source.prefix] ?? "");
+    manifest += `${file}\thttps://web.archive.org/web/20260114044549id_/https://example.invalid/${source.prefix}\n`;
+  }
+  writeFileSync(path.join(cacheDir, "manifest.tsv"), manifest);
+  writeFileSync(path.join(outDir, "removed.txt"), "# nobody yet\n");
 
   const outFile = path.join(outDir, "past-executives.csv");
   if (seed !== null) writeFileSync(outFile, seed);
@@ -885,6 +979,185 @@ describe("the committed roster and the README that describes it", () => {
     const dated = rows.filter((row) => row.yearsActive !== "").length;
 
     expect(dated + coverage.undated).toBe(rows.length);
-    expect(coverage.undated).toBe(6);
+  });
+
+  /** The sentences around the table make the same claim in prose. */
+  const readmeClaims = () => {
+    const readme = readFileSync(repoFile("config/alumni/README.md"), "utf8");
+    const headline = /([\d,]+) people,\s*\nacross (\d+) of the \d+ years/.exec(readme);
+    const undated = /\n(\w+) more people carry no year at all/.exec(readme);
+    expect(headline).not.toBeNull();
+    expect(undated).not.toBeNull();
+
+    const words: Record<string, number> = {
+      No: 0, One: 1, Two: 2, Three: 3, Four: 4, Five: 5, Six: 6, Seven: 7, Eight: 8, Nine: 9, Ten: 10,
+    };
+    const spelled = undated![1];
+    expect(Object.keys(words)).toContain(spelled);
+
+    return {
+      people: Number(headline![1].replace(/,/g, "")),
+      years: Number(headline![2]),
+      undated: words[spelled],
+    };
+  };
+
+  test("the headline the section opens with is the file it describes", () => {
+    const rows = committedRows();
+    const coverage = coverageByYear(rows);
+
+    expect(readmeClaims()).toEqual({
+      people: rows.length,
+      years: coverage.years.length,
+      undated: coverage.undated,
+    });
+  });
+});
+
+describe("the real snapshot cache, when there is one", () => {
+  /**
+   * The cache is gitignored, so this runs only on a machine that has fetched
+   * one. It records what a real fetch produces for the live competition page,
+   * which no synthetic fixture can settle: if that source were legitimately
+   * empty, the zero-yield gate would refuse to rebuild the committed roster.
+   */
+  const cacheDir = fileURLToPath(new URL("../.cache/alumni-roster", import.meta.url));
+  const livePage = path.join(cacheDir, "live-competition.html");
+  const cached = existsSync(livePage);
+
+  test.skipIf(!cached)("the live competition page still names coaches", () => {
+    const coaches = parseCompetitionCoaches(readFileSync(livePage, "utf8"));
+
+    expect(coaches.length).toBeGreaterThan(0);
+    for (const coach of coaches) expect(coach.role).toBe("Competition coach");
+  });
+});
+
+describe("the source registry", () => {
+  const rows = [
+    "executives\tarchived\texec\tenactussfu.com/executives/\thttp://enactussfu.com/executives/",
+    "team (live)\tlive\tlive-team\t-\thttps://www.enactussfu.ca/team",
+  ].join("\n");
+
+  test("reads a row per source and skips comments and blank lines", () => {
+    expect(parseSourceRegistry(`# what we fetch\n\n${rows}\n`)).toEqual([
+      {
+        key: "executives",
+        kind: "archived",
+        prefix: "exec",
+        cdxPattern: "enactussfu.com/executives/",
+        url: "http://enactussfu.com/executives/",
+      },
+      {
+        key: "team (live)",
+        kind: "live",
+        prefix: "live-team",
+        cdxPattern: "-",
+        url: "https://www.enactussfu.ca/team",
+      },
+    ]);
+  });
+
+  test.each([
+    ["executives\tarchived\texec\tpattern", "a row missing a column"],
+    ["executives\tsomehow\texec\tpattern\turl", "a kind neither script can act on"],
+    ["a\tarchived\tx\tp\tu\nb\tarchived\tx\tp\tu", "two sources claiming one cache prefix"],
+    ["a\tarchived\tx\tp\tu\na\tlive\ty\tp\tu", "the same key twice"],
+    ["# only comments\n", "a registry declaring nothing"],
+  ])("throws on %s", (contents) => {
+    expect(() => parseSourceRegistry(contents)).toThrow();
+  });
+
+  test("a cached page is claimed by the source whose prefix it carries", () => {
+    const sources = parseSourceRegistry(rows);
+    expect(sourceOfCacheFile("exec-20130205151700.html", sources)?.key).toBe("executives");
+    expect(sourceOfCacheFile("live-team.html", sources)?.key).toBe("team (live)");
+  });
+
+  test("a page no source claims is claimed by nothing rather than the nearest match", () => {
+    const sources = parseSourceRegistry(rows);
+    expect(sourceOfCacheFile("executives.html", sources)).toBeNull();
+    expect(sourceOfCacheFile("live-team-20260114044549.html", sources)).toBeNull();
+    expect(sourceOfCacheFile("faculty-20130205151700.html", sources)).toBeNull();
+  });
+
+  test("the committed registry is well formed and declares each key and prefix once", () => {
+    const sources = declaredSources();
+    expect(sources.length).toBeGreaterThan(0);
+    expect(new Set(sources.map((s) => s.key)).size).toBe(sources.length);
+    expect(new Set(sources.map((s) => s.prefix)).size).toBe(sources.length);
+    for (const source of sources) {
+      expect(["archived", "spotlight", "live"]).toContain(source.kind);
+    }
+  });
+});
+
+describe("every source the registry declares", () => {
+  test("has a parser in the build and yields names through it", () => {
+    const run = runBuildOverEveryDeclaredSource({});
+
+    expect(run.stderr).not.toContain("cannot parse");
+    expect(run.status).toBe(0);
+
+    const reported = /sources:\s+(.*)/.exec(run.stdout)?.[1] ?? "";
+    const counts = new Map(
+      reported.split(", ").map((pair) => {
+        const at = pair.lastIndexOf("=");
+        return [pair.slice(0, at), Number(pair.slice(at + 1))] as const;
+      }),
+    );
+    for (const source of declaredSources()) {
+      expect(counts.get(source.key)).toBeGreaterThan(0);
+    }
+  });
+
+  test("a source that fetched no page at all stops the build, like one that parsed to none", () => {
+    const run = runBuildOverEveryDeclaredSource({
+      without: ["executives"],
+      seed: "the roster from the last good build\n",
+    });
+
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("executives");
+    expect(readFileSync(run.outFile, "utf8")).toBe("the roster from the last good build\n");
+  });
+
+  test("a cached page no source declares stops the build rather than being ignored", () => {
+    const run = runBuild({ strayPage: true, seed: "the roster from the last good build\n" });
+
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain(STRAY_PAGE);
+    expect(readFileSync(run.outFile, "utf8")).toBe("the roster from the last good build\n");
+  });
+
+  test("declaring the source without writing its parser is a failure too, not a skip", () => {
+    const run = runBuild({
+      strayPage: true,
+      registry: [TEAM_ROW, STRAY_ROW].join("\n"),
+      seed: "the roster from the last good build\n",
+    });
+
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("cannot parse");
+    expect(run.stderr).toContain("faculty");
+    expect(readFileSync(run.outFile, "utf8")).toBe("the roster from the last good build\n");
+  });
+
+  test("an exemption naming no declared source is reported as exempting nothing", () => {
+    const run = runBuild({ expectedEmpty: "competitionn\n" });
+
+    expect(run.status).toBe(0);
+    expect(run.stderr).toMatch(/stale entry[\s\S]*competitionn/);
+  });
+
+  test.each([
+    ["missing", { registryMissing: true }],
+    ["declaring nothing", { registry: "" }],
+    ["malformed", { registry: "team\tarchived\tteam" }],
+  ])("a registry that is %s stops the build before it writes anything", (_case, options) => {
+    const run = runBuild({ ...options, seed: "the roster from the last good build\n" });
+
+    expect(run.status).not.toBe(0);
+    expect(readFileSync(run.outFile, "utf8")).toBe("the roster from the last good build\n");
   });
 });

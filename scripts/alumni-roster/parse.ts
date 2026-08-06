@@ -424,6 +424,74 @@ export function parseRemovalList(contents: string): Set<string> {
   return keys;
 }
 
+// --- the source registry --------------------------------------------------
+
+export type SourceKind = "archived" | "spotlight" | "live";
+
+export type Source = {
+  key: string;
+  kind: SourceKind;
+  prefix: string;
+  cdxPattern: string;
+  url: string;
+};
+
+const SOURCE_KINDS: SourceKind[] = ["archived", "spotlight", "live"];
+
+/**
+ * scripts/alumni-roster/sources.tsv: the one declaration of what the roster is
+ * built from, read by the fetcher and by the build so neither can hold a source
+ * the other has never heard of. A malformed row throws rather than being
+ * skipped — a source silently dropped from this file is a cohort silently
+ * dropped from the roster.
+ */
+export function parseSourceRegistry(contents: string): Source[] {
+  const sources: Source[] = [];
+  const keys = new Set<string>();
+  const prefixes = new Set<string>();
+
+  let line = 0;
+  for (const raw of contents.split("\n")) {
+    line += 1;
+    if (raw.trim() === "" || raw.trim().startsWith("#")) continue;
+
+    const fields = raw.split("\t").map((field) => field.trim());
+    if (fields.length !== 5) {
+      throw new Error(`line ${line}: expected 5 tab-separated fields, found ${fields.length}`);
+    }
+
+    const [key, kind, prefix, cdxPattern, url] = fields;
+    if (!key || !prefix) throw new Error(`line ${line}: a source needs a key and a cache prefix`);
+    if (!SOURCE_KINDS.includes(kind as SourceKind)) {
+      throw new Error(`line ${line}: unknown kind "${kind}", expected one of ${SOURCE_KINDS.join(", ")}`);
+    }
+    if (keys.has(key)) throw new Error(`line ${line}: duplicate source key "${key}"`);
+    if (prefixes.has(prefix)) throw new Error(`line ${line}: duplicate cache prefix "${prefix}"`);
+
+    keys.add(key);
+    prefixes.add(prefix);
+    sources.push({ key, kind: kind as SourceKind, prefix, cdxPattern, url });
+  }
+
+  if (!sources.length) throw new Error("no sources declared");
+  return sources;
+}
+
+/**
+ * Which declared source a cached page belongs to. A live page is fetched once
+ * and keeps its bare name; everything else carries the Wayback stamp after its
+ * prefix. A file no source claims is not silently ignored by the caller — it is
+ * the one way a source could otherwise reach the roster undeclared.
+ */
+export function sourceOfCacheFile(file: string, sources: Source[]): Source | null {
+  for (const source of sources) {
+    const claimed =
+      source.kind === "live" ? file === `${source.prefix}.html` : file.startsWith(`${source.prefix}-`);
+    if (claimed) return source;
+  }
+  return null;
+}
+
 /**
  * Sources the club has retired for good, one per line, `#` for a comment. These
  * are the source keys the build reports rather than anything a person wrote, so
@@ -576,7 +644,10 @@ export function mergeSightings(sightings: Sighting[]): RosterRow[] {
     });
   }
 
-  return rows.sort((a, b) => a.name.localeCompare(b.name));
+  // Code-unit order, not localeCompare: collation follows the machine's ICU and
+  // locale, and the order of all 199 lines is part of what makes this file
+  // reproducible.
+  return rows.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
 // --- CSV ------------------------------------------------------------------

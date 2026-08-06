@@ -1,0 +1,39 @@
+# Every source the roster is built from. Tab-separated, `#` starts a comment.
+#
+#   key<TAB>kind<TAB>prefix<TAB>cdx_pattern<TAB>url
+#
+# key         what the build reports on its `sources:` line, and the name
+#             config/alumni/expected-empty-sources.txt refers to. Do not rename.
+# kind        archived | spotlight | live — the three fetch shapes.
+#             archived  = enumerate the Wayback captures, grab one per digest
+#             spotlight = the wildcard sweep that recovers each post's own URL
+#             live      = fetch the page the club publishes today
+# prefix      the cache filename prefix. `<prefix>-<stamp>.html` for archived and
+#             spotlight, exactly `<prefix>.html` for live.
+# cdx_pattern the Wayback CDX url pattern; `-` where the kind does not use one.
+# url         the original URL to retrieve; `-` where the sweep recovers it.
+#
+# BOTH scripts/alumni-roster/fetch-snapshots.sh and scripts/alumni-roster/build.ts
+# read this file and neither keeps its own copy. The fetcher retrieves exactly
+# what is declared here; the build checks every key declared here for a yield,
+# whether or not it produced a cached page, and refuses a cached page whose
+# prefix nothing here claims. Adding a source is one row.
+#
+# --- the former WordPress site, enactussfu.com (2012-2019)
+executives	archived	exec	enactussfu.com/executives/	http://enactussfu.com/executives/
+program-managers	archived	pm	enactussfu.com/program-managers/	http://enactussfu.com/program-managers/
+# the same page renamed in 2017; the only source for project leads 2017-2019
+project-managers	archived	projectpm	enactussfu.com/project-managers/	http://enactussfu.com/project-managers/
+alumni	archived	alumni	enactussfu.com/alumni/	http://enactussfu.com/alumni/
+# --- the Wix site, enactussfu.ca (2023)
+our-team	archived	ourteam	www.enactussfu.ca/our-team	https://www.enactussfu.ca/our-team
+# --- the Squarespace site, enactussfu.ca (2023-2024)
+the-team	archived	theteam	enactussfu.ca/the-team	https://enactussfu.ca/the-team
+# --- the current site, enactussfu.ca
+team	archived	team	www.enactussfu.ca/team	https://www.enactussfu.ca/team
+competition	archived	competition	www.enactussfu.ca/competition	https://www.enactussfu.ca/competition
+# --- "Community Spotlight" posts, which name alumni in their titles
+community spotlight	spotlight	spotlight	enactussfu.com*	-
+# --- the live site, for the roster the club publishes today
+team (live)	live	live-team	-	https://www.enactussfu.ca/team
+competition (live)	live	live-competition	-	https://www.enactussfu.ca/competition

@@ -24,6 +24,14 @@ cache="${1:-.cache/alumni-roster}"
 mkdir -p "$cache"
 ua='enactus-alumni-roster/1.0 (Enactus SFU past-executive reconstruction)'
 
+# The one declaration of what this roster is built from. build.ts reads the same
+# file and checks every source it names, so adding a source is one row here.
+registry="$(dirname "$0")/sources.tsv"
+if [ ! -r "$registry" ]; then
+  echo "no readable $registry — there is nothing to fetch without it." >&2
+  exit 1
+fi
+
 # Every cached page records where it came from. build.ts reads this rather than
 # reconstructing a URL from a filename, and drops any page missing from it, so a
 # row's source_url is always the URL that was actually retrieved.
@@ -69,67 +77,63 @@ grab() { # grab <local-name> <wayback-timestamp> <original-url>
 }
 
 archived() { # archived <prefix> <cdx-pattern> <original-url>
-  echo "== $1"
   cdx "$2" | awk '$2==200 && !seen[$3]++ {print $1}' | while read -r ts; do
     grab "$1-$ts.html" "$ts" "$3"
   done
 }
 
-# --- the former WordPress site, enactussfu.com (2012-2019) ------------------
-archived exec        'enactussfu.com/executives/'       'http://enactussfu.com/executives/'
-archived pm          'enactussfu.com/program-managers/' 'http://enactussfu.com/program-managers/'
-# the same page renamed in 2017; it is the only source for project leads 2017-2019
-archived projectpm   'enactussfu.com/project-managers/' 'http://enactussfu.com/project-managers/'
-archived alumni      'enactussfu.com/alumni/'           'http://enactussfu.com/alumni/'
+# The sweep needs the CDX `original` column to recover each post's own URL, so it
+# does not go through cdx()/archived(). The index goes to a file first, so a
+# rate-limited response is a failed query rather than an empty result set piped
+# into grep.
+spotlight() { # spotlight <prefix> <cdx-pattern>
+  local index="$cache/.$1-cdx"
+  if curl -fsS --max-time 180 --retry 4 --retry-delay 5 --retry-connrefused \
+    "http://web.archive.org/cdx/search/cdx?url=$2&output=text&fl=timestamp,original,statuscode&limit=20000" \
+    -o "$index"; then
+    grep 'community-spotlight' "$index" \
+      | grep -v 'wc-ajax\|/feed\|wp-json\|category/\|replytocom' \
+      | awk '$3==200 && !seen[$2]++ {print $1, $2}' \
+      | while read -r ts url; do
+          slug="$(printf '%s' "$url" | grep -oE 'community-spotlight-[a-z0-9-]+')"
+          [ -n "$slug" ] || continue
+          grab "$1-$ts-$slug.html" "$ts" "$url"
+        done
+  else
+    echo "  ! CDX query failed for the $1 sweep" >&2
+    echo "cdx:$2 ($1)" >> "$failures"
+  fi
+  rm -f "$index"
+}
 
-# --- the Wix site, enactussfu.ca (2023) ------------------------------------
-archived ourteam     'www.enactussfu.ca/our-team'       'https://www.enactussfu.ca/our-team'
-
-# --- the Squarespace site, enactussfu.ca (2023-2024) -----------------------
-archived theteam     'enactussfu.ca/the-team'           'https://enactussfu.ca/the-team'
-
-# --- the current site, enactussfu.ca ---------------------------------------
-archived team        'www.enactussfu.ca/team'           'https://www.enactussfu.ca/team'
-archived competition 'www.enactussfu.ca/competition'    'https://www.enactussfu.ca/competition'
-
-# --- "Community Spotlight" posts, which name alumni in their titles ---------
-# This sweep needs the CDX `original` column to recover each post's own URL, so
-# it does not go through cdx()/archived().
-# The index goes to a file first so a rate-limited response is a failed query
-# rather than an empty result set piped into grep.
-echo "== spotlight"
-index="$cache/.spotlight-cdx"
-if curl -fsS --max-time 180 --retry 4 --retry-delay 5 --retry-connrefused \
-  "http://web.archive.org/cdx/search/cdx?url=enactussfu.com*&output=text&fl=timestamp,original,statuscode&limit=20000" \
-  -o "$index"; then
-  grep 'community-spotlight' "$index" \
-    | grep -v 'wc-ajax\|/feed\|wp-json\|category/\|replytocom' \
-    | awk '$3==200 && !seen[$2]++ {print $1, $2}' \
-    | while read -r ts url; do
-        slug="$(printf '%s' "$url" | grep -oE 'community-spotlight-[a-z0-9-]+')"
-        [ -n "$slug" ] || continue
-        grab "spotlight-$ts-$slug.html" "$ts" "$url"
-      done
-else
-  echo "  ! CDX query failed for the community-spotlight sweep" >&2
-  echo "cdx:enactussfu.com* (community-spotlight)" >> "$failures"
-fi
-rm -f "$index"
-
-# --- the live site, for the roster the club publishes today -----------------
-echo "== live"
-for page in team competition; do
-  out="$cache/live-$page.html"
-  url="https://www.enactussfu.ca/$page"
-  if curl -fsS --max-time 60 --retry 4 --retry-connrefused -A "$ua" -L "$url" -o "$out" 2>/dev/null \
+live() { # live <prefix> <url>
+  local out="$cache/$1.html"
+  if curl -fsS --max-time 60 --retry 4 --retry-connrefused -A "$ua" -L "$2" -o "$out" 2>/dev/null \
     && [ -s "$out" ]; then
-    note_source "live-$page.html" "$url"
+    note_source "$1.html" "$2"
   else
     rm -f "$out"
-    echo "  ! could not fetch live-$page.html" >&2
-    echo "$url" >> "$failures"
+    echo "  ! could not fetch $1.html" >&2
+    echo "$2" >> "$failures"
   fi
-done
+}
+
+# Every source comes from the registry, and nowhere else. A source this script
+# does not fetch is a source build.ts reports as yielding nothing, because both
+# read this one file — a list kept here as well would be a list that can drift.
+while IFS=$'\t' read -r key kind prefix pattern url <&3 || [ -n "${key:-}" ]; do
+  case "${key:-}" in '' | '#'*) continue ;; esac
+  echo "== $key"
+  case "$kind" in
+    archived)  archived  "$prefix" "$pattern" "$url" ;;
+    spotlight) spotlight "$prefix" "$pattern" ;;
+    live)      live      "$prefix" "$url" ;;
+    *)
+      echo "  ! $registry declares kind '$kind' for $key, which this script cannot fetch" >&2
+      echo "registry:$key" >> "$failures"
+      ;;
+  esac
+done 3< "$registry"
 
 cached=$(awk -F'\t' '$1 != "" && !seen[$1]++ { n += 1 } END { print n + 0 }' "$manifest")
 missed=$(grep -c . "$failures")

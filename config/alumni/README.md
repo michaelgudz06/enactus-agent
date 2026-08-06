@@ -115,6 +115,16 @@ scripts/alumni-roster/fetch-snapshots.sh          # populate .cache/alumni-roste
 node --experimental-strip-types scripts/alumni-roster/build.ts
 ```
 
+**`scripts/alumni-roster/sources.tsv` declares every source, and both scripts
+read it.** The fetcher retrieves exactly the rows it lists; the build checks
+every key it lists for a yield, whether or not that source produced a cached
+page, and refuses a cached page whose prefix no row claims. Neither script keeps
+its own copy of the list, because two lists drift and a source declared in one
+place only is a source the checks below cannot see. **Adding a source is one
+row** — key, kind (`archived`, `spotlight` or `live`), cache prefix, CDX
+pattern, URL — plus its parser in `build.ts`, which the build demands rather
+than quietly skipping. A missing or malformed registry stops both scripts.
+
 The fetcher caches one snapshot per *unique content digest* — the Wayback CDX
 index reports a digest per capture, and captures with the same digest are
 byte-identical. `/executives/` has 88 archived captures but only 56 distinct
@@ -144,6 +154,11 @@ the parser for it matches nothing, and the rebuild drops that page's whole cohor
 while every remaining row still looks right. So it is a hard failure — the run
 reports the source, refuses to write, and exits non-zero. Fix the parser.
 
+**A source that produced no page at all is the same failure**, and the same gate
+catches it: the build starts every source in the registry at zero, so an archive
+query that was rate-limited and fetched nothing is a source that yielded nothing,
+not a source that quietly went missing. Re-run the fetcher.
+
 A page the club has genuinely retired is the one case where empty is the truth,
 and it has an answer that is not "edit the build script": name the source on
 **`expected-empty-sources.txt`** in this directory, one per line, `#` for a
@@ -156,6 +171,8 @@ The list fails closed and stays honest:
 - **Only the named sources are exempt.** Any other source that comes back empty
   is still a hard failure. There is no flag that turns the check off, because a
   flag is what someone reaches for at 2am and then everything is exempt.
+- **An entry has to name a source the registry declares.** One that does not is
+  reported as exempting nothing, so a typo cannot look like a decision.
 - **A missing list is not an error**, unlike `removed.txt`. Absence means no
   source is expected to be empty, which is already the strictest reading. (The
   asymmetry is deliberate: a missing removal list could silently reinstate

@@ -14,6 +14,7 @@
  */
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   academicYearOfCapture,
   applyRemovals,
@@ -22,6 +23,8 @@ import {
   mergeSightings,
   parseRemovalList,
   parseSourceList,
+  parseSourceRegistry,
+  sourceOfCacheFile,
   parseAlumniBusinessOwners,
   parseCompetitionCoaches,
   parseNextTeam,
@@ -33,10 +36,12 @@ import {
   toCsv,
   type Confidence,
   type Sighting,
+  type Source,
 } from "./parse.ts";
 
 const cacheDir = process.argv[2] ?? ".cache/alumni-roster";
 const outFile = process.argv[3] ?? "config/alumni/past-executives.csv";
+const registryPath = process.argv[4] ?? fileURLToPath(new URL("sources.tsv", import.meta.url));
 /** The day the cache was fetched, as the `captured_at` every row carries. */
 const capturedAt = process.env.ROSTER_CAPTURED_AT ?? new Date().toISOString().slice(0, 10);
 
@@ -55,9 +60,31 @@ for (const line of readFileSync(manifestPath, "utf8").split("\n")) {
   if (file && url) sourceUrls.set(file.trim(), url.trim());
 }
 
+function loadRegistry(file: string): Source[] {
+  try {
+    return parseSourceRegistry(readFileSync(file, "utf8"));
+  } catch (error) {
+    console.error(
+      `cannot read the source registry ${file}: ${error instanceof Error ? error.message : String(error)}\n` +
+        `It is the one declaration of what this roster is built from — the fetcher\n` +
+        `retrieves what it lists and this build checks what it lists. There is nothing\n` +
+        `to build without it.`,
+    );
+    process.exit(1);
+  }
+}
+
+const sources = loadRegistry(registryPath);
+
 const sightings: Sighting[] = [];
 const withoutProvenance: string[] = [];
-const yielded = new Map<string, number>();
+const undeclared: string[] = [];
+const withoutParser = new Set<string>();
+// Seeded from the registry, so a source that produced no page at all is a
+// source that yielded nothing — the same case, checked by the same gate. Left
+// unseeded, a source the fetcher never managed to retrieve simply never became
+// a key, and its whole cohort went missing without anything noticing.
+const yielded = new Map<string, number>(sources.map((source) => [source.key, 0]));
 const record = (source: string, found: number) =>
   yielded.set(source, (yielded.get(source) ?? 0) + found);
 
@@ -71,6 +98,16 @@ for (const file of files) {
     // cannot produce a row, however good its content is.
     withoutProvenance.push(file);
     console.warn(`dropped (not in manifest, so no source URL): ${file}`);
+    continue;
+  }
+
+  // Nothing reaches the roster from a page no declared source claims. Dropping
+  // files into the cache is otherwise a way to add a source the registry — and
+  // so the zero-yield gate — has never heard of.
+  const source = sourceOfCacheFile(file, sources);
+  if (!source) {
+    undeclared.push(file);
+    console.warn(`dropped (no source in ${registryPath} claims this name): ${file}`);
     continue;
   }
 
@@ -97,79 +134,83 @@ for (const file of files) {
     }
   };
 
-  // --- club roster pages: name and role are a structured record on the page
-  if (file.startsWith("exec-") || file.startsWith("pm-") || file.startsWith("projectpm-")) {
-    const entries = parseWordpressRoster(html);
-    const kind = file.startsWith("exec-")
-      ? "executives"
-      : file.startsWith("pm-")
-        ? "program-managers"
-        : "project-managers";
-    record(kind, entries.length);
-    add(entries, captureYear, "high");
-    continue;
-  }
-
-  if (file.startsWith("theteam-")) {
-    const entries = parseSquarespaceTeam(html);
-    record("the-team", entries.length);
-    add(entries, captureYear, "high");
-    continue;
-  }
-
-  if (file.startsWith("team-") || file === "live-team.html") {
-    const entries = parseNextTeam(html);
-    record(file === "live-team.html" ? "team (live)" : "team", entries.length);
-    add(entries, captureYear, "high");
-    continue;
-  }
-
-  if (file.startsWith("ourteam-")) {
-    const entries = parseWixTeam(html);
-    // the Wix page declares its own year — prefer it to the capture date
-    record("our-team", entries.length);
-    add(entries, parseWixTeamYear(html) ?? captureYear, "high");
-    continue;
-  }
-
-  // --- the 2012 alumni page, the only source naming pre-2012 executives
-  if (file.startsWith("alumni-")) {
-    const entries = parseAlumniBusinessOwners(html);
-    record("alumni", entries.length);
-    for (const entry of entries) {
-      // "President 2004/2005" states a term. "Founded organization in 1991"
-      // mentions a year inside prose — the same fact, less firmly recorded.
-      const statedTerm = entry.year !== null && /^\d{4}-\d{2}$/.test(entry.year);
-      sightings.push({
-        name: entry.name,
-        role: entry.role,
-        year: entry.year ?? "",
-        sourceUrl,
-        capturedAt,
-        confidence: statedTerm ? "high" : "medium",
-      });
+  switch (source.key) {
+    // --- club roster pages: name and role are a structured record on the page
+    case "executives":
+    case "program-managers":
+    case "project-managers": {
+      const entries = parseWordpressRoster(html);
+      record(source.key, entries.length);
+      add(entries, captureYear, "high");
+      break;
     }
-    continue;
-  }
 
-  // --- competition coaches: named by the club, but in a comma-run inside a
-  //     sentence rather than as a structured roster record
-  if (file.startsWith("competition-") || file === "live-competition.html") {
-    const entries = parseCompetitionCoaches(html);
-    record(file === "live-competition.html" ? "competition (live)" : "competition", entries.length);
-    add(entries, captureYear, "medium");
-    continue;
-  }
+    case "the-team": {
+      const entries = parseSquarespaceTeam(html);
+      record(source.key, entries.length);
+      add(entries, captureYear, "high");
+      break;
+    }
 
-  // --- a spotlight post names an alum in its title and states no role or term
-  if (file.startsWith("spotlight-")) {
-    const name = parseSpotlightName(html);
-    record("community spotlight", name ? 1 : 0);
-    if (name) sightings.push({ name, role: "", year: "", sourceUrl, capturedAt, confidence: "low" });
-    continue;
-  }
+    case "team":
+    case "team (live)": {
+      const entries = parseNextTeam(html);
+      record(source.key, entries.length);
+      add(entries, captureYear, "high");
+      break;
+    }
 
-  console.warn(`skipped (no parser for this name): ${file}`);
+    case "our-team": {
+      const entries = parseWixTeam(html);
+      // the Wix page declares its own year — prefer it to the capture date
+      record(source.key, entries.length);
+      add(entries, parseWixTeamYear(html) ?? captureYear, "high");
+      break;
+    }
+
+    // --- the 2012 alumni page, the only source naming pre-2012 executives
+    case "alumni": {
+      const entries = parseAlumniBusinessOwners(html);
+      record(source.key, entries.length);
+      for (const entry of entries) {
+        // "President 2004/2005" states a term. "Founded organization in 1991"
+        // mentions a year inside prose — the same fact, less firmly recorded.
+        const statedTerm = entry.year !== null && /^\d{4}-\d{2}$/.test(entry.year);
+        sightings.push({
+          name: entry.name,
+          role: entry.role,
+          year: entry.year ?? "",
+          sourceUrl,
+          capturedAt,
+          confidence: statedTerm ? "high" : "medium",
+        });
+      }
+      break;
+    }
+
+    // --- competition coaches: named by the club, but in a comma-run inside a
+    //     sentence rather than as a structured roster record
+    case "competition":
+    case "competition (live)": {
+      const entries = parseCompetitionCoaches(html);
+      record(source.key, entries.length);
+      add(entries, captureYear, "medium");
+      break;
+    }
+
+    // --- a spotlight post names an alum in its title and states no role or term
+    case "community spotlight": {
+      const name = parseSpotlightName(html);
+      record(source.key, name ? 1 : 0);
+      if (name) {
+        sightings.push({ name, role: "", year: "", sourceUrl, capturedAt, confidence: "low" });
+      }
+      break;
+    }
+
+    default:
+      withoutParser.add(source.key);
+  }
 }
 
 /**
@@ -209,6 +250,25 @@ if (withoutProvenance.length) {
     `\n${withoutProvenance.length} cached page(s) have no source URL in ${manifestPath}, so a roster\n` +
       `built from this cache would silently be missing whatever they hold. ${outFile}\n` +
       `was left untouched. Re-run scripts/alumni-roster/fetch-snapshots.sh to record them.`,
+  );
+  process.exit(1);
+}
+
+if (undeclared.length) {
+  console.error(
+    `\n${undeclared.length} cached page(s) belong to no source in ${registryPath}.\n` +
+      `A page nothing declares is a source the zero-yield gate cannot check, so ${outFile}\n` +
+      `was left untouched. Declare the source with one row in the registry, or take the\n` +
+      `pages out of the cache.`,
+  );
+  process.exit(1);
+}
+
+if (withoutParser.size) {
+  console.error(
+    `\n${registryPath} declares source(s) this build cannot parse: ${[...withoutParser].join(", ")}\n` +
+      `Their pages were fetched and read and nothing came of them. Add the parser to\n` +
+      `scripts/alumni-roster/build.ts; ${outFile} was left untouched.`,
   );
   process.exit(1);
 }
@@ -275,7 +335,9 @@ for (const source of empty) {
 }
 for (const source of expectedEmpty) {
   if (!yielded.has(source)) {
-    console.warn(`\nstale entry on ${expectedEmptyPath}: no source called ${source} ran at all`);
+    console.warn(
+      `\nstale entry on ${expectedEmptyPath}: ${registryPath} declares no source called ${source}, so it exempts nothing`,
+    );
   } else if ((yielded.get(source) ?? 0) > 0) {
     console.warn(`\nstale entry on ${expectedEmptyPath}: ${source} is producing names again`);
   }
@@ -283,10 +345,11 @@ for (const source of expectedEmpty) {
 
 if (unexpectedlyEmpty.length) {
   console.error(
-    `\nsource(s) that parsed to no names: ${unexpectedlyEmpty.join(", ")}\n` +
-      `A page whose layout changed parses to nothing and takes its whole cohort with it,\n` +
-      `and the smaller roster that produces looks perfectly plausible. ${outFile} was\n` +
-      `left untouched. Fix the parser — or, if the club has retired the page for good,\n` +
+    `\nsource(s) that produced no names: ${unexpectedlyEmpty.join(", ")}\n` +
+      `Either nothing was fetched for them or the pages no longer parse — a layout the\n` +
+      `club changed takes its whole cohort with it, and the smaller roster that produces\n` +
+      `looks perfectly plausible. ${outFile} was left untouched. Re-run the fetcher, fix\n` +
+      `the parser — or, if the club has retired the page for good,\n` +
       `name the source on ${expectedEmptyPath} and re-run.`,
   );
   process.exit(1);
