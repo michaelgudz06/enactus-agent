@@ -64,6 +64,21 @@ associations that charge dues are out for the same reason.
 
 `K-ORG-02` and `K-ORG-03` in `src/lib/filter.ts` enforce this deterministically.
 
+### Alumni are people, not leads
+
+`config/alumni/past-executives.csv` is a reconstruction of the club's past
+executives from its own archived pages — the club holds no master alumni sheet.
+An alum's connection to this club is *personal* information about them: outside
+PIPEDA's business-contact exemption, outside BC PIPA's contact-information
+carve-out, and BC PIPA has a live private right of action. So the file holds name,
+role and years and nothing else — never an address, a phone number, an employer,
+or anything from LinkedIn, which is never fetched. It is a **research seed for
+recognising a connection to a company the pipeline already found, never a contact
+list**; the repository stays private; and a named person can ask to be removed on
+any day for any reason. `config/alumni/README.md` is authoritative and carries the
+removal procedure — read it before touching that directory or wiring it into the
+pipeline.
+
 ### Code decides, the model reports
 
 The model proposes; code verifies and has the last word. Anything a model
