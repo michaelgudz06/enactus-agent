@@ -227,6 +227,16 @@ a row, and leave `value` blank with a note rather than asserting an unverified d
   deploys, and repeated with the other migrations.
 - Credentials live in `.env.local`, which is gitignored. Never print, log, or
   commit a secret value.
+- **Run `npm ci` after any commit that changes `package.json`.** `js-yaml` is a
+  direct dependency at 5.x, and eslint pulls a transitive 4.x; before the direct
+  dependency existed, eslint's copy was the one hoisted to `node_modules/js-yaml`.
+  A tree installed before then and never reinstalled therefore still resolves
+  `js-yaml` to 4.x, which ships no type declarations at all, and `npm run
+  typecheck` fails with `TS7016 ... js-yaml/dist/js-yaml.mjs`. The fix is
+  reinstalling, never `@types/js-yaml` — its latest (4.0.9) describes the **4.x**
+  API and would shadow 5.x's correct bundled declarations with wrong ones. Every
+  5.x release exports a `types` condition that `moduleResolution: "bundler"`
+  already reads, so `tsconfig.json` is not implicated.
 
 ## Maintaining this file
 
