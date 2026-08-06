@@ -433,7 +433,10 @@ const NON_CEM_CHANNELS: ReadonlySet<RequiredChannel> = new Set<RequiredChannel>(
  *                 rather than blocking it.
  *   G_LAWFUL_BASIS  reads a REQUIRED field whose `"none"` is an explicit recorded value meaning
  *                 "no basis exists", not a missing one. Under CASL the burden of proving consent
- *                 is on the sender, so `"none"` is contrary evidence.
+ *                 is on the sender, so `"none"` is contrary evidence — but it only BLOCKS on a
+ *                 route that actually carries a CEM. A closed email channel or a non-CEM route
+ *                 is `not_applicable`, derived fresh on every evaluation. See the send-path
+ *                 warning in AGENTS.md: `blocked` alone is not a pre-send check.
  *   G_AFFILIATION_EVIDENCE  asks whether a claim the row is ALREADY MAKING is substantiated. No
  *                 sources IS the observation, and the effect is `cap_affinity`, never a block —
  *                 treating it as `cannot_evaluate` would award full affinity weight to an

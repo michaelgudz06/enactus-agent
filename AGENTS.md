@@ -96,6 +96,20 @@ leads reached the board when they did.
 `src/lib/gmail.ts` uses the `gmail.compose` scope deliberately. A human presses
 send, which is where CASL liability belongs. **Do not add a send path.**
 
+If you are the person who eventually wires one: **a passing score is not permission
+to email.** `evaluateGates` in `src/lib/scoring.ts` answers `G_LAWFUL_BASIS` with
+`not_applicable` whenever the email channel is closed — the gate asks whether this
+lead may be *emailed*, and an unreachable row is not an unqualified one. So a lead
+whose claimed CASL basis was found INVALID (L-04, P-08-CONSTRAINT) comes back with
+`blocked: false` and every gate passing. `ScoreResult.blocked` is therefore not a
+sufficient pre-send check.
+
+`FilterResult.email_channel_open` / `CompanyFacts.email_channel_open` is the
+operative protection. A send path must refuse a closed-channel lead
+**structurally** — make it impossible to construct the send, rather than trusting a
+caller to remember the flag. That is the same rule as `persistLead` returning
+whether the row was written: the type carries the fact, not a convention.
+
 ## The qualification layer
 
 `src/lib/filter.ts` (disqualifiers) and `src/lib/scoring.ts` (ICP) implement two written

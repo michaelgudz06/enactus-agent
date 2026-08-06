@@ -34,9 +34,14 @@ geography:
   # Anmore, Belcarra, Bowen Island, Lions Bay, Tsawwassen First Nation and Electoral Area A were
   # killed as `out_of_area`. Add a jurisdiction to the CSV, never here.
   #
-  # POSTAL PREFIXES ARE NOT HERE EITHER, and are not anywhere. Report section 8 rejected
+  # NO POSTAL-PREFIX MEMBERSHIP LIST EITHER, here or anywhere. Report section 8 rejected
   # FSA-prefix geography in writing, and a coarse V3-V7 set proved it: V3G and V4X are
-  # Abbotsford, V4S is Mission, V4T/V4V are Central Okanagan. The rule uses municipality names.
+  # Abbotsford, V4S is Mission, V4T/V4V are Central Okanagan. Membership uses municipality names.
+  #
+  # A postal code IS read, but only for its FORMAT: a well-formed Canadian postal code is
+  # evidence of Canada, and the `V` district is evidence of British Columbia. It never decides
+  # Metro Vancouver membership, which is why V3G (Abbotsford) resolves `bc_other`. See
+  # `canadianPostalDistrict` in src/lib/qualification-lists.ts.
   #
   # Points awarded by the `geography` term of fit_score.
   #

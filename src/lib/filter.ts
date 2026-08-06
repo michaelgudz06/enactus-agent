@@ -111,9 +111,11 @@
 //      list — an in-person ask is not a CEM at all". So the rule emits TWO outcomes: an
 //      email-scoped terminal that closes the email channel, and a CHANNEL routing the row to
 //      `in_person`. The account stays on the board, keeps its -15, and is never killed or
-//      blocked. `gateInputsFromFilterResult` carries the route to G_LAWFUL_BASIS, which reports
-//      NOT_APPLICABLE for any non-email route — otherwise the corpus-wide block simply moves one
-//      layer down into the scorer.
+//      blocked. `gateInputsFromFilterResult` carries both the route and the channel state to
+//      G_LAWFUL_BASIS, which reports NOT_APPLICABLE when the email channel is shut and for any
+//      non-CEM route — otherwise the corpus-wide block simply moves one layer down into the
+//      scorer. A non-walkable role account has no route at all, so the closed channel is the
+//      branch that spares it.
 //
 //  A3. §7.2 `LIST_national_flag` IS NOT §7.1 `LIST_national_partner`. §7.2 is headed "review, do
 //      not kill" with "Kill mode: none — `human_review` only". It therefore emits a FLAG and
@@ -143,7 +145,32 @@
 //
 //      K-GEO-01 `outside_canada` is the ONLY geographic terminal that survives.
 //
-//  A4. A MUNICIPALITY ALIAS IS ONLY TRUSTWORTHY WHEN THE REGION IS BC OR ABSENT. §7.8's list
+//  A7. §3.3 K-GEO-05'S MULTI-BASIS LOCALITY CARVE-OUT IS SUPERSEDED TOO, 2026-08-06.
+//
+//      K-GEO-05 let three bases put an account in scope — registered address, operating
+//      location, decision-maker location — so that a remote-first company with a Vancouver
+//      founder was not KILLED as `outside_bc`. A6 deleted that kill. A Canadian company is in
+//      scope at `canada_other` with no rescue needed, so the carve-out was written against a
+//      regime that no longer exists, and geography is now ONE dimension expressed ONCE: the
+//      band. `localityBasis`, `GeoBasis`, `LocalityReport`, `bases_in_scope` and the
+//      `operating_municipality` / `decision_maker_municipality` observations are GONE.
+//
+//      WHAT THE SECOND DIMENSION COST WHILE IT LIVED: the two observations carried no province
+//      of their own, so they were read through a bare alias hit. That was defended as
+//      rescue-only, but P-04 clause 2 also read it, and an Ontario chain whose operating
+//      municipality read `Richmond` took -30 as a branch of a namesake. Clause 2 now requires
+//      `bc_branch_confirmed`.
+//
+//      WHAT IT COSTS TO REMOVE IT: a company registered OUTSIDE CANADA with a Vancouver founder
+//      no longer escapes K-GEO-01. That is the intended shape of a single geographic terminal,
+//      not an oversight — record the founder as an alumni/proximity signal if the row is worth
+//      keeping.
+//
+//      IF THE FOUNDER-LOCATION NUANCE IS EVER WANTED BACK, IT IS AN AFFINITY SIGNAL — a
+//      person-level fact belonging beside `local_proximity` and the alumni evidence tiers in
+//      src/lib/scoring.ts — and NEVER a second geography dimension in this module.
+//
+//  A4. A MUNICIPALITY ALIAS IS ONLY TRUSTWORTHY ON POSITIVE EVIDENCE OF CANADA. §7.8's list
 //      ships BARE MUNICIPALITY NAMES, and richmond, vancouver, surrey, langley, delta and white
 //      rock all name real places outside BC. The report never says which wins when a row records
 //      both, so: a recorded CONTRARY region is consulted FIRST, and the alias never overturns
@@ -298,10 +325,9 @@ export interface AccountObservations {
   /** N4: corporate-owned — careers page lists all locations as employer-of-record, no franchising page. */
   corporate_owned_all_locations?: boolean;
 
-  // --- geography carve-outs, §3.3 K-GEO-02 / K-GEO-05 ---
+  // --- geography carve-outs, §3.3 ---
+  /** P-04 clause 2: a BC location of an out-of-province head office has been CONFIRMED. */
   bc_branch_confirmed?: boolean;
-  decision_maker_municipality?: string | null;
-  operating_municipality?: string | null;
 
   // --- penalty inputs, §4 ---
   /** P-11: when the registrable domain was first registered. */
@@ -490,8 +516,9 @@ interface ScopeEffect {
   clears: readonly (keyof Account)[];
   /**
    * Whether this scope bars sending a CEM. L-04 and P-08-CONSTRAINT are both CASL findings that
-   * destroy the BASIS for sending rather than the address, and `gateInputsFromFilterResult`
-   * turns a closed channel into `lawful_basis_strength: "none"` so G_LAWFUL_BASIS fails.
+   * destroy the BASIS for sending rather than the address. `gateInputsFromFilterResult` carries
+   * a closed channel to G_LAWFUL_BASIS as `lawful_basis_strength: "none"`, and the gate answers
+   * `not_applicable` while the channel is shut — see the send-path warning in AGENTS.md.
    */
   closes_email_channel: boolean;
 }
@@ -1426,55 +1453,6 @@ export function isInMetroVancouver(
 }
 
 /**
- * K-GEO-05 · Which basis puts this account in scope. Locality passes if ANY of three bases is
- * in scope, and the basis used is recorded.
- *
- * A remote-first company with a Vancouver founder IS in scope on `decision_maker_location`: it
- * has exactly the property the club needs — one person who can approve a $500 in-kind — and the
- * absent office address is irrelevant to that.
- */
-export type GeoBasis = "registered_address" | "operating_location" | "decision_maker_location";
-
-export interface LocalityReport {
-  in_scope: boolean;
-  bases_available: GeoBasis[];
-  bases_in_scope: GeoBasis[];
-}
-
-export function localityBasis(a: Account, lists: QualificationLists): LocalityReport {
-  const o = a.observations ?? {};
-  const available: GeoBasis[] = [];
-  const inScope: GeoBasis[] = [];
-
-  if (a.address_municipality) {
-    available.push("registered_address");
-    // The registered address is the one basis that HAS a region recorded beside it, so the
-    // precondition applies here: a contrary region overrules the alias.
-    if (geographyOf(a, lists).band === "metro_vancouver") inScope.push("registered_address");
-  }
-  // DELIBERATELY PERMISSIVE, and only here. These two observations carry no province of their
-  // own — an enrichment pass recorded "this operation / this decision-maker is in <place>" — so
-  // a bare alias hit is all there is. Reading it as a Metro Vancouver presence can only ever
-  // PREVENT the K-GEO-01 terminal (the report's own Superpilot case: remote-first, Vancouver
-  // founder); it never awards a geography band, which is decided by `geographyOf` alone. Under
-  // the cardinal rule, a signal that can only rescue is safe to read permissively.
-  if (o.operating_municipality) {
-    available.push("operating_location");
-    if (metroVancouverCanonicals(o.operating_municipality, lists).length > 0) {
-      inScope.push("operating_location");
-    }
-  }
-  if (o.decision_maker_municipality) {
-    available.push("decision_maker_location");
-    if (metroVancouverCanonicals(o.decision_maker_municipality, lists).length > 0) {
-      inScope.push("decision_maker_location");
-    }
-  }
-
-  return { in_scope: inScope.length > 0, bases_available: available, bases_in_scope: inScope };
-}
-
-/**
  * K-GEO-01 · Outside Canada → TERMINAL, and the ONLY geographic terminal that survives the
  * 2026-08-06 supersession. Everywhere in Canada is in scope; where in Canada is a WEIGHT.
  */
@@ -1494,7 +1472,6 @@ export function kGeo01OutsideCanada(
     );
   }
   if (geo.band !== "outside_canada") return pass("K-GEO-01");
-  if (localityBasis(a, lists).in_scope) return pass("K-GEO-01");
 
   const detail = a.address_country ?? "";
   return {
@@ -1509,7 +1486,7 @@ export function kGeo01OutsideCanada(
       account: a,
       rule_id: "K-GEO-01",
       verb: "rejected",
-      because: `its recorded country is ${detail} and no Canadian operating location or in-scope decision-maker was found`,
+      because: `its recorded country is ${detail}, which is outside Canada`,
       evidence_url: a.website_url ?? domainKey(a),
       now,
     }),
@@ -2386,10 +2363,10 @@ export function l04NotConspicuouslyPublished(a: Account, now: Date): PredicateRe
  *
  * WHY email-scoped: identically to L-04, this invalidates the BASIS FOR SENDING, not the address
  * and not the account. The account survives with its address intact and stays reachable by web
- * form, phone or a human; `email_channel_open` goes false, which is what
- * `gateInputsFromFilterResult` turns into `lawful_basis_strength: "none"` so G_LAWFUL_BASIS
- * fails. A caller that recorded `conspicuous_pub_named_person` for a shared mailbox no longer
- * gets that weight awarded.
+ * form, phone or a human; `email_channel_open` goes false, and `gateInputsFromFilterResult`
+ * reports `lawful_basis_strength: "none"` so a caller that recorded
+ * `conspicuous_pub_named_person` for a shared mailbox no longer gets that weight awarded. The
+ * closed channel is what bars the send — G_LAWFUL_BASIS reports `not_applicable`, not a block.
  *
  * The remedy for a human is to record a basis this address can actually carry, so the duration
  * is `until_human_clears` rather than `forever`.
@@ -2939,10 +2916,16 @@ function headOfficeOutsideBc(a: Account, lists: QualificationLists): boolean {
   return evidence.region === "contrary" || evidence.country === "contrary";
 }
 
-/** P-04 clause 2: a local branch of that head office exists in scope. */
-function localBranchExists(a: Account, lists: QualificationLists): boolean {
-  if (a.observations?.bc_branch_confirmed) return true;
-  return localityBasis(a, lists).bases_in_scope.includes("operating_location");
+/**
+ * P-04 clause 2: a local branch of that head office exists in scope.
+ *
+ * CONFIRMED evidence only. The clause used to accept a bare municipality alias recorded by an
+ * enrichment pass, which levied -30 on an Ontario chain whose "operating municipality" read
+ * `Richmond` — Richmond, Ontario and Richmond, Quebec are real places. Under the captain's
+ * absence rule a penalty needs an observed positive fact, and only `bc_branch_confirmed` is one.
+ */
+function localBranchExists(a: Account): boolean {
+  return Boolean(a.observations?.bc_branch_confirmed);
 }
 
 function penalty(
@@ -3031,7 +3014,7 @@ export function evaluatePenalties(a: Account, ctx: PenaltyContext): PenaltyResul
   // P-04 — ENTRY CONDITION, from §4's own definition: "Head office outside BC, local branch
   // exists but branch autonomy unproven". All three clauses are required. §5's bare UNPROVEN
   // fall-through implements only the third; see the REPORT CONTRADICTIONS note.
-  if (ctx.franchise === "UNPROVEN" && headOfficeOutsideBc(a, lists) && localBranchExists(a, lists)) {
+  if (ctx.franchise === "UNPROVEN" && headOfficeOutsideBc(a, lists) && localBranchExists(a)) {
     out.push(
       penalty(
         a,
@@ -3100,7 +3083,7 @@ export function evaluatePenalties(a: Account, ctx: PenaltyContext): PenaltyResul
 
   // P-09 — unresolved geography after one retry.
   const noGeo =
-    !a.address_country && !a.address_region && !a.address_municipality && !localityBasis(a, lists).in_scope;
+    !a.address_country && !a.address_region && !a.address_municipality && !a.postal_code;
   if (noGeo && (o.geography_resolution_attempts ?? 0) >= 1) {
     out.push(
       penalty(
@@ -3264,8 +3247,10 @@ export interface FilterResult {
    * address itself is untouched, because the business is still reachable by form, phone or a
    * human — that routing is exactly what §2.2's CHANNEL outcome exists to preserve.
    *
-   * `gateInputsFromFilterResult` in src/lib/scoring.ts reads this and reports
-   * `lawful_basis_strength: "none"`, which fails G_LAWFUL_BASIS.
+   * THIS FLAG, NOT A GATE VERDICT, IS THE OPERATIVE PROTECTION AGAINST A SEND.
+   * `gateInputsFromFilterResult` in src/lib/scoring.ts reports `lawful_basis_strength: "none"`
+   * from it, but `evaluateGates` answers G_LAWFUL_BASIS `not_applicable` for a closed channel —
+   * an unreachable row is not an unqualified one. See AGENTS.md under "Drafts only, never send".
    */
   email_channel_open: boolean;
   /**
@@ -3290,7 +3275,6 @@ export interface FilterResult {
   overridden_kills: OverriddenKill[];
 
   franchise: FranchiseReport;
-  locality: LocalityReport;
   area_code_signal: AreaCodeSignal;
   evaluated_rule_ids: string[];
 }
@@ -3416,8 +3400,6 @@ export function runFilter(
     now,
     application_path_found: opts.application_path_found,
   });
-  const locality = localityBasis(account, lists);
-
   const neverKill =
     lookupList(lists.neverKillDomains, account.registrable_domain, null) ??
     (account.registrable_domain
@@ -3548,7 +3530,6 @@ export function runFilter(
     cannot_evaluate: cannot,
     overridden_kills: overridden,
     franchise,
-    locality,
     area_code_signal: areaCodeSignal(account),
     evaluated_rule_ids: evaluated,
   };

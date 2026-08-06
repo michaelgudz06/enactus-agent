@@ -1055,11 +1055,6 @@ describe("filter and scoring never disagree about where a company is", () => {
       // Geography is expressed exactly once, so no row anywhere carries the retired penalty.
       expect(filtered.penalties.map((p) => p.tag)).not.toContain("outside_metro_vancouver");
 
-      if (scoringBand === "metro_vancouver") {
-        expect(filtered.locality.in_scope || filtered.locality.bases_available.length === 0).toBe(
-          true,
-        );
-      }
     },
   );
 
@@ -2012,3 +2007,131 @@ describe("gateInputsFromFilterResult", () => {
 // The module contract — "imports no model client" and "the weights live in config, not in code"
 // — is proved by execution: see tests/no-model-client.test.ts for the first, and
 // "re-scores instantly when the weights change" above for the second.
+
+/*
+ * A7's premise, PROVEN rather than asserted. Cutting §3.3 K-GEO-05's multi-basis locality
+ * rescue was argued as "this costs a weighting nuance, not a lead". The seed corpus is where
+ * that has to hold: these are the 25 rows in supabase-setup.sql, the same 25 the reports
+ * measured (25/25 role accounts, 9/25 placeholder contact names).
+ *
+ * The corpus is transcribed as a fixture rather than parsed out of the .sql, because it is the
+ * INPUT SHAPE that matters here, not the file. Every row carries what the seed actually
+ * records: a name, a contact, an address — and NO address fields at all, which is precisely the
+ * condition under which the deleted rescue could have mattered.
+ */
+const SEED_CORPUS: readonly (readonly [string, string, string])[] = [
+  ["Affinity Credit Union", "Community Engagement Team", "sponsorship@affinitycu.ca"],
+  ["Neighbourhood Holdings", "Corporate Relations", "info@nhholdings.ca"],
+  ["PC Urban Properties", "Brent Sawchyn", "info@pcurban.ca"],
+  ["HeavyPDG Equipment Ltd.", "Owner / GM", "info@heavypdg.ca"],
+  ["Window Wizards", "Owner", "info@windowwizards.ca"],
+  ["Vancity Credit Union", "Community Investment Team", "sponsorship@vancity.com"],
+  ["Safe Software", "Don Murray", "info@safe.com"],
+  ["Peak Products", "John Gross", "info@peakproducts.com"],
+  ["Superpilot", "Igor Faletski", "hello@superpilot.ai"],
+  ["BAK'D Cookies", "Jessica Nguyen", "hello@bakdcookies.com"],
+  ["Second Savour", "Justin Cheung", "hello@secondsavour.ca"],
+  ["The Woods Spirit Co.", "Celia Chiang", "info@thewoodsspirit.com"],
+  ["pH7 Technologies", "Mohammad Doostmohammadi", "info@ph7technologies.com"],
+  ["IUVOX", "Michelle De la O", "hello@iuvox.com"],
+  ["Behené", "Jasmin Garcha", "info@behene.com"],
+  ["GluteNull", "Arshita Saini", "hello@glutenull.com"],
+  ["Moment Energy", "Edward Chiang", "hello@momentenergy.com"],
+  ["Ionomr Innovations", "Bill Haberlin", "info@ionomr.com"],
+  ["Mala the Brand", "Hannah Wood", "hello@malathebrand.com"],
+  ["Spexi Geospatial", "Bill Lakeland", "hello@spexi.com"],
+  ["Coast Capital Savings", "Make Good Happen Program", "makegoodnow@coastcapitalsavings.com"],
+  ["Prospera Credit Union", "Gavin Toy", "mediarelations@prospera.ca"],
+  ["Innovate BC", "Programs & Partnerships", "info@innovatebc.ca"],
+  ["Dobson Foundation", "Program Officer", "info@dobsonfoundation.ca"],
+  ["Discovery Foundation", "Program Director", "info@discoveryfoundation.ca"],
+];
+
+describe("the seed corpus survives the K-GEO-05 cut", () => {
+  const seeded = SEED_CORPUS.map(([company, contact, email]) => ({
+    company,
+    contact,
+    email,
+    filtered: runFilter(
+      {
+        legal_name: company,
+        registrable_domain: email.split("@")[1],
+        email,
+        contact_name: contact,
+        website_url: `https://${email.split("@")[1]}`,
+      },
+      lists,
+      { now: NOW },
+    ),
+  }));
+
+  it("carries all 25 rows the reports measured", () => {
+    expect(seeded).toHaveLength(25);
+    expect(new Set(seeded.map((r) => r.company)).size).toBe(25);
+  });
+
+  it.each(seeded.map((r) => [r.company, r] as const))(
+    "%s is not dropped on geographic grounds",
+    (_name, row) => {
+      expect(row.filtered.kills.map((k) => k.reason)).not.toContain("outside_canada");
+      // The band is UNRESOLVED for every seeded row — none records an address — and unresolved
+      // is never a kill. That is the whole cost of the cut on this corpus.
+      expect(
+        geographyScope(company({ legal_name: row.company, ...gateInputsFromFilterResult(row.filtered) }), lists)
+          .band,
+      ).toBe("unresolved");
+    },
+  );
+
+  it.each(seeded.map((r) => [r.company, r] as const))(
+    "%s is not blocked on geographic grounds",
+    (_name, row) => {
+      const scored = scoreCompany(
+        company({ legal_name: row.company, ...gateInputsFromFilterResult(row.filtered) }),
+        config,
+        { lists, now: NOW },
+      );
+      expect(scored.blocking_gates).not.toContain("G_GEO");
+      expect(scored.gates.find((g) => g.gate === "G_GEO")?.verdict).toBe("cannot_evaluate");
+    },
+  );
+
+  // The row the rescue existed for, given the address the captain's framing describes: a
+  // remote-first company registered outside BC whose founder is in Vancouver. Under the cut it
+  // must stay in scope at canada_other, on the band alone.
+  it("keeps the Superpilot shape in scope at canada_other", () => {
+    const filtered = runFilter(
+      {
+        legal_name: "Superpilot",
+        registrable_domain: "superpilot.ai",
+        email: "hello@superpilot.ai",
+        contact_name: "Igor Faletski",
+        address_municipality: "Toronto",
+        address_region: "ON",
+        address_country: "CA",
+      },
+      lists,
+      { now: NOW },
+    );
+    expect(filtered.kills).toEqual([]);
+    // The address is company data, not filter output, so the scorer is handed the same fields
+    // the filter read — that is what makes the two modules' bands comparable at all.
+    const inputs = {
+      ...gateInputsFromFilterResult(filtered),
+      municipality: "Toronto",
+      region: "ON",
+      country: "CA",
+    };
+    expect(geographyScope(company({ legal_name: "Superpilot", ...inputs }), lists).band).toBe(
+      "canada_other",
+    );
+
+    const scored = scoreCompany(
+      company({ legal_name: "Superpilot", ...inputs }),
+      config,
+      { lists, now: NOW },
+    );
+    expect(scored.blocking_gates).not.toContain("G_GEO");
+    expect(scored.gates.find((g) => g.gate === "G_GEO")?.verdict).toBe("pass");
+  });
+});

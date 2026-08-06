@@ -604,15 +604,48 @@ describe("K-GEO · geography, under the 2026-08-06 supersession", () => {
     );
   });
 
-  it("spares a remote-first company with a Vancouver founder", () => {
-    // Superpilot in the seed data is this shape: Igor Faletski, SFU BSc '07.
+  // The Superpilot shape (seed row: Igor Faletski, SFU BSc '07) is why §3.3's K-GEO-05
+  // multi-basis rescue existed — it stopped a remote-first company with a Vancouver founder
+  // being killed as outside_bc. A6 deleted that kill, so the row is now in scope on the band
+  // alone at canada_other, with no second dimension needed. That is the whole premise of A7.
+  it("keeps a remote-first company with a Vancouver founder, on the band alone", () => {
     const remoteFirst = account({
       legal_name: "Superpilot",
-      address_region: "WA",
-      address_country: "US",
-      observations: { decision_maker_municipality: "Vancouver", operating_municipality: "Vancouver" },
+      registrable_domain: "superpilot.ai",
+      address_municipality: "Toronto",
+      address_region: "ON",
+      address_country: "CA",
     });
     expect(kGeo01OutsideCanada(remoteFirst, lists, NOW).kind).toBe("pass");
+    expect(bandOf(remoteFirst)).toBe("canada_other");
+
+    const result = run(remoteFirst);
+    expect(result.decision).not.toBe("terminal");
+    expect(result.kills).toEqual([]);
+  });
+
+  // The cut is not free, and this pins the one shape it costs: a company registered OUTSIDE
+  // CANADA is now killed whoever its founder is. A single geographic terminal is the point.
+  //
+  // The row is built with the RETIRED enrichment key still on it, cast in deliberately, because
+  // that is the only way to state the behaviour change: a persisted row written before the cut
+  // still carries `decision_maker_municipality`, and it must no longer rescue anything.
+  it("no longer spares a company registered outside Canada for a local decision-maker", () => {
+    const usRegistered = {
+      ...account({
+        legal_name: "Superpilot US",
+        registrable_domain: "superpilot.io",
+        address_municipality: "Vancouver",
+        address_region: "WA",
+        address_country: "US",
+      }),
+      observations: { decision_maker_municipality: "Vancouver", operating_municipality: "Vancouver" },
+    } as unknown as Account;
+
+    const verdict = kGeo01OutsideCanada(usRegistered, lists, NOW);
+    expect(verdict.kind).toBe("terminal");
+    expect(verdict.kind === "terminal" && verdict.scope).toBe("account");
+    expect(run(usRegistered).decision).toBe("terminal");
   });
 });
 
@@ -1983,6 +2016,37 @@ describe("§5 · franchise or branch — test the LOCATION, not the brand", () =
 
     it("does not fire when the head office location is unknown — absence is not evidence", () => {
       expect(p04({})).toBeUndefined();
+    });
+
+    // Clause 2 used to accept a bare municipality alias recorded as an "operating municipality",
+    // which levied -30 on an Ontario chain whose branch was in Richmond, ONTARIO. The clause now
+    // takes CONFIRMED evidence only, so the namesake hazard cannot reach a penalty path.
+    it("takes confirmed branch evidence only, never a bare municipality namesake", () => {
+      const ontarioChain = account({
+        legal_name: "Ontario Chain Co",
+        registrable_domain: "onchain.ca",
+        address_municipality: "Toronto",
+        address_region: "ON",
+        address_country: "CA",
+        observations: { store_locator_location_count: 12, chain_has_franchise_page: true },
+      });
+      // The retired enrichment key is cast in on purpose: a row persisted before the cut still
+      // carries it, and Richmond, ONTARIO must no longer read as a BC branch.
+      const withNamesake = {
+        ...ontarioChain,
+        observations: { ...ontarioChain.observations, operating_municipality: "Richmond" },
+      } as unknown as Account;
+      const penalties = evaluatePenalties(withNamesake, { lists, now: NOW, franchise: "UNPROVEN" });
+      expect(penalties.map((p) => p.rule_id)).not.toContain("P-04");
+
+      const confirmed = evaluatePenalties(
+        account({
+          ...ontarioChain,
+          observations: { ...ontarioChain.observations, bc_branch_confirmed: true },
+        }),
+        { lists, now: NOW, franchise: "UNPROVEN" },
+      );
+      expect(confirmed.find((p) => p.rule_id === "P-04")?.delta).toBe(-30);
     });
   });
 
