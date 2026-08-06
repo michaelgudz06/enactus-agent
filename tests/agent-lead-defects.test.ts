@@ -210,4 +210,13 @@ describe("an unusable record is dropped and reported", () => {
     expect(out.leads).toEqual([]);
     expect(out.events.some((e) => e.type === "done" && e.count === 0)).toBe(true);
   });
+
+  // This suite runs with no service key, so nothing is written anywhere. A run
+  // that says otherwise is the board-looks-full-then-empty failure.
+  test("counts nothing as saved when there is no database to save to", async () => {
+    const out = await runWithLeads([rawLead(), rawLead({ company: "Gabi & Jules", source_index: 2 })]);
+
+    expect(out.leads).toHaveLength(2);
+    expect(out.events.some((e) => e.type === "done" && e.count === 2 && e.saved === 0)).toBe(true);
+  });
 });

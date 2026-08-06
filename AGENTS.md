@@ -59,15 +59,27 @@ associations that charge dues are out for the same reason.
 The model proposes; code verifies and has the last word. Anything a model
 produces that becomes a stored fact must pass a check written in code first:
 bounds-check every index into a list the model was shown, verify every domain,
-schema-validate every JSON response, and reject rather than coerce. When a check
-fails, report it honestly — do not throw the work away and blame the model, and
-never present unverified data as verified.
+schema-validate every JSON response. Never fabricate a value the model did not
+supply, and never present unverified data as verified.
+
+A wrong type is read only when it has exactly one possible reading — `fit_score`
+of `"88"` is a slip, not an ambiguity, so `recoverValue` in `src/lib/agent.ts`
+reads it as 88 and reports the recovery. Anything open to interpretation
+(`"high"`) is not guessed at: the field is left at its default. Both are
+announced on the activity stream, because a silent repair teaches nobody that
+the model is misbehaving. Do not "restore" a stricter rule by deleting that
+recovery — losing a usable score to a typo was a real defect.
 
 Rejection is scoped to the thing that failed. A bad field costs that field, an
 unusable record costs that record, and neither may cost the rest of the batch:
-`reviewLeads` in `src/lib/agent.ts` checks each lead on its own and emits what it
-dropped. Never validate a batch of leads atomically — one wrong-typed field
-taking every lead with it is the exact failure this agent was repaired for.
+`reviewLeads` checks each lead on its own and emits what it changed or dropped.
+Never validate a batch of leads atomically — one wrong-typed field taking every
+lead with it is the exact failure this agent was repaired for.
+
+The same honesty applies to storage. A failed insert must never be dressed up as
+a saved lead: `persistLead` returns whether the row was actually written, the run
+reports every failure with the database's own message, and the UI only claims
+leads reached the board when they did.
 
 ### Drafts only, never send
 
@@ -92,6 +104,11 @@ send, which is where CASL liability belongs. **Do not add a send path.**
 - `supabase-setup.sql` is the schema source of truth. `create table if not
   exists` will not add a column to an existing project, so any new column also
   needs an `alter table ... add column if not exists` line in the same file.
+  **Deploying is not done until those statements have been run against the live
+  project.** Until they are, every insert fails on the missing column; the agent
+  now reports that instead of showing leads it did not save, but the leads are
+  still lost. The statements are listed at the top of the file for whoever
+  deploys, and repeated with the other migrations.
 - Credentials live in `.env.local`, which is gitignored. Never print, log, or
   commit a secret value.
 

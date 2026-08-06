@@ -83,5 +83,8 @@ export type AgentEvent =
   | { type: "similar"; message: string; suggestion: string; pastPrompt: string }
   | { type: "clarify"; questions: string[] }
   | { type: "lead"; lead: Lead }
-  | { type: "done"; count: number; searchId: string | null }
+  // `count` is what was found, `saved` is what the database actually accepted.
+  // They differ when an insert fails, and the UI must never claim leads reached
+  // the board on the strength of `count` alone.
+  | { type: "done"; count: number; saved: number; searchId: string | null }
   | { type: "error"; message: string };

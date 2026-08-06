@@ -1,6 +1,16 @@
 -- ══════════════════════════════════════════════════════════════════
 -- Enactus Lead Agent — one-time setup for the dedicated Supabase project
 -- Paste this whole file into: Supabase → SQL Editor → New query → Run
+--
+-- ⚠ DEPLOYING TO A PROJECT THAT ALREADY HAS THESE TABLES? RUN THIS FIRST.
+-- `create table if not exists` does nothing to an existing table, so a new
+-- column never appears and EVERY lead insert fails. The agent now says so
+-- loudly instead of showing leads it did not save, but the fix is here:
+--
+--   alter table public.enactus_leads add column if not exists contact_email_status text;
+--   alter table public.enactus_leads add column if not exists website_status text;
+--
+-- Both are idempotent and repeated below with the rest of the migrations.
 -- ══════════════════════════════════════════════════════════════════
 
 create table if not exists public.enactus_leads (

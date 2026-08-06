@@ -50,7 +50,7 @@ describe("model-claimed company website", () => {
 
     expect(out.leads[0].website).toBeNull();
     expect(out.leads[0].website_status).toContain("momentenergy.co");
-    expect(out.leads[0].website_status).toMatch(/unverified/i);
+    expect(out.leads[0].website_status).toMatch(/the model claimed/i);
   });
 
   test("does not persist a claimed social or directory page as the company site", async () => {
@@ -82,11 +82,16 @@ describe("model-claimed company website", () => {
     expect(out.leads[0].company).toBe("Renaissance Coffee");
   });
 
-  test("falls back to the researched source hostname when the claim fails", async () => {
+  // The surviving website and the rejected claim sit on the record together, so
+  // the note has to name the model as the source of the string it is about --
+  // otherwise it reads as a warning about the site that is being shown.
+  test("falls back to the researched source hostname and says whose claim was rejected", async () => {
     const out = await runWithLead({ company: "Gabi & Jules", website: "https://gabiandjules.co", source_index: 2 });
 
     expect(out.leads[0].website).toBe("https://gabiandjules.com");
-    expect(out.leads[0].website_status).toContain("gabiandjules.co");
+    expect(out.leads[0].website_status).toContain("the model claimed https://gabiandjules.co");
+    expect(out.leads[0].website_status).toMatch(/rejected/i);
+    expect(out.leads[0].website_status).not.toContain("https://gabiandjules.com,");
   });
 
   test("still uses the source hostname when the model claims no website", async () => {

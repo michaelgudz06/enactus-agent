@@ -7,30 +7,28 @@ const stub = vi.hoisted(() => ({
   exaSearch: vi.fn(),
 }));
 
-// A resolver that only answers once every distinct domain in the batch is in
-// flight at the same time. Verified one lead at a time, the first lookup waits
-// on lookups that have not started yet and the run stalls out; verified
-// together, the whole batch clears in a single window.
-const barrier = vi.hoisted(() => {
-  const inFlight = new Set<string>();
-  let release = () => {};
-  const open = new Promise<void>((r) => {
-    release = r;
-  });
-  return { inFlight, open, arrive: (d: string, size: number) => {
-    inFlight.add(d);
-    if (inFlight.size >= size) release();
-  } };
-});
-
-const DOMAINS = ["one-dead.example", "two-dead.example", "three-dead.example", "four-dead.example"];
+// Records how many lookups were ever in flight at the same moment. Verified one
+// lead at a time, each lookup finishes before the next begins and the peak is 1;
+// verified together, every lookup is outstanding at once. This is the property
+// itself, not a stand-in for it, so it does not depend on any timeout.
+const dns = vi.hoisted(() => ({
+  inFlight: 0,
+  peakInFlight: 0,
+  looked: [] as string[],
+}));
 
 vi.mock("node:dns", () => ({
   promises: {
     resolveMx: async (domain: string) => {
-      barrier.arrive(domain, DOMAINS.length);
-      await barrier.open;
-      throw new Error("ENOTFOUND");
+      dns.looked.push(domain);
+      dns.inFlight += 1;
+      dns.peakInFlight = Math.max(dns.peakInFlight, dns.inFlight);
+      try {
+        await Promise.resolve();
+        throw new Error("ENOTFOUND");
+      } finally {
+        dns.inFlight -= 1;
+      }
     },
     resolve4: async () => {
       throw new Error("ENOTFOUND");
@@ -52,8 +50,13 @@ vi.mock("@/lib/exa", async (orig) => ({
 
 const { runAgent } = await import("@/lib/agent");
 
+const DOMAINS = ["one-dead.example", "two-dead.example", "three-dead.example", "four-dead.example"];
+
 beforeEach(() => {
   vi.clearAllMocks();
+  dns.inFlight = 0;
+  dns.peakInFlight = 0;
+  dns.looked.length = 0;
   stub.exaSearch.mockResolvedValue(CANDIDATES);
   stub.streamReasoner.mockResolvedValue({ reasoning: "Analyst reasoning.", content: "" });
 });
@@ -61,7 +64,20 @@ beforeEach(() => {
 describe("contact-detail verification latency", () => {
   // The reasoning budget is sized against a 60s serverless limit, so N dead
   // domains must cost one timeout window rather than N.
-  test("verifies every lead in the batch concurrently", async () => {
+  test("has every lead's lookup in flight at once rather than one at a time", async () => {
+    const leads = DOMAINS.map((domain, i) =>
+      rawLead({ company: `Dead ${i}`, website: null, source_index: 99, contact_email: `hello@${domain}` })
+    );
+    stub.chatJSON.mockImplementationOnce(respondsWith(PLAN)).mockImplementationOnce(respondsWith({ leads }));
+    const { emit, out } = collector();
+
+    await runAgent({ prompt: "burnaby cafes near sfu", mode: "sponsor", userName: "Tester", skipClarify: true }, emit);
+
+    expect([...dns.looked].sort()).toEqual([...DOMAINS].sort());
+    expect(dns.peakInFlight).toBe(DOMAINS.length);
+  });
+
+  test("keeps every lead and withholds only the unusable address", async () => {
     const leads = DOMAINS.map((domain, i) =>
       rawLead({ company: `Dead ${i}`, website: null, source_index: 99, contact_email: `hello@${domain}` })
     );
@@ -71,7 +87,6 @@ describe("contact-detail verification latency", () => {
     await runAgent({ prompt: "burnaby cafes near sfu", mode: "sponsor", userName: "Tester", skipClarify: true }, emit);
 
     expect(out.leads).toHaveLength(DOMAINS.length);
-    // Every lead is kept; only the unusable address is withheld.
     for (const lead of out.leads) {
       expect(lead.contact_email).toBeNull();
       expect(lead.contact_email_status).toMatch(/unverified/i);

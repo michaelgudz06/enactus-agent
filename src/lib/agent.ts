@@ -215,7 +215,7 @@ export async function runAgent(
 
   if (!candidates.length) {
     emit({ type: "status", step: "discover", message: "No candidates found. Try rephrasing or broadening the request." });
-    emit({ type: "done", count: 0, searchId: null });
+    emit({ type: "done", count: 0, saved: 0, searchId: null });
     return;
   }
   emit({ type: "status", step: "research", message: `Found ${candidates.length} candidates. Analyzing fit and connections` });
@@ -364,11 +364,32 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
   );
 
   const finalized: Lead[] = [];
+  const unsaved: string[] = [];
+  let savedCount = 0;
   for (const { raw, src, contact, site } of checked) {
     const { website, websiteStatus } = websiteFor(site, src);
-    const lead = await persistLead(raw, { website, websiteStatus, src, mode, userName, contact });
+    const { lead, saved, error } = await persistLead(raw, { website, websiteStatus, src, mode, userName, contact });
     finalized.push(lead);
+    if (saved) savedCount += 1;
+    if (!saved && error) {
+      unsaved.push(lead.company);
+      emit({
+        type: "status",
+        step: "persist",
+        message: `${lead.company} was NOT saved to the board: ${error}`,
+      });
+    }
     emit({ type: "lead", lead });
+  }
+
+  if (unsaved.length) {
+    emit({
+      type: "error",
+      message:
+        `${unsaved.length} of ${finalized.length} lead${finalized.length === 1 ? "" : "s"} could not be written to the database and ` +
+        `${unsaved.length === 1 ? "is" : "are"} shown here only — reload and ${unsaved.length === 1 ? "it" : "they"} will be gone. ` +
+        `If the error mentions a missing column, run the "alter table ... add column if not exists" statements in supabase-setup.sql.`,
+    });
   }
 
   // ── 5. Save the search to history ───────────────────────────────────────
@@ -386,7 +407,7 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
     }
   }
 
-  emit({ type: "done", count: finalized.length, searchId });
+  emit({ type: "done", count: finalized.length, saved: savedCount, searchId });
 }
 
 // `source_index` is the model's claim about which candidate it used. Trust it
@@ -424,14 +445,17 @@ function sourceWebsite(src?: ExaResult): string | null {
   return `https://${host}`;
 }
 
+// This note explains a REJECTED CLAIM, and any website shown alongside it came
+// from somewhere else, so it has to name the model as the source of the string
+// rather than read as a warning about the site on the card.
 function unverifiedWebsiteNote(check: Exclude<WebsiteCheck, { ok: true }>): string {
   const why =
     check.reason === "format"
-      ? "not a usable web address"
+      ? "which is not a usable web address"
       : check.reason === "aggregator"
-        ? "a social or directory page, not the company's own site"
-        : "domain does not resolve";
-  return `unverified website (${why}): ${check.url}`;
+        ? "which is a social or directory page rather than a company site"
+        : "which does not resolve";
+  return `rejected: the model claimed ${check.url}, ${why}`;
 }
 
 // The structuring model returns `{"leads":[...]}` most of the time and a bare
@@ -607,6 +631,14 @@ function unverifiedNote(check: Exclude<EmailCheck, { ok: true }>): string {
   return `unverified (${why}): ${check.email}`;
 }
 
+// A lead the database accepted, or the same lead in memory plus the reason it
+// was not written. `saved` is never true unless a row actually came back.
+interface PersistResult {
+  lead: Lead;
+  saved: boolean;
+  error: string | null;
+}
+
 async function persistLead(
   raw: RawLead,
   ctx: {
@@ -617,7 +649,7 @@ async function persistLead(
     userName: string;
     contact: EmailCheck | null;
   }
-): Promise<Lead> {
+): Promise<PersistResult> {
   // An unrecognised connection_type costs this field and nothing else.
   const conn = (CONNECTION_TYPES as string[]).includes(raw.connection_type ?? "")
     ? (raw.connection_type as ConnectionType)
@@ -651,14 +683,21 @@ async function persistLead(
     created_by_name: ctx.userName,
   };
 
-  if (hasServiceKey()) {
-    try {
-      const { data, error } = await supabaseAdmin.from(LEADS).insert(row).select("*").single();
-      if (!error && data) return data as Lead;
-    } catch {
-      // fall through to in-memory lead
-    }
-  }
   const now = new Date().toISOString();
-  return { id: crypto.randomUUID(), board_order: 0, created_at: now, updated_at: now, ...row } as Lead;
+  const inMemory = { id: crypto.randomUUID(), board_order: 0, created_at: now, updated_at: now, ...row } as Lead;
+
+  if (!hasServiceKey()) return { lead: inMemory, saved: false, error: null };
+
+  // The insert can fail for reasons the model has nothing to do with -- the
+  // commonest being a project that has not run the additive column migrations in
+  // supabase-setup.sql. Returning a plausible in-memory lead and calling it saved
+  // is the worst shape this codebase has: the board looks full and is empty on
+  // reload. Keep the object for display, but say what happened.
+  try {
+    const { data, error } = await supabaseAdmin.from(LEADS).insert(row).select("*").single();
+    if (!error && data) return { lead: data as Lead, saved: true, error: null };
+    return { lead: inMemory, saved: false, error: error?.message || "the database accepted the insert but returned no row" };
+  } catch (e) {
+    return { lead: inMemory, saved: false, error: (e as Error).message };
+  }
 }
