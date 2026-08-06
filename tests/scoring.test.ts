@@ -523,7 +523,7 @@ describe("evaluateGates", () => {
       (x) => x.gate === "G_SIZE",
     );
     expect(g?.verdict).toBe("cannot_evaluate");
-    expect(g?.message).toContain("absence of evidence is never a kill");
+    expect(g?.effect).toBe("none");
   });
 
   describe("G_EXISTS · missing data is never a kill", () => {
@@ -539,8 +539,6 @@ describe("evaluateGates", () => {
       const g = existsGate({ domain_resolves: true });
       expect(g?.verdict).toBe("cannot_evaluate");
       expect(g?.effect).toBe("none");
-      expect(g?.message).not.toContain("dead_domain");
-      expect(g?.message).toContain("Absence of evidence is never a kill");
     });
 
     it("does not block scoring when corroboration is merely absent", () => {
@@ -570,6 +568,106 @@ describe("evaluateGates", () => {
     });
   });
 
+  // The gate set walked once end to end, the way terminals and penalties were. For every
+  // blocking gate: what does it return when its inputs are ABSENT, and what does it return on
+  // CONTRARY EVIDENCE? Absent must never block.
+  describe("every blocking gate · absent inputs cannot_evaluate, only contrary evidence fails", () => {
+    function gate(name: string, over: Partial<CompanyFacts>, segment: SegmentAssignment = "S2") {
+      return evaluateGates(company({ legal_name: "X", ...over }), segment, config, {
+        lists,
+        now: NOW,
+      }).find((g) => g.gate === name);
+    }
+
+    it.each([
+      ["G_GEO", {}, { municipality: "Toronto", region: "ON" }, "S2"],
+      ["G_EXISTS", {}, { domain_resolves: false }, "S2"],
+      ["G_SIZE", {}, { headcount: 400 }, "S2"],
+      ["G_DELIVERABLE", {}, { deliverable_contact: false }, "S2"],
+      ["G_NO_SOLICIT", {}, { no_solicitation_found: true }, "S2"],
+      ["G_ELIGIBILITY", {}, { eligibility_requires_charity: true }, "S8"],
+    ] as const)("%s", (name, absent, contrary, segment) => {
+      const unknown = gate(name, absent, segment);
+      expect(unknown?.verdict, `${name} on absent input`).toBe("cannot_evaluate");
+      expect(unknown?.effect, `${name} on absent input`).toBe("none");
+
+      const known = gate(name, contrary, segment);
+      expect(known?.verdict, `${name} on contrary evidence`).toBe("fail");
+    });
+
+    it("G_NAMED_PERSON cannot evaluate an absent name and never blocks either way", () => {
+      expect(gate("G_NAMED_PERSON", {})?.verdict).toBe("cannot_evaluate");
+      expect(gate("G_NAMED_PERSON", { contact_name: "Owner / GM" })?.verdict).toBe("fail");
+      expect(gate("G_NAMED_PERSON", { contact_name: "Owner / GM" })?.effect).toBe("none");
+    });
+
+    it.each([
+      ["G_EXCLUDED", { is_excluded: true }],
+      ["G_SUPPRESSED", { suppressed: true }],
+    ] as const)("%s fails only on a recorded hit, and an unset field lets the row through", (name, hit) => {
+      expect(gate(name, {})?.verdict).toBe("pass");
+      expect(gate(name, hit)?.verdict).toBe("fail");
+    });
+  });
+
+  // G_GEO was the second gate caught blocking on missing data. Partial geography is an
+  // unresolved place name, not a place known to be out of area, and filter.ts returns
+  // cannot_evaluate on the identical input.
+  describe("G_GEO · partial geography is unresolved, not out of area", () => {
+    function geoGate(over: Partial<CompanyFacts>) {
+      return evaluateGates(company({ legal_name: "X", ...over }), "S2", config, {
+        lists,
+        now: NOW,
+      }).find((g) => g.gate === "G_GEO");
+    }
+
+    it.each([
+      ["a municipality with no region or postal code", { municipality: "Abbotsford" }],
+      ["a municipality the alias map does not carry", { municipality: "Nowheresville" }],
+      ["a postal code outside the metro prefixes, with no region", { postal_code: "V2S 1A1" }],
+      ["nothing at all", {}],
+    ])("cannot evaluate %s", (_label, over) => {
+      const g = geoGate(over);
+      expect(g?.verdict).toBe("cannot_evaluate");
+      expect(g?.effect).toBe("none");
+    });
+
+    it("does not block scoring on partial geography, and records the gap", () => {
+      const r = scoreCompany(
+        company({
+          legal_name: "Abbotsford Bakery",
+          municipality: "Abbotsford",
+          has_consumer_storefront: true,
+          relationship_tier: "cold",
+          lawful_basis_strength: "express",
+        }),
+        config,
+        { lists, now: NOW },
+      );
+      expect(r.blocked).toBe(false);
+      expect(r.blocking_gates).not.toContain("G_GEO");
+      expect(r.missing_inputs).toContain("G_GEO");
+    });
+
+    it("still FAILS on a recorded region that is not BC", () => {
+      expect(geoGate({ municipality: "Toronto", region: "ON" })?.verdict).toBe("fail");
+      expect(geoGate({ region: "SK" })?.verdict).toBe("fail");
+    });
+
+    it("passes a BC municipality outside Metro Vancouver on the strength of the region", () => {
+      const g = geoGate({ municipality: "Abbotsford", region: "BC" });
+      expect(g?.verdict).toBe("pass");
+    });
+
+    it.each([
+      ["Burnaby", "metro"],
+      ["Anmore", "metro"],
+      ["Bowen Island", "metro"],
+    ])("passes %s from metro-vancouver.csv alone", (municipality) => {
+      expect(geoGate({ municipality })?.verdict).toBe("pass");
+    });
+  });
+
   it("REASSIGNS rather than blocks when G_SIZE fails", () => {
     const g = evaluateGates(company({ legal_name: "X", headcount: 400 }), "S2", config, {
       lists,
@@ -591,7 +689,6 @@ describe("evaluateGates", () => {
     ).find((x) => x.gate === "G_TRIGGER_FRESH");
     expect(g?.verdict).toBe("fail");
     expect(g?.effect).toBe("park");
-    expect(g?.message).toContain("do not kill");
   });
 
   it("applies G_ELIGIBILITY to S8, S10 and S14 only", () => {

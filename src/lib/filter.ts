@@ -66,6 +66,46 @@
 // A fifth contradiction lives in the ICP report and is documented at `assignSegment` in
 // src/lib/scoring.ts: §5 S4 asserts §4 precedence sends a funded CPG brand to S4, while §4's
 // normative ladder tests raised_institutional_capital first and sends it to S11. TAKEN: §4.
+//
+// ===========================================================================
+// RESOLVED AMBIGUITIES — where the specification is silent rather than contradictory
+// ===========================================================================
+//
+//  A1. MAY A PENALTY FIRE ON A MERELY ABSENT VALUE? Ruled 2026-08-06.
+//
+//      §2.3 states the asymmetry rule for KILLS only — "missing data is never a kill" — and is
+//      silent on penalties. It does not follow that absence may never penalise: §4 P-09 is
+//      "`unresolved_geography` AFTER ONE RETRY, -15", and §2.3's own worked example sends a null
+//      region for one more resolution attempt and THEN takes a penalty. What the report never
+//      does is state the gate as a general rule.
+//
+//      THE RULE TAKEN: a penalty may fire on an OBSERVED POSITIVE FACT, or on a MISSING VALUE
+//      WHERE A RESOLUTION ATTEMPT HAS RUN AND ITS FAILURE IS RECORDED ON THE ROW. It never fires
+//      on a value that is merely absent.
+//
+//      Applied in one pass over all fifteen penalties. P-01/02/03/05/07/08/11/12/13/15 fire on an
+//      observed positive; P-04 requires all three of its §4 clauses; P-06 gates on
+//      `discovery_tactics_attempted >= 2` and P-09 on `geography_resolution_attempts >= 1`, which
+//      were already the correct shape and are the model for the rest. P-10's bare
+//      `!website_url && !registrable_domain` arm was the one exception and now gates on
+//      `website_resolution_attempts >= 1`: a freshly discovered row carrying a name, a
+//      municipality and a phone must not be marked down before anything has looked it up, and
+//      thin-web-presence local operators are precisely the population the ICP research ranks
+//      highest-converting.
+//
+//  A2. P-08's PAIRED CONSTRAINT IS A PREDICATE, NOT A SENTENCE. §4 specifies P-08 as
+//      "-15 AND forbid `lawful_basis = conspicuous_pub`". The forbid half is enforced by
+//      `p08RoleAccountCannotClaimConspicuousPub`, an email-scoped terminal that closes the email
+//      channel exactly as L-04 does, so `gateInputsFromFilterResult` reports
+//      `lawful_basis_strength: "none"` and G_LAWFUL_BASIS fails. A constraint described only in a
+//      rendered sentence is a comment, and this is the CASL surface where the club carries the
+//      burden of proof.
+//
+//  A3. §7.2 `LIST_national_flag` IS NOT §7.1 `LIST_national_partner`. §7.2 is headed "review, do
+//      not kill" with "Kill mode: none — `human_review` only". It therefore emits a FLAG and
+//      never a terminal and never a `enactus_canada` channel: PwC is on it because it is BOTH a
+//      named donor AND a warm SFU relationship, and Scotiabank and CWB because the report could
+//      not tell "ended" from "mid-renewal" and left it as an open question for a human.
 
 import {
   type KeyedList,
@@ -194,6 +234,14 @@ export interface AccountObservations {
   other_leads_on_domain?: number;
   /** P-10: whether the account has a website at all (social-only presence). */
   social_only_presence?: boolean;
+  /**
+   * P-10: how many website-enrichment passes have run and recorded their result on this row.
+   *
+   * Absent website fields are only evidence of a social-only business once something has looked.
+   * Below 1 the row has simply not been enriched yet, and per resolved ambiguity A1 a merely
+   * absent value never penalises.
+   */
+  website_resolution_attempts?: number;
 }
 
 /** The §2.1 account record. Nothing outside this shape is in scope for a predicate. */
@@ -703,6 +751,48 @@ export function kOrg01NationalPartner(a: Account, lists: QualificationLists, now
 }
 
 /**
+ * §7.2 `LIST_national_flag` · Review, do not kill → FLAG (`human_review`).
+ *
+ * A SEPARATE LIST FROM §7.1, WITH A SEPARATE OUTCOME. §7.2's own heading is "review, do not kill"
+ * and its Kill-mode cell reads "none — `human_review` only", so this emits a FLAG and never a
+ * terminal and never the `enactus_canada` channel K-ORG-01 uses. Routing these to the national
+ * body would be the over-broad-routing defect in a new place:
+ *
+ *   - PwC is on the list precisely BECAUSE it is both a named donor and a warm SFU relationship
+ *     (the PwC Office Tour). §7.2's words: killing PwC destroys more than the rule protects.
+ *   - Scotiabank and Canadian Western Bank are LAPSED, and the report could not distinguish
+ *     "ended" from "mid-renewal". The flag is what puts that open question in front of a human
+ *     instead of letting the row reach the queue as though nothing were known about it.
+ *
+ * A flag changes no decision on its own: `runFilter` collects it alongside K-REP-02's and the
+ * account keeps being evaluated, keeps accruing penalties and stays in the queue.
+ */
+export function nationalFlagReview(a: Account, lists: QualificationLists, now: Date): PredicateResult {
+  const hit = lookupList(lists.nationalFlag, a.registrable_domain, nameKey(a));
+  if (!hit) return pass("LIST-NATIONAL-FLAG");
+  const evidence = hit.sourceUrl || listEvidence(lists.nationalFlag, hit.value);
+  return {
+    kind: "flag",
+    rule_id: "LIST-NATIONAL-FLAG",
+    reason: "national_flag_needs_human_review",
+    flag_reason: "lapsed_or_conflicted_national_relationship",
+    detail: hit.entity || hit.value,
+    evidence_url: evidence,
+    message: sentence("national_flag_needs_human_review", {
+      account: a,
+      rule_id: "LIST-NATIONAL-FLAG",
+      verb: "flagged for human review",
+      because:
+        `it is on the §7.2 national-flag list as ${hit.entity || hit.value} — ${hit.reason}. ` +
+        `This list is review-only: the row is NOT rejected and is NOT routed to Enactus Canada, ` +
+        `because the question a human has to answer is whether the national relationship still exists`,
+      evidence_url: evidence,
+      now,
+    }),
+  };
+}
+
+/**
  * K-ORG-02 · Student organisation at any school → TERMINAL.
  *
  * A student organisation is structurally a competitor for the identical dollar, has no
@@ -1025,9 +1115,14 @@ export function enterpriseProxies(a: Account): EnterpriseProxyReport {
  * ⚠️ §6 calls this out as the ONE predicate with a genuine data-availability problem: no free
  * source publishes headcount for BC micro-businesses, Apollo is out of scope in phase 1, and
  * LinkedIn is a hard build constraint. This implements §6's recommended option 2 — observable
- * enterprise proxies, two or more of which stand in for `headcount_band_max >= 500`. A SINGLE
- * proxy must never kill (Cactus Club Cafe publishes Suppliers and is a past partner), so one
- * proxy produces P-03 instead. Zero proxies and no headcount is `cannot_evaluate`.
+ * enterprise proxies, two or more of which stand in for `headcount_band_max >= 500`.
+ *
+ * A SINGLE proxy does nothing here, and — per contradiction C1 above — nothing anywhere else
+ * either. §6 option 2's "One -> P-03 (-20)" arm is NOT implemented: P-03 is defined in §4 as
+ * "publicly traded (has a ticker / investor-relations section)", and a /suppliers path is not
+ * evidence of that. Cactus Club Cafe publishes Suppliers, has no ticker, and is a PAST ENACTUS
+ * SFU PARTNER. So one non-ticker proxy produces no outcome at all, which is the intended
+ * behaviour and not an omission. Zero proxies and no headcount is `cannot_evaluate`.
  */
 export function kSize01EnterpriseScale(a: Account, now: Date, franchise?: FranchiseStatus): PredicateResult {
   const headcount = a.headcount ?? null;
@@ -1626,18 +1721,32 @@ export const HARD_BOUNCE_SIBLING_DELTA = -40;
  * businesses, and D-07 already exempts the same list for the same reason. Without this, one
  * bounced `info@gmail.com` levies the largest penalty in §4 on every free-mail lead in the
  * corpus. See the REPORT CONTRADICTIONS note at the head of this file.
+ *
+ * `lists` is REQUIRED, not optional. An optional parameter makes that exemption reachable-around
+ * by omitting an argument — `lists?.freeMailProviders…` yields undefined, `!undefined` is true,
+ * and every free-mail domain is treated as shared ownership again. A safety exemption the type
+ * system does not enforce is not an exemption.
  */
 export function kRel08HardBounced(
   a: Account,
   now: Date,
-  lists?: Pick<QualificationLists, "freeMailProviders">,
+  lists: Pick<QualificationLists, "freeMailProviders">,
 ): PredicateResult {
   const at = a.rel?.bounced_hard_at;
   if (!at) return pass("K-REL-08");
   const rawDomain = emailDomain(a);
   const address = a.email ?? "";
-  const sharedOwnership = Boolean(rawDomain) && !lists?.freeMailProviders.domains.has(rawDomain);
-  const domain = sharedOwnership ? rawDomain : "";
+  // Three distinct cases, rendered as three distinct sentences. Collapsing "the domain is
+  // free-mail" into "no domain is recorded" asserted the free-mail explanation for an account
+  // whose address was corporate — which is exactly what a re-filter pass sees, because the
+  // address-scoped terminal cleared `email`/`email_domain` while `rel.bounced_hard_at` stayed.
+  const freeMail = Boolean(rawDomain) && lists.freeMailProviders.domains.has(rawDomain);
+  const domain = rawDomain && !freeMail ? rawDomain : "";
+  const siblingClause = domain
+    ? `; every other lead sharing ${domain} takes a ${HARD_BOUNCE_SIBLING_DELTA} penalty but stays in the queue`
+    : freeMail
+      ? `, and no other lead is penalised because ${rawDomain} is a free-mail provider that implies no shared ownership`
+      : ", and no other lead is penalised because this row records no email domain to match siblings on — the address it bounced from is no longer on the record";
   return {
     kind: "terminal",
     scope: "address",
@@ -1650,7 +1759,7 @@ export function kRel08HardBounced(
       account: a,
       rule_id: "K-REL-08",
       verb: "rejected at this address",
-      because: `mail to it hard-bounced on ${at}. The address is dead forever${domain ? `; every other lead sharing ${domain} takes a ${HARD_BOUNCE_SIBLING_DELTA} penalty but stays in the queue` : ", and no other lead is penalised because the address is on a free-mail provider that implies no shared ownership"}`,
+      because: `mail to it hard-bounced on ${at}. The address is dead forever${siblingClause}`,
       evidence_url: "rel.bounced_hard_at",
       now,
     }),
@@ -2150,6 +2259,58 @@ export function l04NotConspicuouslyPublished(a: Account, now: Date): PredicateRe
   };
 }
 
+/**
+ * P-08's PAIRED HARD CONSTRAINT · a role account may not claim conspicuous publication
+ * → TERMINAL for email.
+ *
+ * §4 specifies P-08 as "-15 **and** forbid `lawful_basis = conspicuous_pub`". The -15 lives in
+ * `evaluatePenalties`; this is the other half, and it has to be a predicate rather than a clause
+ * in a rendered sentence — a constraint that exists only as prose is a comment, and nothing
+ * downstream can read it.
+ *
+ * WHY the forbid: s.10(9)(b) requires the message to be relevant to the recipient's ROLE, and
+ * §3.6's source note is explicit that relevance to a person's role is hard to establish for a
+ * SHARED mailbox. `info@` names no person, so no role relevance can be established for it, and
+ * the basis is unsound whatever page it was published on.
+ *
+ * WHY email-scoped: identically to L-04, this invalidates the BASIS FOR SENDING, not the address
+ * and not the account. The account survives with its address intact and stays reachable by web
+ * form, phone or a human; `email_channel_open` goes false, which is what
+ * `gateInputsFromFilterResult` turns into `lawful_basis_strength: "none"` so G_LAWFUL_BASIS
+ * fails. A caller that recorded `conspicuous_pub_named_person` for a shared mailbox no longer
+ * gets that weight awarded.
+ *
+ * The remedy for a human is to record a basis this address can actually carry, so the duration
+ * is `until_human_clears` rather than `forever`.
+ */
+export function p08RoleAccountCannotClaimConspicuousPub(a: Account, now: Date): PredicateResult {
+  if (a.lawful_basis !== "conspicuous_pub") return pass("P-08-CONSTRAINT");
+  if (!isRoleAccount(a)) return pass("P-08-CONSTRAINT");
+  const local = emailLocal(a);
+  const evidence = a.lawful_basis_url ?? "lawful_basis";
+  return {
+    kind: "terminal",
+    scope: "email",
+    rule_id: "P-08-CONSTRAINT",
+    reason: "role_account_cannot_claim_conspicuous_pub",
+    detail: `${local}@ with lawful_basis=conspicuous_pub`,
+    evidence_url: evidence,
+    duration: { kind: "until_human_clears" },
+    message: sentence("role_account_cannot_claim_conspicuous_pub", {
+      account: a,
+      rule_id: "P-08-CONSTRAINT",
+      verb: "rejected for email",
+      because:
+        `${local}@ is a shared role mailbox and the basis claimed for it is conspicuous ` +
+        `publication. CASL requires the message to be relevant to the recipient's role, which ` +
+        `cannot be established for a mailbox that names no person, so §4 forbids this basis for ` +
+        `this address. The account is untouched and stays reachable by form, phone or a human`,
+      evidence_url: evidence,
+      now,
+    }),
+  };
+}
+
 /** L-05 · No lawful basis recorded → HOLD. Re-qualify, do not drop. */
 export function l05NoLawfulBasis(a: Account, now: Date): PredicateResult {
   if (a.lawful_basis) return pass("L-05");
@@ -2611,7 +2772,8 @@ export function evaluatePenalties(a: Account, ctx: PenaltyContext): PenaltyResul
   }
 
   // P-08 — role account. THE measurement that settles it: 25 of 25 seeded addresses are role
-  // accounts, so a kill would empty the pipeline. Paired with a hard constraint on the basis.
+  // accounts, so a kill would empty the pipeline. The paired hard constraint is enforced by
+  // `p08RoleAccountCannotClaimConspicuousPub` in the predicate sequence, not by this sentence.
   if (isRoleAccount(a)) {
     const p = penalty(
       a,
@@ -2620,7 +2782,7 @@ export function evaluatePenalties(a: Account, ctx: PenaltyContext): PenaltyResul
       "role_account",
       -15,
       emailLocal(a),
-      `its address is the role mailbox ${emailLocal(a)}@. 25 of 25 seeded addresses are role accounts, so killing them would empty the pipeline — but CASL relevance is hard to establish for a shared mailbox, so this penalty is paired with a hard constraint: lawful_basis = conspicuous_pub is FORBIDDEN for this address`,
+      `its address is the role mailbox ${emailLocal(a)}@. 25 of 25 seeded addresses are role accounts, so killing them would empty the pipeline — but CASL relevance is hard to establish for a shared mailbox, so this penalty is paired with a hard constraint enforced by rule P-08-CONSTRAINT: lawful_basis = conspicuous_pub is FORBIDDEN for this address`,
     );
     out.push(p);
   }
@@ -2642,8 +2804,14 @@ export function evaluatePenalties(a: Account, ctx: PenaltyContext): PenaltyResul
     );
   }
 
-  // P-10 — no website, social-only presence.
-  if (o.social_only_presence || (!a.website_url && !a.registrable_domain)) {
+  // P-10 — no website, social-only presence. ENTRY CONDITION, per resolved ambiguity A1: either
+  // social-only presence was OBSERVED, or the website fields are empty AND a website-enrichment
+  // pass has run and recorded its failure. Absent website fields on their own are absence of
+  // evidence, not evidence of an Instagram-only business, and the rows they wrongly marked down
+  // are exactly the thin-web-presence local operators the ICP ranks highest-converting.
+  const websiteLookupRan = (o.website_resolution_attempts ?? 0) >= 1;
+  const noWebsiteAfterLookup = websiteLookupRan && !a.website_url && !a.registrable_domain;
+  if (o.social_only_presence || noWebsiteAfterLookup) {
     out.push(
       penalty(
         a,
@@ -2651,8 +2819,12 @@ export function evaluatePenalties(a: Account, ctx: PenaltyContext): PenaltyResul
         "P-10",
         "social_only_presence",
         -20,
-        a.website_url ?? "no website",
-        "it has no website and only a social presence. Many Vancouver micro-businesses are Instagram-only, and several current partners look exactly like this (Baaad Anna's, Nordic Yarn, Freesia Soap)",
+        o.social_only_presence
+          ? (a.website_url ?? "social_only_presence observed")
+          : `no website found after ${o.website_resolution_attempts} enrichment attempt(s)`,
+        o.social_only_presence
+          ? "a social-only presence was observed for it. Many Vancouver micro-businesses are Instagram-only, and several current partners look exactly like this (Baaad Anna's, Nordic Yarn, Freesia Soap)"
+          : `no website was found for it after ${o.website_resolution_attempts} enrichment attempt(s). Many Vancouver micro-businesses are Instagram-only, and several current partners look exactly like this (Baaad Anna's, Nordic Yarn, Freesia Soap)`,
       ),
     );
   }
@@ -2833,8 +3005,9 @@ export function killPredicateSequence(
     () => kRel05DeclinedRecently(a, now),
     () => kRel07DeclinedOnTiming(a, now),
     () => kRel08HardBounced(a, now, lists),
-    // 3. national partner
+    // 3. national partner (§7.1 → CHANNEL) and the separate §7.2 review list (→ FLAG only)
     () => kOrg01NationalPartner(a, lists, now),
+    () => nationalFlagReview(a, lists, now),
     // 4. org type
     () => kOrg06SelfOrInternalUnit(a, lists, now),
     () => kOrg02StudentOrganisation(a, lists, now),
@@ -2866,6 +3039,7 @@ export function killPredicateSequence(
     () => l02NoSolicitationStatement(a, now),
     () => l03HarvestedAddress(a, now),
     () => l04NotConspicuouslyPublished(a, now),
+    () => p08RoleAccountCannotClaimConspicuousPub(a, now),
     () => l05NoLawfulBasis(a, now),
     () => l06l07ConsentBasisExpired(a, now),
     () => l08NoProvenanceSnapshot(a, now),

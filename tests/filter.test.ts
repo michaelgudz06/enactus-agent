@@ -33,6 +33,7 @@ import {
   kOrg06SelfOrInternalUnit,
   kRel01Suppressed,
   kRel03AlreadySponsorThisCycle,
+  kRel08HardBounced,
   kRel04ContactedRecently,
   kRel05DeclinedRecently,
   kRel06DeclinedPermanently,
@@ -44,6 +45,8 @@ import {
   l03HarvestedAddress,
   l04NotConspicuouslyPublished,
   l05NoLawfulBasis,
+  nationalFlagReview,
+  p08RoleAccountCannotClaimConspicuousPub,
   placeholderContactName,
   runFilter,
 } from "../src/lib/filter";
@@ -141,13 +144,14 @@ describe("K-ORG-01 · Enactus Canada national partner → CHANNEL", () => {
     expect(r.kind).toBe(expected);
   });
 
-  it("routes to enactus_canada with a readable reason", () => {
+  it("routes to enactus_canada rather than killing, and names the listed entity", () => {
     const r = kOrg01NationalPartner(account({ legal_name: "TD", registrable_domain: "td.com" }), lists, NOW);
     expect(r.kind).toBe("channel");
     if (r.kind !== "channel") return;
     expect(r.required_channel).toBe("enactus_canada");
     expect(r.reason).toBe("national_partner_route_to_enactus_canada");
-    expect(r.message).toContain("must not compete with its own national body");
+    expect(r.detail).toBeTruthy();
+    expect(r.evidence_url).toBeTruthy();
   });
 });
 
@@ -241,10 +245,11 @@ describe("K-ORG-04 · government body → CHANNEL grants_pipeline, never TERMINA
     expect(r.required_channel).toBe("grants_pipeline");
   });
 
-  it("says WHY the row is rerouted rather than dropped", () => {
+  it("reroutes rather than dropping — the outcome is a channel, never a terminal", () => {
     const r = kOrg04GovernmentBody(account({ legal_name: "Vancouver Public Library" }), lists, NOW);
     if (r.kind !== "channel") throw new Error("expected a channel");
-    expect(r.message).toContain("venue and delivery partners");
+    expect(r.required_channel).toBe("grants_pipeline");
+    expect(r.reason).toBe("government_body_no_sponsorship_channel");
   });
 });
 
@@ -254,7 +259,7 @@ describe("K-ORG-05 · registered charity, by CRA designation", () => {
     expect(r.kind).toBe("cannot_evaluate");
     if (r.kind !== "cannot_evaluate") return;
     expect(r.missing_fields).toContain("cra_designation");
-    expect(r.message).toContain("not rejected on this rule");
+    expect(r.reason).toBe("cannot_evaluate");
   });
 
   it.each([
@@ -299,7 +304,9 @@ describe("K-SIZE-01 · enterprise scale — the one predicate with a real data p
     const r = kSize01EnterpriseScale(account({ legal_name: "Red Bull" }), NOW, "UNPROVEN");
     expect(r.kind).toBe("cannot_evaluate");
     if (r.kind !== "cannot_evaluate") return;
-    expect(r.message).toContain("specification bug");
+    expect(r.missing_fields).toEqual(
+      expect.arrayContaining(["headcount", "headcount_band_max"]),
+    );
   });
 
   it("kills at the ISED large threshold of 500, not at 100", () => {
@@ -353,7 +360,7 @@ describe("K-CHAN-01 · published application channel → CHANNEL web_form", () =
     expect(r.kind).toBe("channel");
     if (r.kind !== "channel") return;
     expect(r.required_channel).toBe("web_form");
-    expect(r.message).toContain("sidesteps CASL");
+    expect(r.reason).toBe("apply_via_published_channel_not_email");
   });
 
   it.each([
@@ -393,7 +400,7 @@ describe("K-CHAN-02 · published eligibility the club cannot satisfy → TERMINA
     expect(r.kind).toBe("terminal");
     if (r.kind !== "terminal") return;
     expect(r.required_channel).toBe("sfu_advancement");
-    expect(r.message).toContain("118520725RR0001");
+    expect(r.reason).toBe("ineligible_requires_registered_charity");
   });
 
   it("matches the French statutory vocabulary too", () => {
@@ -433,8 +440,8 @@ describe("K-GEO · geography", () => {
     expect(r.kind).toBe("terminal");
     if (r.kind !== "terminal") return;
     expect(r.reason).toBe("outside_bc");
-    expect(r.message).toContain("Saskatoon, SK");
-    expect(r.message).toContain("no British Columbia location was found");
+    expect(r.scope).toBe("account");
+    expect(r.detail).toBe("Saskatoon, SK");
   });
 
   it("never kills on a MISSING region — absence of evidence is not evidence", () => {
@@ -498,7 +505,8 @@ describe("K-GEO · geography", () => {
       NOW,
     );
     if (r.kind !== "penalty") throw new Error("expected a penalty");
-    expect(r.message).toContain("never a kill");
+    expect(r.tag).toBe("outside_metro_vancouver");
+    expect(r.delta).toBe(-25);
   });
 });
 
@@ -597,7 +605,11 @@ describe("K-REL · relationship state", () => {
       NOW,
     );
     if (r.kind !== "terminal") throw new Error("expected a terminal");
-    expect(r.message).toContain("NEXT exec team may ask again");
+    expect(r.duration.kind).toBe("until");
+    if (r.duration.kind !== "until") return;
+    expect(r.duration.clears_at.slice(0, 10)).toBe("2027-06-01");
+    expect(r.duration.window).toBe("12 months");
+    expect(isReversible(r)).toBe(true);
   });
 
   it.each(["never_contact_us", "policy_no_student_groups"] as const)(
@@ -738,7 +750,7 @@ describe("K-DELIV · deliverability", () => {
       );
       expect(r.kind).toBe("cannot_evaluate");
       if (r.kind !== "cannot_evaluate") return;
-      expect(r.message).toContain("RFC 5321");
+      expect(r.missing_fields).toContain("dns.smtp25_open");
     },
   );
 
@@ -906,14 +918,73 @@ describe("role accounts — 25 of 25 seeded addresses are role accounts, so a ki
     }
   });
 
-  it("penalises a role account -15 AND forbids the conspicuous-publication basis", () => {
+  it("penalises a role account -15", () => {
     const penalties = evaluatePenalties(
       account({ legal_name: "X", registrable_domain: "example.ca", email: "info@example.ca" }),
       { lists, now: NOW },
     );
     const p08 = penalties.find((p) => p.rule_id === "P-08");
     expect(p08?.delta).toBe(-15);
-    expect(p08?.message).toContain("conspicuous_pub is FORBIDDEN");
+    expect(p08?.tag).toBe("role_account");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P-08's OTHER half. §4 specifies "-15 AND forbid lawful_basis = conspicuous_pub". A constraint
+// that exists only inside a rendered sentence is a comment, so this asserts the forbidden
+// combination is actually rejected — through the predicate, through runFilter, and out the far
+// side into the gate input the scorer reads.
+// ---------------------------------------------------------------------------
+
+describe("P-08's paired hard constraint · a role account may not claim conspicuous_pub", () => {
+  const roleClaimingConspicuousPub = account({
+    legal_name: "Example Ltd",
+    registrable_domain: "example.ca",
+    email: "info@example.ca",
+    lawful_basis: "conspicuous_pub",
+    lawful_basis_url: "https://example.ca/contact",
+  });
+
+  it("passes L-04, which only tests the PUBLISHING DOMAIN — so L-04 cannot be the enforcement", () => {
+    expect(l04NotConspicuouslyPublished(roleClaimingConspicuousPub, NOW).kind).toBe("pass");
+  });
+
+  it("rejects the combination for email, leaving the account and the address intact", () => {
+    const r = p08RoleAccountCannotClaimConspicuousPub(roleClaimingConspicuousPub, NOW);
+    expect(r.kind).toBe("terminal");
+    if (r.kind !== "terminal") return;
+    expect(r.reason).toBe("role_account_cannot_claim_conspicuous_pub");
+    expect(r.scope).toBe("email");
+    expect(r.duration.kind).toBe("until_human_clears");
+    expect(isReversible(r)).toBe(true);
+  });
+
+  it.each([
+    ["a named person on the same claim", { email: "priya.patel@example.ca" }],
+    ["a role account on a different basis", { lawful_basis: "express" as const }],
+    ["a role account with no basis recorded", { lawful_basis: null }],
+  ])("does not fire for %s", (_label, over) => {
+    expect(
+      p08RoleAccountCannotClaimConspicuousPub({ ...roleClaimingConspicuousPub, ...over }, NOW).kind,
+    ).toBe("pass");
+  });
+
+  it("closes the email channel through runFilter without dropping the row", () => {
+    const result = run(roleClaimingConspicuousPub);
+    expect(result.decision).not.toBe("terminal");
+    expect(result.kills).toHaveLength(0);
+    expect(result.email_channel_open).toBe(false);
+    expect(result.field_terminals.map((t) => t.rule_id)).toContain("P-08-CONSTRAINT");
+    // The address survives: the SEND is barred, not the contact.
+    expect(result.account.email).toBe("info@example.ca");
+    // And the -15 half still lands, because both halves of P-08 fire together.
+    expect(result.penalties.find((p) => p.rule_id === "P-08")?.delta).toBe(-15);
+  });
+
+  it("leaves the email channel open for the same account on a basis it can carry", () => {
+    const result = run({ ...roleClaimingConspicuousPub, lawful_basis: "express" });
+    expect(result.email_channel_open).toBe(true);
+    expect(result.field_terminals.map((t) => t.rule_id)).not.toContain("P-08-CONSTRAINT");
   });
 });
 
@@ -939,7 +1010,7 @@ describe("placeholder contact names — 9 of 25 measured", () => {
     expect(r.kind).toBe("terminal");
     if (r.kind !== "terminal") return;
     expect(r.reason).toBe("placeholder_contact_name");
-    expect(r.message).toContain("the account is untouched");
+    expect(r.scope).toBe("person");
   });
 
   it.each(["Justin Cheung", "Praveen Varshney", "Christine Vukusic", "Igor Faletski"])(
@@ -1164,6 +1235,83 @@ describe("address-scoped terminals · the address dies, the account does not", (
     expect(sibling.message).toContain("example.ca");
     expect(sibling.message).not.toMatch(/\bwas (rejected|killed|dropped)\b/i);
   });
+
+  // The predicate exercised DIRECTLY, not only through runFilter. runFilter happens to pass the
+  // lists; a direct caller is where an omitted argument would have re-opened the corpus-wide
+  // free-mail behaviour, so both branches are pinned at the function boundary.
+  describe("called directly", () => {
+    it("emits the sibling penalty for a corporate domain", () => {
+      const r = kRel08HardBounced(
+        account({ ...base, email: "info@example.ca", rel: { bounced_hard_at: "2026-05-01" } }),
+        NOW,
+        lists,
+      );
+      expect(r.kind).toBe("terminal");
+      if (r.kind !== "terminal") return;
+      expect(r.scope).toBe("address");
+      expect(r.duration.kind).toBe("forever");
+      expect(r.sibling_penalty).toMatchObject({
+        match_field: "email_domain",
+        match_value: "example.ca",
+        delta: -40,
+      });
+    });
+
+    it("emits NO sibling penalty for a free-mail domain", () => {
+      const r = kRel08HardBounced(
+        account({
+          ...base,
+          registrable_domain: null,
+          email: "info@gmail.com",
+          rel: { bounced_hard_at: "2026-05-01" },
+        }),
+        NOW,
+        lists,
+      );
+      expect(r.kind).toBe("terminal");
+      if (r.kind !== "terminal") return;
+      expect(r.scope).toBe("address");
+      expect(r.sibling_penalty).toBeUndefined();
+    });
+  });
+
+  // THE RE-FILTER PATH. The first pass clears email/email_local/email_domain via the
+  // address-scoped terminal while rel.bounced_hard_at stays on the record, so a second pass over
+  // the PERSISTED row sees a bounce with no domain. The two silences are different facts and the
+  // row must not claim the free-mail one.
+  it("distinguishes 'no email domain on the record' from 'the domain is free-mail'", () => {
+    const first = run(
+      account({
+        ...base,
+        legal_name: "Acme Ltd",
+        email: "info@example.ca",
+        rel: { bounced_hard_at: "2026-05-01" },
+      }),
+    );
+    expect(first.cleared_fields).toEqual(expect.arrayContaining(["email", "email_domain"]));
+    expect(first.sibling_penalties.map((p) => p.match_value)).toEqual(["example.ca"]);
+
+    // Re-filter the record as it was persisted.
+    const second = run(first.account);
+    const reTerminal = second.field_terminals.find((t) => t.rule_id === "K-REL-08");
+    expect(reTerminal).toBeDefined();
+    expect(second.sibling_penalties).toEqual([]);
+
+    const freeMail = run(
+      account({
+        ...base,
+        registrable_domain: null,
+        email: "info@gmail.com",
+        rel: { bounced_hard_at: "2026-05-01" },
+      }),
+    ).field_terminals.find((t) => t.rule_id === "K-REL-08");
+    expect(freeMail).toBeDefined();
+
+    // Both rows emit no sibling penalty, but for different reasons, and the sentences differ.
+    expect(reTerminal?.message).not.toBe(freeMail?.message);
+    expect(reTerminal?.message).not.toMatch(/free-mail/i);
+    expect(freeMail?.message).toMatch(/free-mail/i);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1327,7 +1475,8 @@ describe("K-LEGAL · consent and provenance", () => {
       const r = l03HarvestedAddress(account({ legal_name: "X", collection_method: method }), NOW);
       expect(r.kind).toBe("terminal");
       if (r.kind !== "terminal") return;
-      expect(r.message).toContain("PIPEDA s.7.1(2)");
+      expect(r.reason).toBe("harvested_address_prohibited");
+      expect(r.detail).toBe(method);
     },
   );
 
@@ -1344,7 +1493,7 @@ describe("K-LEGAL · consent and provenance", () => {
     const r = l03HarvestedAddress(account({ legal_name: "X" }), NOW);
     expect(r.kind).toBe("cannot_evaluate");
     if (r.kind !== "cannot_evaluate") return;
-    expect(r.message).toContain("cannot be backfilled");
+    expect(r.missing_fields).toContain("collection_method");
   });
 
   const l04Cases: [string, string, "terminal" | "pass"][] = [
@@ -1372,7 +1521,7 @@ describe("K-LEGAL · consent and provenance", () => {
     const r = l05NoLawfulBasis(account({ legal_name: "X" }), NOW);
     expect(r.kind).toBe("hold");
     if (r.kind !== "hold") return;
-    expect(r.message).toContain("held, not dropped");
+    expect(r.reason).toBe("no_lawful_basis");
   });
 });
 
@@ -1393,7 +1542,8 @@ describe("K-REP-01 · statutory prohibitions — a legal kill, not a taste judgm
     expect(r.kind).toBe("terminal");
     if (r.kind !== "terminal") return;
     expect(r.reason).toBe("sponsorship_prohibited_by_statute");
-    expect(r.message).toContain("cannot lawfully deliver what it is selling");
+    expect(r.scope).toBe("account");
+    expect(r.duration.kind).toBe("until_human_clears");
   });
 
   it("does NOT exclude alcohol — the club's own pipeline carries a craft distillery", () => {
@@ -1423,7 +1573,8 @@ describe("K-REP-02 · sensitive sectors → FLAG, never an automatic kill", () =
     const flag = results.find((r) => r.kind === "flag" && r.flag_reason === sector);
     expect(flag, `${sector} was not flagged`).toBeDefined();
     if (flag?.kind !== "flag") throw new Error("expected a flag");
-    expect(flag.message).toContain("flags and waits");
+    expect(flag.reason).toBe("sector_needs_human_decision");
+    expect(flag.rule_id).toBe("K-REP-02");
   });
 
   it("produces no TERMINAL for any sensitive sector", () => {
@@ -1466,7 +1617,6 @@ describe("§5 · franchise or branch — test the LOCATION, not the brand", () =
     );
     expect(report.status).toBe("HEAD_OFFICE");
     expect(report.signals).toEqual(expect.arrayContaining(["N1", "N2"]));
-    expect(report.message).toContain("REROUTED, not dropped");
   });
 
   // Red Bull is a chain, so §5 applies to it — but the fixture has to SAY it is a chain, because
@@ -1650,6 +1800,127 @@ describe("P-03 · publicly traded, on evidence of being publicly traded", () => 
 });
 
 // ===========================================================================
+// Resolved ambiguity A1 — a penalty fires on an observed fact, or on a missing value whose
+// resolution attempt is recorded. Never on a value that is merely absent.
+// ===========================================================================
+
+describe("P-10 · social-only presence, on evidence rather than on an empty field", () => {
+  function p10(over: Partial<Account>) {
+    return evaluatePenalties(account({ legal_name: "Corner Bakery", ...over }), {
+      lists,
+      now: NOW,
+    }).find((p) => p.rule_id === "P-10");
+  }
+
+  // The population this protects: a freshly discovered local operator carrying a name, a
+  // municipality and a phone number, before any enrichment pass has run.
+  it("does NOT fire on a freshly discovered row that nothing has looked up yet", () => {
+    expect(
+      p10({ address_municipality: "Vancouver", address_region: "BC", phone_e164: "+16045550100" }),
+    ).toBeUndefined();
+  });
+
+  it("fires on an OBSERVED social-only presence, with or without a lookup attempt", () => {
+    expect(p10({ observations: { social_only_presence: true } })?.delta).toBe(-20);
+  });
+
+  it("fires on empty website fields ONCE an enrichment pass has recorded its failure", () => {
+    expect(p10({ observations: { website_resolution_attempts: 1 } })?.delta).toBe(-20);
+  });
+
+  it("does not fire when the enrichment pass FOUND a website", () => {
+    expect(
+      p10({ registrable_domain: "cornerbakery.ca", observations: { website_resolution_attempts: 1 } }),
+    ).toBeUndefined();
+  });
+
+  // P-09 and P-06 were already this shape and are the model the rest was derived against.
+  it.each([
+    ["P-09", { observations: { geography_resolution_attempts: 1 } }, "P-09"],
+    ["P-06", { observations: { discovery_tactics_attempted: 2 } }, "P-06"],
+  ])("%s likewise needs its recorded attempt before it fires", (_label, over, ruleId) => {
+    const bare = evaluatePenalties(account({ legal_name: "Corner Bakery" }), { lists, now: NOW });
+    expect(bare.map((p) => p.rule_id)).not.toContain(ruleId);
+    const attempted = evaluatePenalties(account({ legal_name: "Corner Bakery", ...over }), {
+      lists,
+      now: NOW,
+    });
+    expect(attempted.map((p) => p.rule_id)).toContain(ruleId);
+  });
+
+  it("charges a bare, unenriched row nothing at all", () => {
+    const result = run(
+      account({
+        legal_name: "Corner Bakery",
+        address_municipality: "Vancouver",
+        address_region: "BC",
+        phone_e164: "+16045550100",
+      }),
+    );
+    expect(result.decision).toBe("pass");
+    expect(result.penalty_total).toBe(0);
+  });
+});
+
+// ===========================================================================
+// §7.2 LIST_national_flag — "review, do not kill". A different list from §7.1, with a different
+// outcome: a human-review flag, never a terminal and never the enactus_canada channel.
+// ===========================================================================
+
+describe("§7.2 national-flag list → FLAG only", () => {
+  it.each([
+    ["PwC", "pwc.com"],
+    ["Scotiabank", "scotiabank.com"],
+    ["Canadian Western Bank", "cwbank.com"],
+    ["WWF Canada", "wwf.ca"],
+    ["Porter Airlines", "flyporter.com"],
+  ])("flags %s for human review", (name, domain) => {
+    const r = nationalFlagReview(account({ legal_name: name, registrable_domain: domain }), lists, NOW);
+    expect(r.kind).toBe("flag");
+    if (r.kind !== "flag") return;
+    expect(r.reason).toBe("national_flag_needs_human_review");
+    expect(r.flag_reason).toBe("lapsed_or_conflicted_national_relationship");
+    expect(r.detail).toBe(name);
+  });
+
+  it("flags a name-only entry that has no verified domain", () => {
+    const r = nationalFlagReview(
+      account({ legal_name: "Varshney Family Foundation" }),
+      lists,
+      NOW,
+    );
+    expect(r.kind).toBe("flag");
+  });
+
+  it("passes an account on neither list", () => {
+    expect(
+      nationalFlagReview(account({ legal_name: "Corner Bakery", registrable_domain: "example.ca" }), lists, NOW)
+        .kind,
+    ).toBe("pass");
+  });
+
+  it.each([
+    ["pwc.com", "PwC"],
+    ["scotiabank.com", "Scotiabank"],
+  ])("surfaces %s through runFilter without rejecting or rerouting it", (domain, name) => {
+    const result = run(account({ legal_name: name, registrable_domain: domain }));
+    expect(result.flags.map((f) => f.rule_id)).toContain("LIST-NATIONAL-FLAG");
+    // "Kill mode: none — human_review only". Neither a terminal nor a channel on this ground.
+    expect(result.decision).toBe("pass");
+    expect(result.kills).toHaveLength(0);
+    expect(result.required_channel).toBeNull();
+    expect(result.channels.map((c) => c.required_channel)).not.toContain("enactus_canada");
+  });
+
+  // Routing PwC to the national body would be the §7.1 outcome applied to the §7.2 list.
+  it("is a different list from §7.1 — a flagged entity is not a national partner", () => {
+    expect(
+      kOrg01NationalPartner(account({ legal_name: "PwC", registrable_domain: "pwc.com" }), lists, NOW).kind,
+    ).toBe("pass");
+  });
+});
+
+// ===========================================================================
 // The runner — §2.4 order, the never-kill allowlist, and kill/penalty separation
 // ===========================================================================
 
@@ -1659,8 +1930,8 @@ describe("runFilter", () => {
     expect(result.decision).toBe("terminal");
     expect(result.reject_reason).toBe("outside_bc");
     expect(result.reject_rule_id).toBe("K-GEO-02");
-    expect(result.message).toContain("Affinity Credit Union");
-    expect(result.message).toContain("Saskatoon");
+    expect(result.reject_detail).toBe("Saskatoon, SK");
+    expect(result.reject_evidence_url).toBeTruthy();
     expect(result.reject_at).toBe(NOW.toISOString());
   });
 

@@ -364,6 +364,40 @@ function domainMatches(url: string, domain: string): boolean {
   return d === domain || d.endsWith(`.${domain}`);
 }
 
+/**
+ * §6.3's twelve gates.
+ *
+ * THE ASYMMETRY RULE APPLIES TO GATES TOO, and this set has been walked once end to end rather
+ * than patched a gate at a time. For each: what inputs does it need, and what does it return when
+ * they are absent? ABSENT INPUTS RETURN `cannot_evaluate` WITH EFFECT `none`. ONLY CONTRARY
+ * EVIDENCE RETURNS `fail`. The audit, so the next reader does not have to redo it:
+ *
+ *   G_GEO         needs a region to say "outside BC". Municipality alone, unresolved against the
+ *                 23 member jurisdictions, is an unrecognised place name and not evidence of
+ *                 anything — `cannot_evaluate`, matching `kGeo02OutsideBc` on the same input.
+ *   G_EXISTS      contrary DNS fails; uncorroborated-but-unrecorded is `cannot_evaluate`.
+ *   G_SIZE        no headcount is `cannot_evaluate`; §6 records that as a specification bug.
+ *   G_DELIVERABLE unchecked is `cannot_evaluate`.
+ *   G_NO_SOLICIT  unscanned is `cannot_evaluate`.
+ *   G_ELIGIBILITY unread eligibility page is `cannot_evaluate`.
+ *   G_NAMED_PERSON no name is `cannot_evaluate`, and the gate is non-blocking regardless.
+ *   G_TRIGGER_FRESH fires on OBSERVED stale triggers, and parks rather than blocks.
+ *
+ * Three gates deliberately do NOT return `cannot_evaluate` on an absent input, each for a stated
+ * reason rather than by omission:
+ *
+ *   G_EXCLUDED / G_SUPPRESSED  are membership tests against complete in-memory lists. Absent
+ *                 means "the filter recorded no hit", which is a determination and not a gap, and
+ *                 the direction of failure is permissive: an unset field lets the row through
+ *                 rather than blocking it.
+ *   G_LAWFUL_BASIS  reads a REQUIRED field whose `"none"` is an explicit recorded value meaning
+ *                 "no basis exists", not a missing one. Under CASL the burden of proving consent
+ *                 is on the sender, so `"none"` is contrary evidence.
+ *   G_AFFILIATION_EVIDENCE  asks whether a claim the row is ALREADY MAKING is substantiated. No
+ *                 sources IS the observation, and the effect is `cap_affinity`, never a block —
+ *                 treating it as `cannot_evaluate` would award full affinity weight to an
+ *                 unevidenced alumni claim and let it into copy.
+ */
 export function evaluateGates(
   c: CompanyFacts,
   segment: SegmentAssignment,
@@ -393,22 +427,39 @@ export function evaluateGates(
       effect: "none",
       message: "G_GEO is soft for S6: an alum elsewhere still qualifies. Geography is a weight here, not a gate",
     });
-  } else if (!c.municipality && !c.region && !c.postal_code) {
+  } else if (geoBand !== "elsewhere") {
+    out.push({
+      gate: "G_GEO",
+      verdict: "pass",
+      effect: "block",
+      message: `in the ${geoBand} band`,
+    });
+  } else if (normalizeMunicipality(c.region) === "") {
+    // `elsewhere` means "nothing matched", which is only CONTRARY evidence when a region was
+    // actually recorded and it is not BC. A municipality that did not resolve against the 23
+    // Metro Vancouver jurisdictions is an unrecognised place name, not a place known to be
+    // outside them — `kGeo02OutsideBc` returns `cannot_evaluate` on exactly this input and
+    // `kGeo03OutsideMetroVancouver` charges a penalty at most, never a kill.
+    const recorded = [
+      c.municipality ? `municipality "${c.municipality}"` : null,
+      c.postal_code ? `postal code "${c.postal_code}"` : null,
+    ]
+      .filter(Boolean)
+      .join(" and ");
     out.push({
       gate: "G_GEO",
       verdict: "cannot_evaluate",
       effect: "none",
-      message: "no municipality, region or postal code is recorded, so Metro Vancouver membership cannot be resolved",
+      message: recorded
+        ? `${recorded} did not resolve against config/exclusions/metro-vancouver.csv and no region is recorded, so Metro Vancouver membership cannot be resolved. Missing: region. Absence of evidence is never a kill`
+        : "no municipality, region or postal code is recorded, so Metro Vancouver membership cannot be resolved. Missing: municipality, region, postal_code. Absence of evidence is never a kill",
     });
   } else {
     out.push({
       gate: "G_GEO",
-      verdict: geoBand === "elsewhere" ? "fail" : "pass",
+      verdict: "fail",
       effect: "block",
-      message:
-        geoBand === "elsewhere"
-          ? `killed: out_of_area — ${c.municipality ?? c.region ?? c.postal_code} is outside Metro Vancouver and outside BC`
-          : `in the ${geoBand} band`,
+      message: `killed: out_of_area — ${c.municipality ? `${c.municipality}, ` : ""}${c.region} is outside Metro Vancouver and outside BC`,
     });
   }
 
@@ -500,7 +551,7 @@ export function evaluateGates(
     gate: "G_DELIVERABLE",
     verdict:
       c.deliverable_contact === undefined ? "cannot_evaluate" : c.deliverable_contact ? "pass" : "fail",
-    effect: "block",
+    effect: c.deliverable_contact === undefined ? "none" : "block",
     message:
       c.deliverable_contact === undefined
         ? "deliverability has not been checked"
@@ -525,7 +576,7 @@ export function evaluateGates(
     gate: "G_NO_SOLICIT",
     verdict:
       c.no_solicitation_found === undefined ? "cannot_evaluate" : c.no_solicitation_found ? "fail" : "pass",
-    effect: "block",
+    effect: c.no_solicitation_found === undefined ? "none" : "block",
     message:
       c.no_solicitation_found === undefined
         ? "no source page has been scanned for a no-solicitation notice"
@@ -586,7 +637,7 @@ export function evaluateGates(
           : c.eligibility_requires_charity
             ? "fail"
             : "pass",
-      effect: "block",
+      effect: c.eligibility_requires_charity === undefined ? "none" : "block",
       message:
         c.eligibility_requires_charity === undefined
           ? "the published eligibility page has not been read. This check is free and prevents a guaranteed rejection"
@@ -678,11 +729,20 @@ export function geographyBand(
   const prefix = (c.postal_code ?? "").trim().slice(0, 2).toUpperCase();
   if (prefix && config.geography.postal_prefixes.includes(prefix)) return "metro";
 
-  const region = normalizeMunicipality(c.region);
-  if (region === "bc" || region === "british columbia" || region === "colombie-britannique") {
-    return "bc_outside_metro";
-  }
+  if (isBcRegionName(c.region)) return "bc_outside_metro";
   return "elsewhere";
+}
+
+/**
+ * Whether a recorded region names British Columbia.
+ *
+ * Extracted so the one spelling list backs both the band and anything else that has to ask the
+ * question. G_GEO's own test is narrower — whether a region was RECORDED at all — because by the
+ * time it looks, the band has already established that this one is not BC.
+ */
+export function isBcRegionName(region: string | null | undefined): boolean {
+  const r = normalizeMunicipality(region);
+  return r === "bc" || r === "british columbia" || r === "colombie-britannique";
 }
 
 export interface ScoreTerm {
