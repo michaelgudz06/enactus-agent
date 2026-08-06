@@ -199,10 +199,20 @@ describe("a lone lead where a list was asked for", () => {
     expect(out.events.some((e) => e.type === "done" && e.count === 1)).toBe(true);
   });
 
+  // The announcement is whatever this run says that an identical run whose leads
+  // already arrived as a list does not. Asserted as that difference so the test
+  // fails if the recovery stops being announced, rather than on a phrase a
+  // successful run happens to contain anyway.
   test("announces the reading instead of repairing it silently", async () => {
-    const out = await runWithStructuredResponse({ leads: rawLead() });
+    const lone = await runWithStructuredResponse({ leads: rawLead() });
+    const asList = await runWithStructuredResponse({ leads: [rawLead()] });
 
-    expect(out.statuses.some((s) => s.includes("leads"))).toBe(true);
+    expect(lone.leads.map((l) => l.company)).toEqual(asList.leads.map((l) => l.company));
+    const announced = lone.statuses.filter((s) => !asList.statuses.includes(s));
+    expect(announced).toHaveLength(1);
+    expect(
+      lone.events.some((e) => e.type === "status" && e.step === "structure" && e.message === announced[0])
+    ).toBe(true);
   });
 
   test("says nothing when the list arrives as a list", async () => {

@@ -46,6 +46,16 @@ function queriesSearched(): string[] {
   return stub.exaSearch.mock.calls.map((c) => c[0] as string);
 }
 
+// For a run that stops at the plan: queueing only the plan response leaves no
+// unconsumed structuring response behind, so two such runs can be compared
+// inside one test.
+async function runPlanOnly(plan: unknown) {
+  stub.chatJSON.mockImplementationOnce(respondsWith(plan));
+  const { emit, out } = collector();
+  await runAgent({ prompt: "burnaby cafes near sfu", mode: "sponsor", userName: "Tester" }, emit);
+  return out;
+}
+
 /** The fixture plan with one field genuinely absent, not merely undefined. */
 function planWithout(field: keyof typeof PLAN): Record<string, unknown> {
   const copy: Record<string, unknown> = { ...PLAN };
@@ -116,25 +126,34 @@ describe("a defective plan field costs that field only", () => {
 // Dropping an entry is a degradation like any other, and the run says so. A
 // silent repair teaches nobody that the model is misbehaving.
 describe("an unusable entry in a plan list is announced", () => {
-  test("searches the usable queries and says what it dropped", async () => {
-    const out = await runWithPlan({
-      ...PLAN,
-      searchQueries: ["burnaby cafes near sfu", "   ", "sfu campus coffee"],
-    });
+  const withBlankQuery = { ...PLAN, searchQueries: ["burnaby cafes near sfu", "   ", "sfu campus coffee"] };
+  const withoutBlankQuery = { ...PLAN, searchQueries: ["burnaby cafes near sfu", "sfu campus coffee"] };
+
+  test("searches the usable queries and loses only the blank one", async () => {
+    const out = await runWithPlan(withBlankQuery);
 
     expect(out.errors).toEqual([]);
     expect(queriesSearched()).toEqual(["burnaby cafes near sfu", "sfu campus coffee"]);
-    expect(out.statuses.some((s) => s.includes("searchQueries"))).toBe(true);
+    expect(out.leads).toHaveLength(1);
+  });
+
+  // The announcement is what this run says that a run reaching the same two
+  // queries without a blank entry does not say.
+  test("says what it dropped, which an undamaged list does not", async () => {
+    const clean = await runWithPlan(withoutBlankQuery);
+    const degraded = await runWithPlan(withBlankQuery);
+
+    expect(degraded.statuses.filter((s) => !clean.statuses.includes(s))).toHaveLength(1);
   });
 
   test("asks the questions that survived and says what it dropped", async () => {
-    const out = await runWithPlan(
-      { ...PLAN, needClarification: true, questions: ["Which city?", "  "] },
-      {}
-    );
+    const clean = await runPlanOnly({ ...PLAN, needClarification: true, questions: ["Which city?"] });
+    const degraded = await runPlanOnly({ ...PLAN, needClarification: true, questions: ["Which city?", "  "] });
 
-    expect(out.events.some((e) => e.type === "clarify" && e.questions.length === 1)).toBe(true);
-    expect(out.statuses.some((s) => s.includes("questions"))).toBe(true);
+    for (const out of [clean, degraded]) {
+      expect(out.events.some((e) => e.type === "clarify" && e.questions.length === 1)).toBe(true);
+    }
+    expect(degraded.statuses.filter((s) => !clean.statuses.includes(s))).toHaveLength(1);
   });
 });
 
@@ -246,10 +265,12 @@ describe("no search queries at all is a real stop", () => {
   // The blocker message already names what the model sent, so the entries it
   // dropped on the way there are not reported a second time.
   test("reports a fully blank query list once", async () => {
-    const out = await runWithPlan({ ...PLAN, searchQueries: ["   ", "\t"] });
+    const out = await runPlanOnly({ ...PLAN, searchQueries: ["   ", "\t"] });
 
     expect(out.errors).toHaveLength(1);
-    expect(out.statuses.some((s) => s.includes("searchQueries"))).toBe(false);
+    // Only the opening "understanding" status: the blocker is the single report
+    // of that loss, and the entries it dropped on the way are not a second one.
+    expect(out.statuses).toHaveLength(1);
   });
 
   // A transport or parse failure is still a stop: there is no plan at all.
