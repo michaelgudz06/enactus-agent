@@ -193,6 +193,12 @@ export interface SectorPolicyRow {
   sector: string;
   naics: string;
   pattern: string;
+  /**
+   * `pattern` compiled once, at load. `null` when the row has no pattern — a blank pattern is a
+   * deliberate "detection not enumerated" marker (adult_entertainment) and must never become the
+   * empty regex, which matches every string.
+   */
+  regex: RegExp | null;
   policy: "allowed" | "discouraged" | "prohibited" | "needs_decision";
   decidedBy: string;
   decidedAt: string;
@@ -315,6 +321,27 @@ export const EXCLUSION_LIST_FILES: readonly string[] = [
 ];
 
 /**
+ * Compile one sector-policy pattern, naming the offending row if it will not compile.
+ *
+ * sector-policy.csv is edited by the VP External Relations, not by a programmer. An unbalanced
+ * pattern such as `payday(` used to raise a bare `SyntaxError` from deep inside the penalty pass,
+ * once per account, with nothing to say which row was at fault. Fail once, at load, loudly —
+ * the way `loadIcpConfig()` already fails on a weight that stops summing to 100.
+ */
+function compileSectorPattern(sector: string, pattern: string): RegExp | null {
+  if (pattern.trim() === "") return null;
+  try {
+    return new RegExp(pattern, "i");
+  } catch (err) {
+    throw new Error(
+      `sector-policy.csv row "${sector}" has an invalid pattern ${JSON.stringify(pattern)}: ` +
+        `${err instanceof Error ? err.message : String(err)}. ` +
+        `Fix the pattern in config/exclusions/sector-policy.csv — see its README for who owns this file.`,
+    );
+  }
+}
+
+/**
  * Build the in-memory lists from raw file text. Pure: no filesystem, no network.
  * `files` is keyed by bare filename, e.g. `{"self.csv": "kind,value,..."}`.
  */
@@ -353,15 +380,20 @@ export function buildQualificationLists(files: Record<string, string>): Qualific
 
   const sectorPolicy: SectorPolicyRow[] = parseCsv(files["sector-policy.csv"] ?? "")
     .filter((r) => (r.sector ?? "").trim() !== "")
-    .map((r) => ({
-      sector: r.sector.trim(),
-      naics: r.naics ?? "",
-      pattern: r.pattern ?? "",
-      policy: (r.policy ?? "needs_decision") as SectorPolicyRow["policy"],
-      decidedBy: r.decided_by ?? "",
-      decidedAt: r.decided_at ?? "",
-      note: r.note ?? "",
-    }));
+    .map((r) => {
+      const sector = r.sector.trim();
+      const pattern = r.pattern ?? "";
+      return {
+        sector,
+        naics: r.naics ?? "",
+        pattern,
+        regex: compileSectorPattern(sector, pattern),
+        policy: (r.policy ?? "needs_decision") as SectorPolicyRow["policy"],
+        decidedBy: r.decided_by ?? "",
+        decidedAt: r.decided_at ?? "",
+        note: r.note ?? "",
+      };
+    });
 
   return { ...keyed, metroVancouver, metroVancouverAliases, sectorPolicy };
 }

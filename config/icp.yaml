@@ -22,23 +22,17 @@
 # ---------------------------------------------------------------------------
 geography:
   # The three places events actually happen: SFU Burnaby, SFU Harbour Centre, SFU Surrey.
+  # These names are matched through the same alias map as everything else, so a Vancouver
+  # neighbourhood such as Kitsilano scores `core` too.
   core: [Burnaby, Vancouver, Surrey]
-  metro:
-    [
-      Richmond,
-      Coquitlam,
-      Burnaby,
-      New Westminster,
-      North Vancouver,
-      West Vancouver,
-      Delta,
-      Langley,
-      Port Moody,
-      Port Coquitlam,
-      Maple Ridge,
-      White Rock,
-      Pitt Meadows,
-    ]
+  #
+  # THERE IS DELIBERATELY NO `metro:` LIST HERE.
+  #
+  # Which municipalities are in Metro Vancouver is decided in ONE place — the maintained list
+  # config/exclusions/metro-vancouver.csv, which carries all 23 member jurisdictions and their
+  # aliases. A second, shorter copy in this file used to gate the G_GEO block, so businesses in
+  # Anmore, Belcarra, Bowen Island, Lions Bay, Tsawwassen First Nation and Electoral Area A were
+  # killed as `out_of_area`. Add a jurisdiction to the CSV, never here.
   postal_prefixes: [V3, V4, V5, V6, V7]
   # Points awarded by the `geography` term of fit_score.
   bands:

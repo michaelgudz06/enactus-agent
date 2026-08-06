@@ -115,7 +115,8 @@ Four invariants these modules exist to hold. Breaking one silently is the failur
 2. **Hard kills and soft penalties stay separate.** A wrongly killed account is invisible
    forever; a wrongly penalised one still surfaces. Kill only when the account can never be a
    sponsor at any price, contacting it would be unlawful, or the right action is a different
-   channel. When in doubt, penalise.
+   channel. When in doubt, penalise. Every terminal carries a `scope` — only `account` drops the
+   row; `address` and `person` clear that field and keep evaluating.
 3. **Missing data is never a kill.** Predicates return an explicit `cannot_evaluate` outcome
    carrying the missing field names.
 4. **Never blend the scores.** `fit` / `affinity` / `access` stay separate, and so do the two

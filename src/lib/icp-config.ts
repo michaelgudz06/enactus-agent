@@ -90,8 +90,12 @@ export interface SegmentConfig {
 
 export interface IcpConfig {
   geography: {
+    /**
+     * The jurisdictions worth the `core` band — the three SFU campuses. This is a WEIGHT, not a
+     * membership test: whether a place is in Metro Vancouver at all is decided by
+     * config/exclusions/metro-vancouver.csv, the maintained list, via `geographyBand()`.
+     */
     core: string[];
-    metro: string[];
     postal_prefixes: string[];
     bands: { core: number; metro: number; bc_outside_metro: number; elsewhere: number };
   };
@@ -160,6 +164,9 @@ export class IcpConfigError extends Error {
 /** The three score blocks whose weights must each sum to exactly 100. */
 export const SCORE_BLOCKS = ["fit_score", "affinity_score", "access_score"] as const;
 
+/** Slack allowed on a weight sum, to absorb binary floating-point error on fractional weights. */
+export const WEIGHT_SUM_TOLERANCE = 1e-6;
+
 function sumWeights(block: Record<string, unknown>): number {
   return Object.values(block).reduce<number>(
     (acc, v) => acc + (typeof v === "number" ? v : 0),
@@ -194,8 +201,11 @@ export function validateIcpConfig(raw: unknown): string[] {
         problems.push(`${block}.${k} is negative (${v}); weights are non-negative`);
       }
     }
+    // Compared with a tolerance, not for exact equality: a legitimate fractional retune such as
+    // 33.3 / 33.3 / 33.4 sums to 100.00000000000001 in binary floating point, and rejecting the
+    // file over that would teach the VP External Relations that the validator lies.
     const total = sumWeights(value as Record<string, unknown>);
-    if (total !== 100) {
+    if (Math.abs(total - 100) > WEIGHT_SUM_TOLERANCE) {
       problems.push(
         `${block} weights sum to ${total}, not 100 ` +
           `(${entries.map(([k, v]) => `${k}=${v}`).join(", ")})`,

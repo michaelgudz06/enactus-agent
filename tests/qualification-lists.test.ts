@@ -255,4 +255,50 @@ describe("the shipped seed data", () => {
       );
     }
   });
+
+  // sector-policy.csv is edited by the VP External Relations, not by a programmer. A pattern that
+  // will not compile has to fail once, at load, naming the row — not once per account, from deep
+  // inside the penalty pass, with a bare SyntaxError.
+  describe("sector-policy patterns are validated at load", () => {
+    const header = "sector,naics,pattern,policy,decided_by,decided_at,note\n";
+
+    function build(rows: string) {
+      return buildQualificationLists({ "sector-policy.csv": header + rows });
+    }
+
+    it("rejects an unbalanced pattern and names the offending row", () => {
+      expect(() => build("payday_lending,,payday(,needs_decision,,,\n")).toThrow(
+        /sector-policy\.csv row "payday_lending"/,
+      );
+      expect(() => build("payday_lending,,payday(,needs_decision,,,\n")).toThrow(/payday\(/);
+    });
+
+    it("rejects an invalid quantifier", () => {
+      expect(() => build('gambling,,"casino{2,1}",needs_decision,,,\n')).toThrow(
+        /sector-policy\.csv row "gambling"/,
+      );
+    });
+
+    it("compiles a valid pattern once, case-insensitively", () => {
+      const row = build("gambling,,casino|betting,needs_decision,,,\n").sectorPolicy[0];
+      expect(row.regex).toBeInstanceOf(RegExp);
+      expect(row.regex?.test("Riverside CASINO Ltd")).toBe(true);
+      expect(row.regex?.test("Riverside Bakery")).toBe(false);
+    });
+
+    it("leaves a deliberately blank pattern as null rather than the match-everything regex", () => {
+      const row = build("adult_entertainment,7139,,needs_decision,,,\n").sectorPolicy[0];
+      expect(row.regex).toBeNull();
+      // The shipped file relies on this: adult_entertainment has no enumerated detection.
+      expect(lists.sectorPolicy.find((r) => r.sector === "adult_entertainment")?.regex).toBeNull();
+    });
+
+    it("accepts the shipped file", () => {
+      for (const row of lists.sectorPolicy) {
+        expect(row.pattern === "" ? row.regex === null : row.regex instanceof RegExp, row.sector).toBe(
+          true,
+        );
+      }
+    });
+  });
 });

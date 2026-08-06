@@ -363,7 +363,7 @@ export function evaluateGates(
   c: CompanyFacts,
   segment: SegmentAssignment,
   config: IcpConfig,
-  opts: { now?: Date } = {},
+  opts: { lists: QualificationLists; now?: Date },
 ): GateResult[] {
   const now = opts.now ?? new Date();
   const out: GateResult[] = [];
@@ -380,7 +380,7 @@ export function evaluateGates(
   });
 
   // G_GEO — soft for S6 ONLY. An alum anywhere is worth more than a stranger next door.
-  const geoBand = geographyBand(c, config);
+  const geoBand = geographyBand(c, config, opts.lists);
   if (seg === "S6") {
     out.push({
       gate: "G_GEO",
@@ -407,25 +407,46 @@ export function evaluateGates(
     });
   }
 
-  // G_EXISTS
-  if (c.domain_resolves === undefined && c.orgbook_status == null && c.independent_live_sources == null) {
+  // G_EXISTS. Contrary evidence kills; ABSENT evidence never does. A domain that demonstrably
+  // resolves and is not parked but whose corroboration has simply not been imported yet is
+  // `cannot_evaluate`, exactly like G_SIZE with no headcount — never `killed: dead_domain`.
+  const corroborated = c.orgbook_status === "ACT" || (c.independent_live_sources ?? 0) >= 2;
+  const corroborationRecorded = c.orgbook_status != null || c.independent_live_sources != null;
+  const dnsContrary = c.domain_resolves === false || c.domain_parked === true;
+  if (dnsContrary) {
+    out.push({
+      gate: "G_EXISTS",
+      verdict: "fail",
+      effect: "block",
+      message:
+        c.domain_parked === true
+          ? "killed: dead_domain — the domain is on a parking nameserver"
+          : "killed: dead_domain — the domain does not resolve",
+    });
+  } else if (corroborated) {
+    out.push({
+      gate: "G_EXISTS",
+      verdict: "pass",
+      effect: "block",
+      message: "domain resolves or is unrecorded, is not parked, and existence is corroborated",
+    });
+  } else if (corroborationRecorded) {
+    out.push({
+      gate: "G_EXISTS",
+      verdict: "fail",
+      effect: "block",
+      message:
+        "killed: dead_domain — existence is not corroborated by OrgBook ACT or two independent live sources",
+    });
+  } else {
     out.push({
       gate: "G_EXISTS",
       verdict: "cannot_evaluate",
       effect: "none",
-      message: "no DNS result, OrgBook status or independent-source count is recorded",
-    });
-  } else {
-    const exists =
-      (c.domain_resolves === true && c.domain_parked !== true) &&
-      (c.orgbook_status === "ACT" || (c.independent_live_sources ?? 0) >= 2);
-    out.push({
-      gate: "G_EXISTS",
-      verdict: exists ? "pass" : "fail",
-      effect: "block",
-      message: exists
-        ? "domain resolves, is not parked, and existence is corroborated"
-        : "killed: dead_domain — the domain does not resolve, is on a parking nameserver, or existence is not corroborated by OrgBook ACT or two independent live sources",
+      message:
+        c.domain_resolves === true
+          ? "the domain resolves and is not parked, but no OrgBook status and no independent-source count are recorded, so existence cannot be corroborated. Absence of evidence is never a kill"
+          : "no DNS result, OrgBook status or independent-source count is recorded",
     });
   }
 
@@ -617,12 +638,47 @@ function triggerAgeKey(kind: string): string {
 
 export type GeographyBand = "core" | "metro" | "bc_outside_metro" | "elsewhere";
 
-export function geographyBand(c: CompanyFacts, config: IcpConfig): GeographyBand {
+/** The canonical Metro Vancouver jurisdictions a municipality string resolves to, via the CSV. */
+function metroCanonicals(
+  municipality: string | null | undefined,
+  lists: QualificationLists,
+): string[] {
+  const key = normalizeMunicipality(municipality);
+  if (!key) return [];
+  return lists.metroVancouverAliases.get(key) ?? [];
+}
+
+/**
+ * ONE SOURCE OF TRUTH PER CONCERN.
+ *
+ * `config/exclusions/metro-vancouver.csv` decides MEMBERSHIP — whether a place is in scope at
+ * all. It is the maintained list §7.8 of the disqualifier report specified and verified, it
+ * carries all 23 member jurisdictions and their aliases, and it is the file a human edits. The
+ * same map backs `isInMetroVancouver()` in the filter, so the two modules cannot disagree.
+ *
+ * `config/icp.yaml` decides WEIGHT — how much a band contributes to fit_score, and which
+ * jurisdictions count as `core` (the three SFU campuses). It never decides whether a place
+ * qualifies.
+ */
+export function geographyBand(
+  c: CompanyFacts,
+  config: IcpConfig,
+  lists: QualificationLists,
+): GeographyBand {
   const muni = normalizeMunicipality(c.municipality);
-  const core = config.geography.core.map((m) => normalizeMunicipality(m));
-  const metro = config.geography.metro.map((m) => normalizeMunicipality(m));
-  if (muni && core.includes(muni)) return "core";
-  if (muni && metro.includes(muni)) return "metro";
+  if (muni) {
+    const coreNames = config.geography.core.map((m) => normalizeMunicipality(m));
+    if (coreNames.includes(muni)) return "core";
+
+    const canonicals = metroCanonicals(muni, lists);
+    if (canonicals.length > 0) {
+      // A core name resolved through the same alias map, so "Kitsilano" lands on core rather
+      // than on plain metro.
+      const coreCanonicals = new Set(config.geography.core.flatMap((m) => metroCanonicals(m, lists)));
+      if (canonicals.some((canonical) => coreCanonicals.has(canonical))) return "core";
+      return "metro";
+    }
+  }
 
   const prefix = (c.postal_code ?? "").trim().slice(0, 2).toUpperCase();
   if (prefix && config.geography.postal_prefixes.includes(prefix)) return "metro";
@@ -659,7 +715,7 @@ export function scoreFit(
   c: CompanyFacts,
   segment: SegmentAssignment,
   config: IcpConfig,
-  opts: { now?: Date; missing?: string[] } = {},
+  opts: { lists: QualificationLists; now?: Date; missing?: string[] },
 ): ScoreBlock {
   const now = opts.now ?? new Date();
   const w = config.fit_score;
@@ -710,7 +766,7 @@ export function scoreFit(
     });
   }
 
-  const band = geographyBand(c, config);
+  const band = geographyBand(c, config, opts.lists);
   terms.push({
     term: "geography",
     points: clamp(config.geography.bands[band], w.geography),
@@ -1144,17 +1200,17 @@ export interface ScoreResult {
 export function scoreCompany(
   c: CompanyFacts,
   config: IcpConfig,
-  opts: { now?: Date } = {},
+  opts: { lists: QualificationLists; now?: Date },
 ): ScoreResult {
   const now = opts.now ?? new Date();
   const assignment = assignSegment(c, { now });
-  const gates = evaluateGates(c, assignment.segment, config, { now });
+  const gates = evaluateGates(c, assignment.segment, config, { lists: opts.lists, now });
 
   const affiliationGate = gates.find((g) => g.gate === "G_AFFILIATION_EVIDENCE");
   const affiliationCapped = affiliationGate?.effect === "cap_affinity" && affiliationGate.verdict === "fail";
 
   const missing: string[] = [];
-  const fit = scoreFit(c, assignment.segment, config, { now, missing });
+  const fit = scoreFit(c, assignment.segment, config, { lists: opts.lists, now, missing });
   const affinity = scoreAffinity(c, assignment.segment, config, {
     affiliation_capped: affiliationCapped,
   });
@@ -1205,12 +1261,18 @@ export function gateInputsFromFilterResult(
     (k) => k.reason === "suppressed_do_not_contact" || k.reason === "declined_permanently",
   );
   const noSolicit = result.kills.some((k) => k.reason === "no_solicitation_statement_at_source");
-  const deliverabilityRules = new Set(["D-01", "D-02", "D-03", "D-05", "D-06", "D-07"]);
-  const deliverabilityKilled = result.kills.some((k) => deliverabilityRules.has(k.rule_id));
+  const deliverabilityRules = new Set(["D-01", "D-02", "D-03", "D-05", "D-06", "D-07", "K-REL-08"]);
+  // An address-scoped terminal (D-05, D-07, K-REL-08) does NOT exclude the account, but it does
+  // mean the recorded contact is undeliverable — so it feeds G_DELIVERABLE, not G_EXCLUDED.
+  const deliverabilityKilled = [...result.kills, ...result.field_terminals].some((k) =>
+    deliverabilityRules.has(k.rule_id),
+  );
   const deliverabilityUnknown = result.cannot_evaluate.some((c) => deliverabilityRules.has(c.rule_id));
 
   return {
-    is_excluded: result.decision === "terminal",
+    // ONLY an account-scoped kill excludes. A cleared address or a cleared contact name leaves
+    // the account in the corpus — §3.5 "Never drop the account".
+    is_excluded: result.kills.some((k) => k.scope === "account"),
     exclusion_reason: result.reject_reason,
     suppressed,
     no_solicitation_found: noSolicit,

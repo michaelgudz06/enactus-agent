@@ -786,6 +786,14 @@ describe("K-DELIV · deliverability", () => {
     ["a Vancouver bakery on gmail", "bakery@gmail.com", "example.ca", "pass"],
     ["a BC small business on shaw.ca", "shop@shaw.ca", "example.ca", "pass"],
     ["someone else's corporate domain", "info@othercompany.com", "example.ca", "terminal"],
+    // A mail host UNDER the company's own domain is the company's own domain. `emailDomain()`
+    // derives a host, not a registrable domain, so these used to be killed as a third party's.
+    ["a mail subdomain of the company's own domain", "info@mail.example.ca", "example.ca", "pass"],
+    ["a deeper subdomain", "info@smtp.mail.example.ca", "example.ca", "pass"],
+    // The reverse is NOT the company's own domain: example.ca is not under mail.example.ca.
+    ["a parent of the company's domain", "info@example.ca", "mail.example.ca", "terminal"],
+    // Sharing a suffix is not sharing a domain.
+    ["a lookalike suffix", "info@notexample.ca", "example.ca", "terminal"],
   ];
 
   it.each(d07Cases)("D-07 with %s", (_label, email, domain, expected) => {
@@ -796,6 +804,21 @@ describe("K-DELIV · deliverability", () => {
         NOW,
       ).kind,
     ).toBe(expected);
+  });
+
+  it("scopes D-05 and D-07 to the address, never to the account", () => {
+    for (const r of [
+      d05MalformedEmail(account({ legal_name: "X", email: "not an address" }), NOW),
+      d07EmailDomainMismatch(
+        account({ legal_name: "X", email: "info@othercompany.com", registrable_domain: "example.ca" }),
+        lists,
+        NOW,
+      ),
+    ]) {
+      expect(r.kind).toBe("terminal");
+      if (r.kind !== "terminal") continue;
+      expect(r.scope).toBe("address");
+    }
   });
 });
 
@@ -925,22 +948,115 @@ describe("placeholder contact names — 9 of 25 measured", () => {
     },
   );
 
+  it("scopes the terminal to the person, not the account", () => {
+    const r = placeholderContactName(
+      account({ legal_name: "X", contact_name: "Owner / GM" }),
+      NOW,
+    );
+    expect(r.kind).toBe("terminal");
+    if (r.kind !== "terminal") return;
+    expect(r.scope).toBe("person");
+  });
+
   it("never drops the ACCOUNT when only the person is a placeholder", () => {
+    const burnabySmb = account({
+      legal_name: "Some Local Business",
+      registrable_domain: "example.ca",
+      email: "info@example.ca",
+      contact_name: "Owner / GM",
+      contact_title: "Owner",
+      address_region: "BC",
+      address_municipality: "Burnaby",
+      address_country: "CA",
+    });
+    const result = run(burnabySmb);
+
+    // THE INVARIANT: the account survives.
+    expect(result.decision).not.toBe("terminal");
+    expect(result.kills).toEqual([]);
+
+    // The unusable person is cleared and returned to discovery, and stays visible to a human.
+    expect(result.account.contact_name).toBeNull();
+    expect(result.account.contact_title).toBeNull();
+    expect(result.cleared_fields).toEqual(
+      expect.arrayContaining(["contact_name", "contact_title"]),
+    );
+    expect(result.field_terminals.map((t) => t.reason)).toContain("placeholder_contact_name");
+
+    // Evaluation did NOT short-circuit: the penalty pass still ran and still charged P-08.
+    expect(result.penalties.length).toBeGreaterThan(0);
+    expect(result.penalties.map((p) => p.tag)).toContain("role_account");
+    expect(result.evaluated_rule_ids).toContain("L-02");
+  });
+
+  it("leaves the input account untouched — the cleared record is a copy", () => {
+    const input = account({
+      legal_name: "Some Local Business",
+      registrable_domain: "example.ca",
+      contact_name: "Owner / GM",
+    });
+    run(input);
+    expect(input.contact_name).toBe("Owner / GM");
+  });
+});
+
+describe("address-scoped terminals · the address dies, the account does not", () => {
+  const base = {
+    legal_name: "Some Local Business",
+    registrable_domain: "example.ca",
+    address_region: "BC",
+    address_municipality: "Burnaby",
+    address_country: "CA",
+  } as const;
+
+  const CASES: { name: string; over: Partial<Account>; rule: string }[] = [
+    { name: "D-05 malformed address", over: { email: "info at example.ca" }, rule: "D-05" },
+    {
+      name: "D-07 third-party corporate domain",
+      over: { email: "someone@othercompany.ca" },
+      rule: "D-07",
+    },
+    {
+      name: "K-REL-08 hard bounce",
+      over: { email: "info@example.ca", rel: { bounced_hard_at: "2026-05-01" } },
+      rule: "K-REL-08",
+    },
+  ];
+
+  it.each(CASES)("$name keeps the account and clears the address", ({ over, rule }) => {
+    const result = run(account({ ...base, ...over }));
+
+    expect(result.decision).not.toBe("terminal");
+    expect(result.kills).toEqual([]);
+    expect(result.field_terminals.map((t) => t.rule_id)).toContain(rule);
+    expect(result.field_terminals.every((t) => t.scope === "address")).toBe(true);
+    expect(result.account.email).toBeNull();
+    expect(result.cleared_fields).toContain("email");
+    // The penalty pass still ran rather than being skipped by a short-circuit.
+    expect(result.penalties.length).toBeGreaterThan(0);
+  });
+
+  it("K-REL-08 no longer short-circuits the rules that follow it", () => {
+    const result = run(
+      account({ ...base, email: "info@example.ca", rel: { bounced_hard_at: "2026-05-01" } }),
+    );
+    // K-REL-08 sits at step 2 of the §2.4 order; D-07 and the L-rules sit at steps 8 and 9.
+    expect(result.evaluated_rule_ids).toContain("D-07");
+    expect(result.evaluated_rule_ids).toContain("L-05");
+  });
+
+  it("an account-scoped terminal still drops the row and still skips the penalty pass", () => {
     const result = run(
       account({
-        legal_name: "Some Local Business",
-        registrable_domain: "example.ca",
+        ...base,
         email: "info@example.ca",
-        contact_name: "Owner / GM",
-        address_region: "BC",
-        address_municipality: "Burnaby",
-        address_country: "CA",
+        rel: { suppressed_at: "2026-01-01" },
       }),
     );
-    // The placeholder rule fires, but it is scoped to the person.
-    const kill = result.kills.find((k) => k.reason === "placeholder_contact_name");
-    expect(kill).toBeDefined();
-    expect(kill?.message).toContain("return the account to person discovery");
+    expect(result.decision).toBe("terminal");
+    expect(result.kills[0].scope).toBe("account");
+    expect(result.penalties).toEqual([]);
+    expect(result.field_terminals).toEqual([]);
   });
 });
 
@@ -1264,6 +1380,23 @@ describe("runFilter", () => {
     expect(result.kills[0].rule_id).toBe("L-01");
   });
 
+  it("names the rule that fired in the sentence a human reads (§2.5)", () => {
+    // The suppression predicate appears twice in the spec — as L-01 in the §2.4 order and as
+    // K-REL-01 in §3.4. Whichever id the row shows, the rendered sentence must cite the same one.
+    const result = run(account({ legal_name: "X", rel: { suppressed_at: "2025-01-01" } }));
+    expect(result.reject_rule_id).toBe("L-01");
+    expect(result.message).toContain("(rule L-01");
+    expect(result.message).not.toContain("K-REL-01");
+
+    const direct = kRel01Suppressed(
+      account({ legal_name: "X", rel: { suppressed_at: "2025-01-01" } }),
+      NOW,
+    );
+    expect(direct.kind).toBe("terminal");
+    if (direct.kind !== "terminal") return;
+    expect(direct.message).toContain("(rule K-REL-01");
+  });
+
   it("routes rather than rejects a national partner", () => {
     const result = run(account({ legal_name: "TD Bank Group", registrable_domain: "td.com" }));
     expect(result.decision).toBe("channel");
@@ -1328,14 +1461,8 @@ describe("runFilter", () => {
 });
 
 describe("the module contract", () => {
-  it("imports no model client", async () => {
-    const { readFileSync } = await import("node:fs");
-    const source = readFileSync(new URL("../src/lib/filter.ts", import.meta.url), "utf8");
-    const imports = source.match(/^import[\s\S]*?from\s+"([^"]+)";/gm) ?? [];
-    for (const line of imports) {
-      expect(line).not.toMatch(/llm|openai|anthropic|@ai-sdk|exa|agent/i);
-    }
-  });
+  // "imports no model client" is proved by executing the module graph with the model boundary
+  // armed to throw — see tests/no-model-client.test.ts.
 
   it("is deterministic — the same account scores identically twice", () => {
     const a = FIXTURES.affinityCreditUnion;

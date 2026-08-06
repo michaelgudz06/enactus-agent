@@ -22,6 +22,7 @@
 import {
   type KeyedList,
   type QualificationLists,
+  isDomainOrSubdomainOf,
   lookupDomainOrSubdomain,
   lookupList,
   normalizeDomain,
@@ -208,13 +209,32 @@ interface BaseResult {
   message: string;
 }
 
+/**
+ * What a TERMINAL is terminal FOR. §3.4 and §3.5 scope four rules narrower than the account:
+ * D-05, D-07 and K-REL-08 are "TERMINAL for the address", PLACEHOLDER is "TERMINAL for the
+ * person, not the account … Never drop the account".
+ *
+ * Only `account` drops the row. `address` and `person` clear the offending field, leave the
+ * account in the queue and let the remaining predicates and the whole penalty pass run — a
+ * wrongly killed account is invisible forever, a wrongly cleared field is refetched.
+ */
+export type TerminalScope = "account" | "address" | "person";
+
 export interface TerminalResult extends BaseResult {
   kind: "terminal";
+  /** Which entity this kills. `account` is the only scope that drops the row. */
+  scope: TerminalScope;
   /** False only for L-01 / K-REL-01 suppression and K-REL-06, which are permanent. */
   reversible: boolean;
   /** Set on K-CHAN-02 so the SFU Advancement escalation is visible on the row, not lost. */
   required_channel?: RequiredChannel;
 }
+
+/** The account fields a non-account-scoped terminal clears. */
+const SCOPE_FIELDS: Record<Exclude<TerminalScope, "account">, readonly (keyof Account)[]> = {
+  address: ["email", "email_local", "email_domain"],
+  person: ["contact_name", "contact_title"],
+};
 
 export interface ChannelResult extends BaseResult {
   kind: "channel";
@@ -612,6 +632,7 @@ export function kOrg02StudentOrganisation(
 
   return {
     kind: "terminal",
+    scope: "account",
     rule_id: "K-ORG-02",
     reason: "student_organisation",
     detail,
@@ -639,6 +660,7 @@ export function kOrg03aPaidMembershipList(
   const evidence = hit.sourceUrl || listEvidence(lists.paidMembership, hit.value);
   return {
     kind: "terminal",
+    scope: "account",
     rule_id: "K-ORG-03a",
     reason: "pay_to_join_body",
     detail: hit.entity || hit.value,
@@ -665,6 +687,7 @@ export function kOrg03bPaidMembershipHighPrecision(a: Account, now: Date): Predi
   const matched = name.match(PAID_MEMBERSHIP_HIGH_PRECISION_RE)?.[0] ?? name;
   return {
     kind: "terminal",
+    scope: "account",
     rule_id: "K-ORG-03b",
     reason: "pay_to_join_body",
     detail: matched,
@@ -784,6 +807,7 @@ export function kOrg05RegisteredCharity(a: Account, now: Date): PredicateResult 
   if (a.cra_designation === "Charitable Organization") {
     return {
       kind: "terminal",
+      scope: "account",
       rule_id: "K-ORG-05",
       reason: "competing_fundraiser",
       detail: a.cra_designation,
@@ -830,6 +854,7 @@ export function kOrg06SelfOrInternalUnit(
   const evidence = hit.sourceUrl || listEvidence(lists.self, hit.value);
   return {
     kind: "terminal",
+    scope: "account",
     rule_id: "K-ORG-06",
     reason: "self_or_internal_unit",
     detail: hit.entity || hit.value,
@@ -914,6 +939,7 @@ export function kSize01EnterpriseScale(a: Account, now: Date, franchise?: Franch
 
   return {
     kind: "terminal",
+    scope: "account",
     rule_id: "K-SIZE-01",
     reason: "enterprise_scale_no_local_authority",
     detail: `${detail} (headcount_basis=${basis})`,
@@ -1012,6 +1038,7 @@ export function kChan02IneligibleRequiresCharity(a: Account, now: Date): Predica
       const evidence = a.lawful_basis_url ?? a.website_url ?? "source_page_text";
       return {
         kind: "terminal",
+        scope: "account",
         rule_id: "K-CHAN-02",
         reason: "ineligible_requires_registered_charity",
         detail: match[0],
@@ -1118,6 +1145,7 @@ export function kGeo01OutsideCanada(
   const detail = a.address_country;
   return {
     kind: "terminal",
+    scope: "account",
     rule_id: "K-GEO-01",
     reason: "outside_canada",
     detail,
@@ -1161,6 +1189,7 @@ export function kGeo02OutsideBc(
   const evidence = a.website_url ?? domainKey(a);
   return {
     kind: "terminal",
+    scope: "account",
     rule_id: "K-GEO-02",
     reason: "outside_bc",
     detail: where,
@@ -1254,26 +1283,38 @@ export interface RelationshipOptions {
   current_cycle?: string | null;
 }
 
-/** K-REL-01 · Suppressed → TERMINAL, irreversible, forever. Also L-01 in the evaluation order. */
-export function kRel01Suppressed(a: Account, now: Date): PredicateResult {
-  const at = a.rel?.suppressed_at;
-  if (!at) return pass("K-REL-01");
+/**
+ * The suppression terminal, rendered under whichever rule id fired it.
+ *
+ * §2.5 requires the rendered sentence to name the rule that fired. The same predicate appears
+ * twice in the spec — as L-01 in the §2.4 evaluation order and as K-REL-01 in §3.4 — so the id
+ * is a parameter rather than a field rewritten after the sentence was built.
+ */
+function suppressionTerminal(a: Account, at: string, rule_id: string, now: Date): TerminalResult {
   return {
     kind: "terminal",
-    rule_id: "K-REL-01",
+    scope: "account",
+    rule_id,
     reason: "suppressed_do_not_contact",
     detail: at,
     evidence_url: "suppression list",
     reversible: false,
     message: sentence("suppressed_do_not_contact", {
       account: a,
-      rule_id: "K-REL-01",
+      rule_id,
       verb: "rejected permanently",
       because: `it was suppressed on ${at}. CASL s.11 requires an unsubscribe to be honoured within 10 business days and the suppression to be permanent and global. This rule is checked before every send and is not overridden by any allowlist`,
       evidence_url: "suppression list",
       now,
     }),
   };
+}
+
+/** K-REL-01 · Suppressed → TERMINAL, irreversible, forever. Also L-01 in the evaluation order. */
+export function kRel01Suppressed(a: Account, now: Date): PredicateResult {
+  const at = a.rel?.suppressed_at;
+  if (!at) return pass("K-REL-01");
+  return suppressionTerminal(a, at, "K-REL-01", now);
 }
 
 /** K-REL-02 · Already routed to Enactus Canada → CHANNEL until a human clears it. */
@@ -1378,6 +1419,7 @@ export function kRel05DeclinedRecently(a: Account, now: Date): PredicateResult {
   if (days > DECLINE_SUPPRESSION_MONTHS * 30.4375) return pass("K-REL-05");
   return {
     kind: "terminal",
+    scope: "account",
     rule_id: "K-REL-05",
     reason: "declined_within_12_months",
     detail: `${a.rel?.declined_at} (${reason ?? "no reason recorded"})`,
@@ -1402,6 +1444,7 @@ export function kRel06DeclinedPermanently(a: Account, now: Date): PredicateResul
   }
   return {
     kind: "terminal",
+    scope: "account",
     rule_id: "K-REL-06",
     reason: "declined_permanently",
     detail: reason,
@@ -1449,6 +1492,7 @@ export function kRel08HardBounced(a: Account, now: Date): PredicateResult {
   if (!at) return pass("K-REL-08");
   return {
     kind: "terminal",
+    scope: "address",
     rule_id: "K-REL-08",
     reason: "undeliverable",
     detail: at,
@@ -1487,6 +1531,7 @@ export function d01DeadDomain(a: Account, now: Date): PredicateResult {
   const domain = domainKey(a);
   return {
     kind: "terminal",
+    scope: "account",
     rule_id: "D-01",
     reason: "dead_domain",
     detail: domain,
@@ -1515,6 +1560,7 @@ export function d02ParkedDomain(a: Account, lists: QualificationLists, now: Date
       if (h === parked || h.endsWith(`.${parked}`)) {
         return {
           kind: "terminal",
+          scope: "account",
           rule_id: "D-02",
           reason: "parked_or_for_sale_domain",
           detail: h,
@@ -1549,6 +1595,7 @@ export function d03CannotReceiveMail(a: Account, now: Date): PredicateResult {
   const domain = domainKey(a);
   return {
     kind: "terminal",
+    scope: "account",
     rule_id: "D-03",
     reason: "domain_cannot_receive_mail",
     detail: domain,
@@ -1615,6 +1662,7 @@ export function d05MalformedEmail(a: Account, now: Date): PredicateResult {
   if (EMAIL_SYNTAX_RE.test(a.email)) return pass("D-05");
   return {
     kind: "terminal",
+    scope: "address",
     rule_id: "D-05",
     reason: "malformed_email",
     detail: a.email,
@@ -1645,6 +1693,7 @@ export function d06DisposableEmailDomain(
   if (!hit) return pass("D-06");
   return {
     kind: "terminal",
+    scope: "account",
     rule_id: "D-06",
     reason: "disposable_email_domain",
     detail: domain,
@@ -1682,10 +1731,14 @@ export function d07EmailDomainMismatch(
       "no company domain is recorded, so the address cannot be compared against it",
     );
   }
-  if (mail === site) return pass("D-07");
+  // `mail` is derived from the raw address, so it is a HOST, not necessarily a registrable
+  // domain: `info@mail.example.ca` yields `mail.example.ca`. A host under the company's own
+  // domain is the company's own domain — the kill is for a THIRD PARTY's domain.
+  if (isDomainOrSubdomainOf(mail, site)) return pass("D-07");
   if (lists.freeMailProviders.domains.has(mail)) return pass("D-07");
   return {
     kind: "terminal",
+    scope: "address",
     rule_id: "D-07",
     reason: "email_domain_mismatch",
     detail: `${mail} != ${site}`,
@@ -1752,6 +1805,7 @@ export function placeholderContactName(a: Account, now: Date): PredicateResult {
 
   return {
     kind: "terminal",
+    scope: "person",
     rule_id: "PLACEHOLDER",
     reason: "placeholder_contact_name",
     detail: name,
@@ -1774,9 +1828,9 @@ export function placeholderContactName(a: Account, now: Date): PredicateResult {
 
 /** L-01 · On the suppression list → TERMINAL, checked before every send, forever. */
 export function l01Suppressed(a: Account, now: Date): PredicateResult {
-  const result = kRel01Suppressed(a, now);
-  if (result.kind === "pass") return pass("L-01");
-  return { ...(result as TerminalResult), rule_id: "L-01" };
+  const at = a.rel?.suppressed_at;
+  if (!at) return pass("L-01");
+  return suppressionTerminal(a, at, "L-01", now);
 }
 
 /**
@@ -1801,6 +1855,7 @@ export function l02NoSolicitationStatement(a: Account, now: Date): PredicateResu
   const evidence = a.lawful_basis_url ?? a.website_url ?? "source_page_text";
   return {
     kind: "terminal",
+    scope: "account",
     rule_id: "L-02",
     reason: "no_solicitation_statement_at_source",
     detail: matched[0],
@@ -1845,6 +1900,7 @@ export function l03HarvestedAddress(a: Account, now: Date): PredicateResult {
   if (!PROHIBITED_COLLECTION_METHODS.has(method)) return pass("L-03");
   return {
     kind: "terminal",
+    scope: "account",
     rule_id: "L-03",
     reason: "harvested_address_prohibited",
     detail: method,
@@ -1894,6 +1950,7 @@ export function l04NotConspicuouslyPublished(a: Account, now: Date): PredicateRe
   }
   return {
     kind: "terminal",
+    scope: "account",
     rule_id: "L-04",
     reason: "address_not_conspicuously_published",
     detail: `${published} is neither ${own || "the account's own domain"} nor a tier-1 source`,
@@ -2021,12 +2078,15 @@ export function kRep01StatutorySector(
 
   const detail = naicsHit ? `NAICS ${naics}` : (reHit?.[0] ?? "");
   const policyRow = lists.sectorPolicy.find(
-    (r) => r.policy === "prohibited" && (naicsHit ? naics.startsWith(r.naics) : new RegExp(r.pattern, "i").test(haystack)),
+    (r) =>
+      r.policy === "prohibited" &&
+      (naicsHit ? r.naics !== "" && naics.startsWith(r.naics) : (r.regex?.test(haystack) ?? false)),
   );
   const statute = policyRow?.decidedBy ?? "Cannabis Act s.21 / Tobacco and Vaping Products Act ss.24, 30.3";
 
   return {
     kind: "terminal",
+    scope: "account",
     rule_id: "K-REP-01",
     reason: "sponsorship_prohibited_by_statute",
     detail,
@@ -2383,8 +2443,8 @@ export function evaluatePenalties(a: Account, ctx: PenaltyContext): PenaltyResul
   // P-13 — a human marked the sector `discouraged` in sector-policy.csv.
   const haystack = sectorHaystack(a);
   for (const row of lists.sectorPolicy) {
-    if (row.policy !== "discouraged" || !row.pattern) continue;
-    if (!new RegExp(row.pattern, "i").test(haystack)) continue;
+    if (row.policy !== "discouraged" || !row.regex) continue;
+    if (!row.regex.test(haystack)) continue;
     out.push(
       penalty(
         a,
@@ -2449,8 +2509,24 @@ export interface FilterResult {
   message: string | null;
   required_channel: RequiredChannel | null;
 
-  /** HARD KILLS. Separate from `penalties`, always. */
+  /**
+   * ACCOUNT-SCOPED HARD KILLS, and only those. Separate from `penalties`, always.
+   * A non-empty `kills` is the one thing that drops the row.
+   */
   kills: TerminalResult[];
+  /**
+   * Terminals scoped to the address or the person (D-05, D-07, K-REL-08, PLACEHOLDER). The
+   * FIELD is unusable; the ACCOUNT survives, keeps being evaluated and keeps accruing penalties.
+   * Surfaced rather than discarded so a human still sees why the contact was cleared.
+   */
+  field_terminals: TerminalResult[];
+  /** The account fields `field_terminals` cleared, e.g. `["contact_name", "contact_title"]`. */
+  cleared_fields: string[];
+  /**
+   * The account as it should be persisted after filtering: the input record with every field a
+   * `field_terminals` entry invalidated cleared, ready to go back to discovery.
+   */
+  account: Account;
   channels: ChannelResult[];
   /** SOFT PENALTIES. The row stays in the queue and stays visible. */
   penalties: PenaltyResult[];
@@ -2586,6 +2662,8 @@ export function runFilter(
       : null);
 
   const kills: TerminalResult[] = [];
+  const fieldTerminals: TerminalResult[] = [];
+  const clearedFields = new Set<string>();
   const channels: ChannelResult[] = [];
   const holds: HoldResult[] = [];
   const flags: FlagResult[] = [];
@@ -2607,6 +2685,15 @@ export function runFilter(
         case "pass":
           break;
         case "terminal": {
+          // §3.4 / §3.5: an address- or person-scoped terminal kills the FIELD, never the row.
+          // It clears the field, stays visible, and evaluation continues — including the whole
+          // penalty pass. The never-kill allowlist has nothing to suppress here: it protects the
+          // ACCOUNT, and an unusable address stays unusable for a past sponsor too.
+          if (r.scope !== "account") {
+            fieldTerminals.push(r);
+            for (const field of SCOPE_FIELDS[r.scope]) clearedFields.add(field);
+            break;
+          }
           // L-01 / K-REL-01 suppression is never overridable, by anything.
           const suppressionRule = r.rule_id === "L-01" || r.rule_id === "K-REL-01";
           if (neverKill && !suppressionRule) {
@@ -2648,6 +2735,13 @@ export function runFilter(
   // a score on a rejected row means nothing.
   const penalties = kills.length > 0 ? [] : dedupePenalties([...inlinePenalties, ...evaluatePenalties(account, { lists, now, franchise: franchise.status })]);
 
+  // The surviving record. A field terminal clears its field so the account goes back to
+  // discovery with the unusable value gone, rather than being carried forward or dropped.
+  const cleaned: Account = { ...account };
+  for (const field of clearedFields) {
+    (cleaned as unknown as Record<string, unknown>)[field] = null;
+  }
+
   const primaryKill = kills[0] ?? null;
   const primaryChannel = channels[0] ?? null;
 
@@ -2670,6 +2764,9 @@ export function runFilter(
     required_channel:
       primaryKill?.required_channel ?? primaryChannel?.required_channel ?? null,
     kills,
+    field_terminals: fieldTerminals,
+    cleared_fields: [...clearedFields],
+    account: cleaned,
     channels,
     penalties,
     penalty_total: penalties.reduce((acc, p) => acc + p.delta, 0),

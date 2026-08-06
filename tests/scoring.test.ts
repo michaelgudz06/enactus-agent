@@ -31,6 +31,7 @@ import { runFilter } from "../src/lib/filter";
 import { loadQualificationLists } from "../src/lib/qualification-lists";
 
 const config = loadIcpConfig();
+const lists = loadQualificationLists();
 const NOW = new Date("2026-08-06T12:00:00.000Z");
 
 function company(over: Partial<CompanyFacts> & { legal_name: string }): CompanyFacts {
@@ -137,6 +138,32 @@ describe("config/icp.yaml", () => {
 
   it.each(badConfigs)("reports %s", (_label, raw, expected) => {
     expect(validateIcpConfig(raw).join(" ")).toContain(expected);
+  });
+
+  it("ACCEPTS a legitimate fractional retune whose parts do not sum to 100 in binary", () => {
+    // Five one-decimal weights that add to 100 on paper and to 100.00000000000001 in IEEE-754.
+    // A VP retuning the ICP must not be told the file is broken over that.
+    const fractional = {
+      segment_match: 27.7,
+      size_band: 56.5,
+      geography: 7.9,
+      industry_specificity: 3.7,
+      entity_signals: 4.2,
+    };
+    expect(Object.values(fractional).reduce((a, b) => a + b, 0)).not.toBe(100);
+
+    const problems = validateIcpConfig({
+      ...config,
+      fit_score: fractional,
+      affinity_score: fractional,
+      access_score: fractional,
+    });
+    expect(problems.filter((p) => p.includes("sum to"))).toEqual([]);
+  });
+
+  it("still rejects a retune that is genuinely off by a visible amount", () => {
+    const problems = validateIcpConfig({ ...config, fit_score: { a: 50, b: 49.9 } });
+    expect(problems.join(" ")).toContain("weights sum to 99.9, not 100");
   });
 
   it("rejects a p_yes outside 0..1", () => {
@@ -427,25 +454,70 @@ describe("evaluateGates", () => {
       municipality: "Toronto",
       region: "ON",
     });
-    const s6 = evaluateGates(alum, "S6", config, { now: NOW }).find((g) => g.gate === "G_GEO");
+    const s6 = evaluateGates(alum, "S6", config, { lists, now: NOW }).find((g) => g.gate === "G_GEO");
     expect(s6?.verdict).toBe("not_applicable");
 
-    const notS6 = evaluateGates({ ...alum, alumni_evidence: "none" }, "S2", config, { now: NOW }).find(
+    const notS6 = evaluateGates({ ...alum, alumni_evidence: "none" }, "S2", config, { lists, now: NOW }).find(
       (g) => g.gate === "G_GEO",
     );
     expect(notS6?.verdict).toBe("fail");
   });
 
   it("cannot evaluate G_SIZE without a headcount, and does not treat that as a failure", () => {
-    const g = evaluateGates(company({ legal_name: "X" }), "S2", config, { now: NOW }).find(
+    const g = evaluateGates(company({ legal_name: "X" }), "S2", config, { lists, now: NOW }).find(
       (x) => x.gate === "G_SIZE",
     );
     expect(g?.verdict).toBe("cannot_evaluate");
     expect(g?.message).toContain("absence of evidence is never a kill");
   });
 
+  describe("G_EXISTS · missing data is never a kill", () => {
+    function existsGate(over: Partial<CompanyFacts>) {
+      return evaluateGates(company({ legal_name: "X", ...over }), "S2", config, {
+        lists,
+        now: NOW,
+      }).find((x) => x.gate === "G_EXISTS");
+    }
+
+    it("never reports dead_domain for a domain that demonstrably resolves", () => {
+      // DNS is in; OrgBook has not been imported and no source count exists yet.
+      const g = existsGate({ domain_resolves: true });
+      expect(g?.verdict).toBe("cannot_evaluate");
+      expect(g?.effect).toBe("none");
+      expect(g?.message).not.toContain("dead_domain");
+      expect(g?.message).toContain("Absence of evidence is never a kill");
+    });
+
+    it("does not block scoring when corroboration is merely absent", () => {
+      const r = scoreCompany(
+        company({ legal_name: "X", has_consumer_storefront: true, municipality: "Burnaby", domain_resolves: true }),
+        config,
+        { lists, now: NOW },
+      );
+      expect(r.blocking_gates).not.toContain("G_EXISTS");
+      expect(r.missing_inputs).toContain("G_EXISTS");
+    });
+
+    it("cannot evaluate when nothing at all is recorded", () => {
+      expect(existsGate({})?.verdict).toBe("cannot_evaluate");
+    });
+
+    it("still FAILS on contrary evidence", () => {
+      expect(existsGate({ domain_resolves: false })?.verdict).toBe("fail");
+      expect(existsGate({ domain_resolves: true, domain_parked: true })?.verdict).toBe("fail");
+      // Corroboration was recorded and fell short — that is evidence, not absence.
+      expect(existsGate({ domain_resolves: true, independent_live_sources: 1 })?.verdict).toBe("fail");
+    });
+
+    it("passes on corroborated existence", () => {
+      expect(existsGate({ domain_resolves: true, orgbook_status: "ACT" })?.verdict).toBe("pass");
+      expect(existsGate({ domain_resolves: true, independent_live_sources: 2 })?.verdict).toBe("pass");
+    });
+  });
+
   it("REASSIGNS rather than blocks when G_SIZE fails", () => {
     const g = evaluateGates(company({ legal_name: "X", headcount: 400 }), "S2", config, {
+      lists,
       now: NOW,
     }).find((x) => x.gate === "G_SIZE");
     expect(g?.verdict).toBe("fail");
@@ -460,7 +532,7 @@ describe("evaluateGates", () => {
       }),
       "S11",
       config,
-      { now: NOW },
+      { lists, now: NOW },
     ).find((x) => x.gate === "G_TRIGGER_FRESH");
     expect(g?.verdict).toBe("fail");
     expect(g?.effect).toBe("park");
@@ -473,7 +545,7 @@ describe("evaluateGates", () => {
         company({ legal_name: "X", eligibility_requires_charity: true }),
         seg,
         config,
-        { now: NOW },
+        { lists, now: NOW },
       ).find((x) => x.gate === "G_ELIGIBILITY");
       expect(g?.verdict, seg).toBe("fail");
     }
@@ -481,7 +553,7 @@ describe("evaluateGates", () => {
       company({ legal_name: "X", eligibility_requires_charity: true }),
       "S2",
       config,
-      { now: NOW },
+      { lists, now: NOW },
     ).find((x) => x.gate === "G_ELIGIBILITY");
     expect(other?.verdict).toBe("not_applicable");
   });
@@ -491,7 +563,7 @@ describe("evaluateGates", () => {
       company({ legal_name: "X", alumni_evidence: "enactus_alum_led" }),
       "S6",
       config,
-      { now: NOW },
+      { lists, now: NOW },
     ).find((x) => x.gate === "G_AFFILIATION_EVIDENCE");
     expect(g?.verdict).toBe("fail");
     expect(g?.effect).toBe("cap_affinity");
@@ -563,13 +635,59 @@ describe("geographyBand", () => {
   ];
 
   it.each(cases)("puts %s in the %s band", (_label, over, expected) => {
-    expect(geographyBand(company({ legal_name: "X", ...over }), config)).toBe(expected);
+    expect(geographyBand(company({ legal_name: "X", ...over }), config, lists)).toBe(expected);
+  });
+
+  // The maintained CSV carries all 23 member jurisdictions; the six below were absent from the
+  // shorter list config/icp.yaml used to carry, so G_GEO killed them as `out_of_area`. A local
+  // business on Bowen Island is exactly the in-kind prospect this pipeline exists to find.
+  const PREVIOUSLY_BLOCKED = [
+    "Anmore",
+    "Belcarra",
+    "Bowen Island",
+    "Lions Bay",
+    "Tsawwassen First Nation",
+    "Electoral Area A",
+  ];
+
+  it.each(PREVIOUSLY_BLOCKED)("counts %s as Metro Vancouver, not elsewhere", (municipality) => {
+    expect(geographyBand(company({ legal_name: "X", municipality }), config, lists)).toBe("metro");
+  });
+
+  it.each(PREVIOUSLY_BLOCKED)("does not let G_GEO block a business in %s", (municipality) => {
+    const g = evaluateGates(
+      company({ legal_name: "X", municipality, has_consumer_storefront: true }),
+      "S2",
+      config,
+      { lists, now: NOW },
+    ).find((x) => x.gate === "G_GEO");
+    expect(g?.verdict).toBe("pass");
+  });
+
+  it("resolves a neighbourhood alias to its jurisdiction's band", () => {
+    // Kitsilano is an alias of the City of Vancouver in metro-vancouver.csv.
+    expect(geographyBand(company({ legal_name: "X", municipality: "Kitsilano" }), config, lists)).toBe(
+      "core",
+    );
+    expect(geographyBand(company({ legal_name: "X", municipality: "Steveston" }), config, lists)).toBe(
+      "metro",
+    );
+  });
+
+  it("agrees with the filter's membership test, because both read the same list", async () => {
+    const { isInMetroVancouver } = await import("../src/lib/filter");
+    for (const j of lists.metroVancouver) {
+      const band = geographyBand(company({ legal_name: "X", municipality: j.canonical }), config, lists);
+      expect(isInMetroVancouver(j.canonical, lists), j.canonical).toBe(true);
+      expect(band === "core" || band === "metro", `${j.canonical} → ${band}`).toBe(true);
+    }
   });
 });
 
 describe("the three scores", () => {
   it("never exposes a blended total", () => {
     const r = scoreCompany(company({ legal_name: "X", has_consumer_storefront: true }), config, {
+      lists,
       now: NOW,
     });
     expect(r).not.toHaveProperty("total");
@@ -603,7 +721,7 @@ describe("the three scores", () => {
       has_trial_offer: true,
       prior_ask_class: "in_kind_service",
     });
-    const r = scoreCompany(maximal, config, { now: NOW });
+    const r = scoreCompany(maximal, config, { lists, now: NOW });
     for (const b of [r.fit, r.affinity, r.access]) {
       expect(b.score).toBeGreaterThanOrEqual(0);
       expect(b.score).toBeLessThanOrEqual(100);
@@ -614,7 +732,7 @@ describe("the three scores", () => {
     const r = scoreCompany(
       company({ legal_name: "X", has_consumer_storefront: true, municipality: "Burnaby" }),
       config,
-      { now: NOW },
+      { lists, now: NOW },
     );
     for (const b of [r.fit, r.affinity, r.access]) {
       for (const t of b.terms) {
@@ -629,7 +747,7 @@ describe("the three scores", () => {
       company({ legal_name: "X", has_consumer_storefront: true, municipality: "Burnaby" }),
       "S2",
       config,
-      { now: NOW, missing: [] },
+      { lists, now: NOW, missing: [] },
     );
     const sizeTerm = r.terms.find((t) => t.term === "size_band");
     expect(sizeTerm?.points).toBe(0);
@@ -641,14 +759,15 @@ describe("the three scores", () => {
       company({ legal_name: "X", has_consumer_storefront: true, orgbook_entity_type: "SP" }),
       "S2",
       config,
-      { now: NOW, missing: [] },
+      { lists, now: NOW, missing: [] },
     );
     expect(r.terms.find((t) => t.term === "size_band")?.points).toBe(20);
   });
 
   it("scores the ideal band above the ceiling band", () => {
-    const inIdeal = scoreFit(company({ legal_name: "X", headcount: 20 }), "S2", config, { now: NOW });
+    const inIdeal = scoreFit(company({ legal_name: "X", headcount: 20 }), "S2", config, { lists, now: NOW });
     const underCeiling = scoreFit(company({ legal_name: "X", headcount: 80 }), "S2", config, {
+      lists,
       now: NOW,
     });
     const ideal = inIdeal.terms.find((t) => t.term === "size_band")?.points ?? 0;
@@ -951,7 +1070,7 @@ describe("scoreCompany", () => {
         triggers: [{ kind: "student_job_posting", observed_at: "2026-07-20" }],
       }),
       config,
-      { now: NOW },
+      { lists, now: NOW },
     );
     expect(r.segment).toBe("S7");
     expect(r.ask?.tier).toBe("gold");
@@ -985,7 +1104,7 @@ describe("scoreCompany", () => {
         triggers: [{ kind: "student_job_posting", observed_at: "2026-07-20" }],
       }),
       config,
-      { now: NOW },
+      { lists, now: NOW },
     );
     expect(r.segment).toBe("S1");
     expect(r.underlying_segment).toBe("S7");
@@ -1011,7 +1130,7 @@ describe("scoreCompany", () => {
         lawful_basis_strength: "ebr_2y",
       }),
       config,
-      { now: NOW },
+      { lists, now: NOW },
     );
     expect(r.affinity.score).toBeGreaterThan(30);
     expect(r.blocked).toBe(true);
@@ -1019,15 +1138,15 @@ describe("scoreCompany", () => {
   });
 
   it("lists what it could not evaluate rather than silently scoring zero", () => {
-    const r = scoreCompany(company({ legal_name: "Bare Co" }), config, { now: NOW });
+    const r = scoreCompany(company({ legal_name: "Bare Co" }), config, { lists, now: NOW });
     expect(r.missing_inputs.length).toBeGreaterThan(0);
     expect(r.missing_inputs).toContain("headcount");
   });
 
   it("is deterministic", () => {
     const c = company({ legal_name: "X", has_consumer_storefront: true, municipality: "Burnaby" });
-    expect(JSON.stringify(scoreCompany(c, config, { now: NOW }))).toBe(
-      JSON.stringify(scoreCompany(c, config, { now: NOW })),
+    expect(JSON.stringify(scoreCompany(c, config, { lists, now: NOW }))).toBe(
+      JSON.stringify(scoreCompany(c, config, { lists, now: NOW })),
     );
   });
 
@@ -1035,17 +1154,24 @@ describe("scoreCompany", () => {
     const c = company({ legal_name: "X", has_consumer_storefront: true, municipality: "Burnaby" });
     const retuned = {
       ...config,
+      geography: { ...config.geography, bands: { ...config.geography.bands, core: 5 } },
       fit_score: { ...config.fit_score, geography: 40, segment_match: 20 },
     };
-    const before = scoreCompany(c, config, { now: NOW }).fit.terms.find((t) => t.term === "geography");
-    const after = scoreCompany(c, retuned, { now: NOW }).fit.terms.find((t) => t.term === "geography");
-    expect(before?.max).toBe(20);
-    expect(after?.max).toBe(40);
+    const before = scoreCompany(c, config, { lists, now: NOW });
+    const after = scoreCompany(c, retuned, { lists, now: NOW });
+    const beforeGeo = before.fit.terms.find((t) => t.term === "geography");
+    const afterGeo = after.fit.terms.find((t) => t.term === "geography");
+
+    // The ceiling moved because the config said so, and so did the points actually awarded.
+    expect(beforeGeo?.max).toBe(20);
+    expect(afterGeo?.max).toBe(40);
+    expect(beforeGeo?.points).toBe(20);
+    expect(afterGeo?.points).toBe(5);
+    expect(after.fit.score).not.toBe(before.fit.score);
   });
 });
 
 describe("gateInputsFromFilterResult", () => {
-  const lists = loadQualificationLists();
 
   it("maps a suppression kill onto the G_SUPPRESSED gate input", () => {
     const result = runFilter(
@@ -1075,19 +1201,6 @@ describe("gateInputsFromFilterResult", () => {
   });
 });
 
-describe("the module contract", () => {
-  it("imports no model client", () => {
-    const source = readFileSync(new URL("../src/lib/scoring.ts", import.meta.url), "utf8");
-    const imports = source.match(/^import[\s\S]*?from\s+"([^"]+)";/gm) ?? [];
-    for (const line of imports) {
-      expect(line).not.toMatch(/llm|openai|anthropic|@ai-sdk|exa/i);
-    }
-  });
-
-  it("keeps the weights out of the code — no score constant is hardcoded", () => {
-    const source = readFileSync(new URL("../src/lib/scoring.ts", import.meta.url), "utf8");
-    // Every weight is read from the config object rather than written as a literal.
-    expect(source).not.toMatch(/segment_match:\s*\d+/);
-    expect(source).not.toMatch(/relationship_tier:\s*35/);
-  });
-});
+// The module contract — "imports no model client" and "the weights live in config, not in code"
+// — is proved by execution: see tests/no-model-client.test.ts for the first, and
+// "re-scores instantly when the weights change" above for the second.
