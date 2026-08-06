@@ -5,7 +5,7 @@ import { exaSearch, dedupeByDomain, ExaResult } from "./exa";
 import { supabaseAdmin, LEADS, SEARCHES, hasServiceKey } from "./supabase";
 import { createVerifiers, isAggregatorHost, EmailCheck, WebsiteCheck } from "./contact";
 import { ENACTUS_ORG, ENACTUS_PROJECTS, ENACTUS_VENTURES } from "./enactus";
-import { ValueDefect, defectMessage, describeValue, recoverValue, reviewFields } from "./review";
+import { ValueDefect, defectMessage, describeValue, readEnvelope, recoverValue, reviewFields } from "./review";
 
 type Emit = (e: AgentEvent) => void;
 
@@ -52,11 +52,13 @@ const PLAN_PROPERTIES: Record<string, Record<string, unknown>> = {
 const PLAN_SCHEMA = {
   name: "search_plan",
   schema: strictObject(PLAN_PROPERTIES),
-  // Envelope only. `searchQueries` is the one thing the run cannot continue
-  // without, and reviewPlan decides that after every field has had its own
-  // chance to be recovered -- listing it as required here would reject a plan
-  // whose queries arrived in a recoverable form.
-  validate: { type: "object" },
+  // Envelope only, and both shapes a plan can arrive in: `searchQueries` is the
+  // one thing the run cannot continue without, and reviewPlan decides that after
+  // every field has had its own chance to be recovered -- listing it as required
+  // here would reject a plan whose queries arrived in a recoverable form, and
+  // rejecting a list here would reject a plan wrapped in a list of one before
+  // reviewPlan could read it out.
+  validate: { type: ["object", "array"] },
 };
 
 // The per-field contract for one lead. reviewLeads checks each field against
@@ -550,11 +552,11 @@ interface PlanReview {
  */
 function reviewPlan(entry: unknown): PlanReview {
   const defects: ValueDefect[] = [];
-  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+  const raw = readEnvelope(entry, PLAN_SUBJECT, "plan", defects);
+  if (!raw) {
     return { plan: null, defects, blocker: `the model returned ${describeValue(entry)} instead of a plan` };
   }
 
-  const raw = { ...(entry as Record<string, unknown>) };
   const claimedQueries = raw.searchQueries;
   reviewFields(PLAN_SUBJECT, raw, PLAN_PROPERTIES, defects);
 

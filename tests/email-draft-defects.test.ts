@@ -132,3 +132,46 @@ describe("a draft field with nothing in it is announced too", () => {
     expect(notesAbout(json, "subject")).toHaveLength(1);
   });
 });
+
+// The mirror of the reading the leads envelope already applies: a list of one
+// where a single record was asked for is that record. This model wraps its
+// output in a bare array often enough to have been measured on the leads call.
+describe("a draft wrapped in a list of one", () => {
+  const WRAPPED = [{ subject: "Coffee for Enactus SFU", body: "Hi there, could we borrow 15 minutes?" }];
+
+  test("returns the subject and body the wrapper carried", async () => {
+    const { status, json } = await draftFrom(WRAPPED);
+
+    expect(status).toBe(200);
+    expect(json.subject).toBe(WRAPPED[0].subject);
+    expect(json.body).toBe(WRAPPED[0].body);
+  });
+
+  test("announces the unwrap, which the same draft unwrapped does not", async () => {
+    const wrapped = await draftFrom(WRAPPED);
+    const plain = await draftFrom(WRAPPED[0]);
+
+    expect(wrapped.json.subject).toBe(plain.json.subject);
+    expect(wrapped.json.body).toBe(plain.json.body);
+    expect((wrapped.json.notes as string[]).length).toBe((plain.json.notes as string[]).length + 1);
+  });
+
+  // Every other shape carries no single draft to act on, so the stop stands.
+  const NOT_A_DRAFT: Record<string, unknown> = {
+    "a number": 42,
+    "nothing at all": null,
+    "an empty list": [],
+    "a list of several drafts": [WRAPPED[0], { subject: "Second", body: "Also hi." }],
+    "a list of one non-draft": ["Subject: hello"],
+  };
+
+  for (const [shape, response] of Object.entries(NOT_A_DRAFT)) {
+    test(`stops on ${shape}`, async () => {
+      const { status, json } = await draftFrom(response);
+
+      expect(status).toBe(502);
+      expect(json.error).toBeTruthy();
+      expect(json.subject).toBeUndefined();
+    });
+  }
+});

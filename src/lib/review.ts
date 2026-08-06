@@ -85,7 +85,45 @@ export function recoverValue(schema: Record<string, unknown>, value: unknown): {
     }
   }
 
+  // The same reading mirrored: a list of one where a lone value was asked for is
+  // that one value. A longer list is a choice between entries, which is not a
+  // single reading, and an empty one carries nothing to read.
+  if (!allowed.includes("array") && Array.isArray(value) && value.length === 1 && conformsTo(schema, value[0])) {
+    return { value: value[0] };
+  }
+
   return null;
+}
+
+const OBJECT_ENVELOPE: Record<string, unknown> = { type: "object" };
+
+/**
+ * Reads the object a payload is carrying, for the levels whose payload is a
+ * single record: the search plan and the outreach draft. (The leads response is
+ * a list, and normalises the mirror of this at its own boundary.)
+ *
+ * A copy is returned so the caller's field review can work in place. A payload
+ * with no single object in it -- a string, a number, an empty list, a list of
+ * several -- has nothing to read, and returns null so the caller can stop.
+ */
+export function readEnvelope(
+  value: unknown,
+  subject: string,
+  carrier: string,
+  defects: ValueDefect[]
+): Record<string, unknown> | null {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return { ...(value as Record<string, unknown>) };
+  }
+  const recovered = recoverValue(OBJECT_ENVELOPE, value);
+  if (!recovered) return null;
+  defects.push({
+    subject,
+    field: carrier,
+    detail: `read ${describeValue(value)} as the ${carrier} it contains`,
+    action: "coerced",
+  });
+  return { ...(recovered.value as Record<string, unknown>) };
 }
 
 /**

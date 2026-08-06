@@ -157,6 +157,40 @@ describe("an unusable entry in a plan list is announced", () => {
   });
 });
 
+// The same reading at the plan envelope as at the leads and draft envelopes: a
+// list of one where a single record was asked for is that record.
+describe("a plan wrapped in a list of one", () => {
+  test("searches from the plan the wrapper carried", async () => {
+    const out = await runWithPlan([PLAN]);
+
+    expect(out.errors).toEqual([]);
+    expect(queriesSearched()).toEqual(PLAN.searchQueries);
+    expect(out.leads).toHaveLength(1);
+  });
+
+  test("announces the unwrap, which the same plan unwrapped does not", async () => {
+    const plain = await runWithPlan(PLAN);
+    const wrapped = await runWithPlan([PLAN]);
+
+    expect(wrapped.statuses.filter((s) => !plain.statuses.includes(s))).toHaveLength(1);
+  });
+
+  const NOT_A_PLAN: Record<string, unknown> = {
+    "a bare string": "search burnaby cafes",
+    "an empty list": [],
+    "a list of several plans": [PLAN, PLAN],
+  };
+
+  for (const [shape, planned] of Object.entries(NOT_A_PLAN)) {
+    test(`stops on ${shape}, without searching`, async () => {
+      const out = await runPlanOnly(planned);
+
+      expect(stub.exaSearch).not.toHaveBeenCalled();
+      expect(out.errors).toHaveLength(1);
+    });
+  }
+});
+
 // criteria is degradable, so an empty one is reachable. A labelled field with
 // nothing after it tells the next model less than no field at all.
 describe("the prompt sent onward carries no empty ideal-lead field", () => {

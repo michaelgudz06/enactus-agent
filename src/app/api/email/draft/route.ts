@@ -4,7 +4,7 @@ import { chatJSON } from "@/lib/llm";
 import { sanitizeEmail } from "@/lib/sanitize";
 import { Lead } from "@/lib/types";
 import { ENACTUS_PROJECTS } from "@/lib/enactus";
-import { ValueDefect, defectMessage, describeValue, reviewFields } from "@/lib/review";
+import { ValueDefect, defectMessage, describeValue, readEnvelope, reviewFields } from "@/lib/review";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -75,14 +75,15 @@ export async function POST(req: Request) {
     return Response.json({ error: `Draft failed: ${(e as Error).message}` }, { status: 500 });
   }
 
-  // Nothing object-shaped came back, so there is no field to keep: a real stop.
-  if (!out || typeof out !== "object" || Array.isArray(out)) {
+  // A malformed subject costs the subject, never the body beside it.
+  const defects: ValueDefect[] = [];
+  // A draft wrapped in a list of one is still a draft. Anything else carries no
+  // single draft to keep, so it is a real stop.
+  const raw = readEnvelope(out, l.company, "draft", defects);
+  if (!raw) {
     return Response.json({ error: `The model did not return a draft: got ${describeValue(out)}` }, { status: 502 });
   }
 
-  // A malformed subject costs the subject, never the body beside it.
-  const defects: ValueDefect[] = [];
-  const raw = { ...(out as Record<string, unknown>) };
   reviewFields(l.company, raw, DRAFT_PROPERTIES, defects);
 
   for (const [field, detail] of Object.entries(EMPTY_DRAFT_DETAIL)) {

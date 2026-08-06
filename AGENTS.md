@@ -65,8 +65,11 @@ supply, and never present unverified data as verified.
 A wrong type is read only when it has exactly one possible reading — `fit_score`
 of `"88"` is a slip, not an ambiguity, so `recoverValue` in `src/lib/review.ts`
 reads it as 88 and reports the recovery. A lone value where a list was asked for
-reads as a list of one, and an unusable entry in a list costs that entry rather
-than the list. Anything open to interpretation (`"high"`, or `"yes"` for a
+reads as a list of one and a list of one where a lone value was asked for reads
+as that value, and an unusable entry in a list costs that entry rather than the
+list. That mirrored pair is what lets all three envelopes model output arrives
+in — the plan, the leads response and the draft — read the same way. Anything
+open to interpretation (`"high"`, or `"yes"` for a
 boolean) is not guessed at: the field is left at its default. All of them are
 announced on the activity stream, because a silent repair teaches nobody that
 the model is misbehaving. Do not "restore" a stricter rule by deleting a
