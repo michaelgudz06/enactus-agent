@@ -1,32 +1,96 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Search, RefreshCw } from "lucide-react";
 import { useApp } from "@/components/AppShell";
-import { Lead, Status, STATUS_COLUMNS } from "@/lib/types";
+import { Lead, Mode, Status, STATUS_COLUMNS } from "@/lib/types";
 import LeadCard from "@/components/LeadCard";
 import EmailModal from "@/components/EmailModal";
+
+/** One read of `/api/leads`, tagged with the mode and the ticket it was read for. */
+type LeadsResult = { ticket: number; mode: Mode; leads: Lead[]; warning?: string };
+
+/**
+ * Every read of the board takes a ticket, and only the newest ticket may write
+ * what is on screen. A read that a later one superseded — a mode switch, or a
+ * second Refresh — is dropped rather than landing as the wrong mode's leads.
+ * One sequence covers both paths that read, the mode effect and Refresh, so the
+ * rule cannot drift apart between them, and it compares tickets rather than
+ * modes captured in a closure, which would be the mode of the render that
+ * started the read rather than the current one.
+ */
+export type ReadSequence = {
+  /** Take the newest ticket, superseding every read still in flight. */
+  start: () => number;
+  isCurrent: (ticket: number) => boolean;
+  /** Supersede every read in flight without starting one. */
+  abandon: () => void;
+};
+
+export function createReadSequence(): ReadSequence {
+  let current = 0;
+  return {
+    start: () => (current += 1),
+    isCurrent: (ticket) => ticket === current,
+    abandon: () => { current += 1; },
+  };
+}
+
+/**
+ * The board is loading while the leads on screen are not the ones the current
+ * mode asked for, or while a refresh is in flight. That is a fact about this
+ * render, so it is derived here rather than announced by an effect a commit
+ * later — which is what `setLoading(true)` inside the mount effect was doing.
+ */
+export function boardIsLoading(mode: Mode, loadedMode: Mode | null, refreshing: boolean) {
+  return refreshing || loadedMode !== mode;
+}
 
 export default function BoardPage() {
   const { mode } = useApp();
   const [leads, setLeads] = useState<Lead[]>([]);
-  const [loading, setLoading] = useState(true);
+  // The mode `leads` was read for; null until the first read lands.
+  const [loadedMode, setLoadedMode] = useState<Mode | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [query, setQuery] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
   const [overCol, setOverCol] = useState<Status | null>(null);
   const [emailLead, setEmailLead] = useState<Lead | null>(null);
   const [warning, setWarning] = useState("");
+  const [reads] = useState(createReadSequence);
 
-  async function load() {
-    setLoading(true);
+  const loading = boardIsLoading(mode, loadedMode, refreshing);
+
+  const readLeads = useCallback(async (): Promise<LeadsResult> => {
+    const ticket = reads.start();
     const res = await fetch(`/api/leads?mode=${mode}`);
     const data = await res.json();
-    setLeads(data.leads || []);
-    if (data.warning) setWarning(data.warning);
-    setLoading(false);
-  }
+    return { ticket, mode, leads: data.leads || [], warning: data.warning };
+  }, [mode, reads]);
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [mode]);
+  // Reading and applying are separate so a superseded response can be dropped:
+  // it would otherwise land as the wrong mode's leads and leave the board
+  // reading as loading forever. Every caller applies through here, so both the
+  // effect and Refresh are held to the one rule.
+  const applyLeads = useCallback((result: LeadsResult) => {
+    if (!reads.isCurrent(result.ticket)) return;
+    setLeads(result.leads);
+    if (result.warning) setWarning(result.warning);
+    setLoadedMode(result.mode);
+  }, [reads]);
+
+  useEffect(() => {
+    readLeads().then(applyLeads);
+    return () => reads.abandon();
+  }, [readLeads, applyLeads, reads]);
+
+  async function refresh() {
+    setRefreshing(true);
+    // A superseded refresh drops its leads but is still no longer refreshing;
+    // leaving the flag set would wedge the board as loading just as badly.
+    applyLeads(await readLeads());
+    setRefreshing(false);
+  }
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -69,7 +133,7 @@ export default function BoardPage() {
         </div>
         <div className="flex items-center gap-3">
           <span className="text-xs" style={{ color: "var(--faint)" }}>{filtered.length} {filtered.length === 1 ? "lead" : "leads"}</span>
-          <button onClick={load} className="p-1.5 rounded-lg hover:bg-[var(--surface3)]" style={{ color: "var(--muted)" }} title="Refresh">
+          <button onClick={refresh} className="p-1.5 rounded-lg hover:bg-[var(--surface3)]" style={{ color: "var(--muted)" }} title="Refresh">
             <RefreshCw size={15} className={loading ? "animate-spin" : ""} />
           </button>
         </div>
