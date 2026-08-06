@@ -16,7 +16,6 @@ import {
   evaluateKillPredicates,
   evaluatePenalties,
   franchiseOrBranchCarveOut,
-  franchiseExempts,
   EXEMPTIBLE_RULE_IDS,
   ENABLABLE_RULE_IDS,
   type FranchiseReport,
