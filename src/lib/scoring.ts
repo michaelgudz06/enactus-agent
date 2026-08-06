@@ -43,6 +43,7 @@ import {
   normalizeDomain,
   normalizeMunicipality,
   resolveGeography,
+  resolveLocationGeography,
 } from "./qualification-lists";
 
 export type { SegmentId, RelationshipTier, AlumniEvidence, AskClass, AskTier };
@@ -126,6 +127,13 @@ export interface CompanyFacts {
   postal_code?: string | null;
   /** Consulted BEFORE the region, so the ISO code "CA" is never read as California. */
   country?: string | null;
+  /**
+   * §5 proved this row is a location with its own decision-making authority, so geography is
+   * judged on the LOCATION'S OWN ADDRESS rather than the chain's recorded country. Carried by
+   * `gateInputsFromFilterResult` from the filter's franchise verdict, so the two modules cannot
+   * reach opposite conclusions about a franchisee whose row carries its brand's country.
+   */
+  local_authority?: boolean;
   /** A named sub-vertical beat a generic category match. */
   industry_sub_vertical?: boolean;
   orgbook_status?: "ACT" | "HIS" | null;
@@ -786,15 +794,13 @@ export type GeographyBand =
  * other. This function only maps that one verdict onto a WEIGHT band.
  */
 export function geographyScope(c: CompanyFacts, lists: QualificationLists): GeographyVerdict {
-  return resolveGeography(
-    {
-      municipality: c.municipality,
-      region: c.region,
-      country: c.country,
-      postal_code: c.postal_code,
-    },
-    lists,
-  );
+  const facts = {
+    municipality: c.municipality,
+    region: c.region,
+    country: c.country,
+    postal_code: c.postal_code,
+  };
+  return c.local_authority ? resolveLocationGeography(facts, lists) : resolveGeography(facts, lists);
 }
 
 export function geographyBand(
@@ -1392,6 +1398,7 @@ export function gateInputsFromFilterResult(
   | "deliverable_contact"
   | "required_channel"
   | "email_channel_open"
+  | "local_authority"
 > &
   Partial<Pick<CompanyFacts, "lawful_basis_strength">> {
   const suppressed = result.kills.some(
@@ -1422,6 +1429,7 @@ export function gateInputsFromFilterResult(
     // ONLY an account-scoped kill excludes. A cleared address or a cleared contact name leaves
     // the account in the corpus — §3.5 "Never drop the account".
     is_excluded: result.kills.some((k) => k.scope === "account"),
+    local_authority: result.franchise.status === "LOCAL_AUTHORITY",
     exclusion_reason: result.reject_reason,
     suppressed,
     no_solicitation_found: noSolicit,

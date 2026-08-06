@@ -237,6 +237,7 @@ import {
   type KeyedList,
   type QualificationLists,
   resolveGeography,
+  resolveLocationGeography,
   isDomainOrSubdomainOf,
   lookupDomainOrSubdomain,
   lookupList,
@@ -1448,6 +1449,19 @@ function geographyOf(a: Account, lists: QualificationLists): GeographyVerdict {
   );
 }
 
+/** The same verdict, judged on the location's own address where §5 proved local authority. */
+function locationGeographyOf(a: Account, lists: QualificationLists): GeographyVerdict {
+  return resolveLocationGeography(
+    {
+      municipality: a.address_municipality,
+      region: a.address_region,
+      country: a.address_country,
+      postal_code: a.postal_code,
+    },
+    lists,
+  );
+}
+
 /** Resolve a municipality name to its Metro Vancouver canonical jurisdictions, if any. */
 export function metroVancouverJurisdictions(
   municipality: string | null | undefined,
@@ -1503,9 +1517,16 @@ export function kGeo01OutsideCanada(
   if (geo.band !== "outside_canada") return pass("K-GEO-01");
 
   // §5's LOCAL_AUTHORITY carve-out: test the LOCATION, not the brand. A scraped franchisee row
-  // carries the international brand's corporate country, and killing on it drops exactly the
-  // local storefront §5 exists to protect.
-  if (franchiseExempts(franchise, "K-GEO-01")) return pass("K-GEO-01");
+  // carries the international brand's corporate country, so geography is judged on the
+  // location's own address instead — which is a DIFFERENT ADDRESS, never a waived rule. Where
+  // the location's own fields also place it outside Canada, or place it nowhere, the chain's
+  // verdict stands and this terminal fires exactly as it would without §5.
+  if (
+    franchiseExempts(franchise, "K-GEO-01") &&
+    locationGeographyOf(a, lists).band !== "outside_canada"
+  ) {
+    return pass("K-GEO-01");
+  }
 
   const detail = a.address_country ?? "";
   return {

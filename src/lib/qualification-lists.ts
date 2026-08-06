@@ -515,6 +515,27 @@ export interface GeographyVerdict {
  *     non-fatally. Nothing derived from the raw string reaches the verdict, so resolving a row
  *     with a field present-but-unrecognised returns an object EQUAL to resolving it omitted.
  */
+/**
+ * §5's "TEST THE LOCATION, NOT THE BRAND", as a geography question.
+ *
+ * A scraped franchisee row carries the international brand's corporate country beside the
+ * location's own municipality and province. Where §5 has proven local decision-making
+ * authority, the location's OWN address is the one that places it, so the country field is set
+ * aside and the SAME combination rule runs over what is left.
+ *
+ * This is not a licence to skip the geographic terminal. The chain's verdict stands whenever the
+ * location's own fields cannot place it in Canada, so a Seattle or London franchisee — every
+ * field agreeing it is foreign — resolves exactly as it would without §5.
+ */
+export function resolveLocationGeography(
+  facts: GeographyFacts,
+  lists: Pick<QualificationLists, "metroVancouverAliases">,
+): GeographyVerdict {
+  const chain = resolveGeography(facts, lists);
+  const location = resolveGeography({ ...facts, country: null }, lists);
+  return location.band === "unresolved" || location.band === "outside_canada" ? chain : location;
+}
+
 export function resolveGeography(
   facts: GeographyFacts,
   lists: Pick<QualificationLists, "metroVancouverAliases">,

@@ -443,6 +443,42 @@ describe("K-SIZE-01 · enterprise scale — the one predicate with a real data p
     expect(result.kills.map((k) => k.reason)).not.toContain("outside_canada");
   });
 
+  // §5 judges geography on a DIFFERENT ADDRESS; it never waives the country rule. Where the
+  // location's own fields agree it is foreign, the chain's verdict stands and K-GEO-01 fires.
+  it.each([
+    ["Seattle", { address_municipality: "Seattle", address_region: "WA", address_country: "US" }],
+    ["London", { address_municipality: "London", address_region: "England", address_country: "GB" }],
+    ["a bare US namesake", { address_municipality: "Richmond", address_region: "VA", address_country: "US" }],
+  ])("still kills a %s franchise location that proved local authority", (_label, address) => {
+    const a = account({
+      legal_name: "Modo Yoga Abroad",
+      registrable_domain: "modoyogaabroad.com",
+      ...address,
+      observations: { location_has_own_domain_with_mx: true, named_local_owner: "Jane Smith" },
+    });
+    expect(franchiseOrBranchCarveOut(a).status).toBe("LOCAL_AUTHORITY");
+
+    const verdict = kGeo01OutsideCanada(a, lists, NOW, franchiseOrBranchCarveOut(a));
+    expect(verdict.kind).toBe("terminal");
+    expect(verdict.kind === "terminal" && verdict.reason).toBe("outside_canada");
+    expect(run(a).kills.map((k) => k.reason)).toContain("outside_canada");
+  });
+
+  // The other Canadian shape: a franchisee outside BC whose row carries the brand's country.
+  it("keeps an out-of-province franchise location whose record carries a foreign country", () => {
+    const result = run(
+      account({
+        legal_name: "Chain ON Location",
+        registrable_domain: "onloc.ca",
+        address_municipality: "Toronto",
+        address_region: "ON",
+        address_country: "US",
+        observations: { location_has_own_domain_with_mx: true, named_local_owner: "Jane Smith" },
+      }),
+    );
+    expect(result.kills.map((k) => k.reason)).not.toContain("outside_canada");
+  });
+
   it("is overridden by a §5 LOCAL_AUTHORITY franchise finding", () => {
     const a = account({ legal_name: "Modo Yoga Vancouver", headcount: 900 });
     expect(kSize01EnterpriseScale(a, NOW, undefined).kind).toBe("terminal");

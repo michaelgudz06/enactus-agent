@@ -981,6 +981,8 @@ describe("filter and scoring never disagree about where a company is", () => {
     region?: string;
     country?: string;
     postal_code?: string;
+    /** §5 proved local authority, so both modules judge on the location's own address. */
+    local_authority?: boolean;
   }[] = [
     { municipality: "Burnaby" },
     { municipality: "Burnaby", region: "BC" },
@@ -1042,6 +1044,13 @@ describe("filter and scoring never disagree about where a company is", () => {
     // Unassigned district letters are not Canadian postal codes at all.
     { municipality: "Burnaby", postal_code: "D1D 1D1" },
     { municipality: "Burnaby", postal_code: "not a postal code" },
+    // §5 LOCAL_AUTHORITY. The filter honours the carve-out and the scorer must reach the same
+    // band, or a franchisee the filter keeps is blocked one layer down instead of killed.
+    { municipality: "Vancouver", region: "BC", country: "US", local_authority: true },
+    { municipality: "Toronto", region: "ON", country: "US", local_authority: true },
+    { municipality: "Seattle", region: "WA", country: "US", local_authority: true },
+    { municipality: "London", region: "England", country: "GB", local_authority: true },
+    { municipality: "Richmond", region: "VA", country: "US", local_authority: true },
   ];
 
   it.each(ROWS.map((r) => [JSON.stringify(r), r] as const))(
@@ -1054,6 +1063,7 @@ describe("filter and scoring never disagree about where a company is", () => {
           region: row.region ?? null,
           country: row.country ?? null,
           postal_code: row.postal_code ?? null,
+          local_authority: row.local_authority,
         }),
         lists,
       ).band;
@@ -1065,6 +1075,9 @@ describe("filter and scoring never disagree about where a company is", () => {
           address_region: row.region ?? null,
           address_country: row.country ?? null,
           postal_code: row.postal_code ?? null,
+          observations: row.local_authority
+            ? { location_has_own_domain_with_mx: true, named_local_owner: "Jane Smith" }
+            : undefined,
         },
         lists,
         { now: NOW },
@@ -2126,6 +2139,62 @@ describe("the seed corpus survives the K-GEO-05 cut", () => {
       expect(scored.gates.find((g) => g.gate === "G_GEO")?.verdict).toBe("cannot_evaluate");
     },
   );
+
+  // §5's carve-out has to hold in BOTH modules or the terminal is simply traded for a block: a
+  // blocked row is off the board exactly as a killed one is.
+  it("keeps a local franchisee carrying its brand's foreign country in BOTH modules", () => {
+    const row = {
+      legal_name: "Modo Yoga Vancouver",
+      registrable_domain: "modoyogavan.ca",
+      email: "hello@modoyogavan.ca",
+      contact_name: "Jane Smith",
+      address_municipality: "Vancouver",
+      address_region: "BC",
+      address_country: "US",
+      observations: {
+        location_has_own_domain_with_mx: true,
+        named_local_owner: "Jane Smith",
+        has_consumer_storefront: true,
+      },
+    };
+    const filtered = runFilter(row, lists, { now: NOW });
+    expect(filtered.franchise.status).toBe("LOCAL_AUTHORITY");
+    expect(filtered.kills.map((k) => k.reason)).not.toContain("outside_canada");
+
+    const facts = company({
+      legal_name: row.legal_name,
+      municipality: row.address_municipality,
+      region: row.address_region,
+      country: row.address_country,
+      ...gateInputsFromFilterResult(filtered),
+    });
+    expect(facts.local_authority).toBe(true);
+    expect(geographyScope(facts, lists).band).toBe("metro_vancouver");
+
+    const scored = scoreCompany(facts, config, { lists, now: NOW });
+    expect(scored.gates.find((g) => g.gate === "G_GEO")?.verdict).not.toBe("fail");
+    expect(scored.blocking_gates).not.toContain("G_GEO");
+  });
+
+  // The mirror: proving local authority is not a country waiver, so a genuinely foreign
+  // franchisee is killed by the filter and never reaches the scorer at all.
+  it("still drops a foreign franchisee that proved local authority", () => {
+    const filtered = runFilter(
+      {
+        legal_name: "Modo Yoga Seattle",
+        registrable_domain: "modoyogasea.com",
+        address_municipality: "Seattle",
+        address_region: "WA",
+        address_country: "US",
+        observations: { location_has_own_domain_with_mx: true, named_local_owner: "Jane Smith" },
+      },
+      lists,
+      { now: NOW },
+    );
+    expect(filtered.franchise.status).toBe("LOCAL_AUTHORITY");
+    expect(filtered.decision).toBe("terminal");
+    expect(filtered.kills.map((k) => k.reason)).toContain("outside_canada");
+  });
 
   // WHAT THIS PROVES AND WHAT IT DOES NOT. The row is given the address the captain's framing
   // describes — registered outside BC, in Canada — because the SEEDED Superpilot record has no
