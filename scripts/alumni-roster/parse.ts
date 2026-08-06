@@ -805,6 +805,17 @@ export function renderCoverageReport(
   // somebody is taken out of it.
   const span = asOfYear - FOUNDING_YEAR + 1;
 
+  // A window that ends before the last year it counts is not a smaller share,
+  // it is a contradiction — and one that reads as a plausible number. Report it
+  // rather than writing it.
+  const lastCovered = last ? Number(last.slice(0, 4)) : FOUNDING_YEAR;
+  if (asOfYear < lastCovered) {
+    throw new Error(
+      `a roster dated ${asOfYear} cannot cover ${last ?? FOUNDING_YEAR}: ` +
+        `the coverage span would end before the years it counts`,
+    );
+  }
+
   if (lines.length) lines.push("");
   lines.push(
     [
@@ -844,15 +855,14 @@ export function refreshCoverageClaims(
 
 /**
  * The academic year the roster was captured in, read off the capture date the
- * file records for every row rather than off the clock, so a refresh run today
- * and one run next year produce the same report. `ROSTER_CAPTURED_AT` pins it
- * the same way it pins the build. A file whose rows disagree about when they
- * were captured is not a file to guess at.
+ * file records for every row and nothing else — not the clock, and not the
+ * environment. `ROSTER_CAPTURED_AT` pins that date when the roster is built;
+ * once it is in the file, letting it be overridden again could only date the
+ * roster differently from the rows it describes. A file whose rows disagree
+ * about when they were captured is not a file to guess at.
  */
-export function capturedAcademicYear(rows: RosterRow[], pinned?: string): number {
-  const dates = pinned
-    ? new Set([pinned])
-    : new Set(rows.flatMap((row) => row.capturedAt.split(" | ")).filter(Boolean));
+export function capturedAcademicYear(rows: RosterRow[]): number {
+  const dates = new Set(rows.flatMap((row) => row.capturedAt.split(" | ")).filter(Boolean));
 
   if (dates.size !== 1) {
     throw new Error(

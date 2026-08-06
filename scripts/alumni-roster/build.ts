@@ -69,7 +69,7 @@ if (process.argv[2] === "--refresh-readme") {
       readFileSync(readmeFile, "utf8"),
       people,
       coverage,
-      capturedAcademicYear(rows, process.env.ROSTER_CAPTURED_AT),
+      capturedAcademicYear(rows),
     );
   } catch (error) {
     console.error(

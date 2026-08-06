@@ -52,6 +52,7 @@ import {
  * deleted or renamed `removed.txt` produces, which must never pass silently.
  */
 const BUILD_SCRIPT = fileURLToPath(new URL("../scripts/alumni-roster/build.ts", import.meta.url));
+const { ROSTER_CAPTURED_AT: _exportedPin, ...inheritedEnv } = process.env;
 const CACHED_PAGE = "team-20260114044549.html";
 const CACHED_URL = "https://web.archive.org/web/20260114044549id_/https://www.enactussfu.ca/team";
 const CACHED_HTML = `
@@ -1159,10 +1160,23 @@ describe("refreshing what the README says about the roster", () => {
    * no network — the position a student is in when an alum emails and the only
    * thing they have is a fresh clone.
    */
+  /**
+   * The refresh derives everything from the committed CSV, so the environment
+   * it runs in must not be able to say otherwise: `ROSTER_CAPTURED_AT` is
+   * stripped rather than passed through, or a developer who exports it would
+   * see these tests fail pointing at the README instead of at their shell.
+   */
   function runRefresh({
     dropRowsFor = null,
     dropYear = null,
-  }: { dropRowsFor?: string | null; dropYear?: string | null } = {}) {
+    csvText = null,
+    env = {},
+  }: {
+    dropRowsFor?: string | null;
+    dropYear?: string | null;
+    csvText?: string | null;
+    env?: Record<string, string>;
+  } = {}) {
     const root = mkdtempSync(path.join(tmpdir(), "alumni-refresh-"));
     const csv = path.join(root, "past-executives.csv");
     const readme = path.join(root, "README.md");
@@ -1175,7 +1189,7 @@ describe("refreshing what the README says about the roster", () => {
     );
     writeFileSync(
       csv,
-      dropRowsFor === null && dropYear === null ? committed : preamble + toCsv(kept),
+      csvText ?? (dropRowsFor === null && dropYear === null ? committed : preamble + toCsv(kept)),
     );
     writeFileSync(readme, readFileSync(README, "utf8"));
 
@@ -1183,7 +1197,7 @@ describe("refreshing what the README says about the roster", () => {
     const run = spawnSync(
       process.execPath,
       ["--experimental-strip-types", BUILD_SCRIPT, "--refresh-readme", csv, readme],
-      { encoding: "utf8", env: { ...process.env } },
+      { encoding: "utf8", env: { ...inheritedEnv, ...env } },
     );
 
     return { ...run, csv, readme, before };
@@ -1243,6 +1257,31 @@ describe("refreshing what the README says about the roster", () => {
     expect(after.people).toBeLessThan(before.people);
     expect(after.latest).not.toBe(before.latest);
     expect(after.span).toBe(before.span);
+  });
+
+  test("a capture date exported into the environment does not date the roster", () => {
+    const run = runRefresh({ env: { ROSTER_CAPTURED_AT: "2024-03-01" } });
+
+    expect(run.status).toBe(0);
+    // The rows say when they were captured; the shell does not get a vote.
+    expect(readFileSync(run.readme, "utf8")).toBe(run.before.readme);
+  });
+
+  test("a roster dated before the years it covers is refused, not reported", () => {
+    const row = [
+      "Naia Wong",
+      "President",
+      "2026-27",
+      "https://www.enactussfu.ca/team",
+      "2019-01-01",
+      "high",
+    ].join(",");
+    const run = runRefresh({
+      csvText: `# fixture\nname,role,years_active,source_url,captured_at,confidence\n${row}\n`,
+    });
+
+    expect(run.status).not.toBe(0);
+    expect(readFileSync(run.readme, "utf8")).toBe(run.before.readme);
   });
 
   test("a roster it cannot read stops it rather than half-rewriting the README", () => {
