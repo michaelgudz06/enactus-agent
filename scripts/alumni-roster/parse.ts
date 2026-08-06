@@ -694,14 +694,25 @@ function splitCsv(body: string): string[][] {
     const char = body[i];
     if (quoted) {
       if (char !== '"') field += char;
-      else if (body[i + 1] === '"') (field += '"'), (i += 1);
-      else quoted = false;
+      else if (body[i + 1] === '"') {
+        field += '"';
+        i += 1;
+      } else quoted = false;
     } else if (char === '"') quoted = true;
-    else if (char === ",") (record.push(field), (field = ""));
-    else if (char === "\n") (record.push(field), records.push(record), (record = []), (field = ""));
-    else field += char;
+    else if (char === ",") {
+      record.push(field);
+      field = "";
+    } else if (char === "\n") {
+      record.push(field);
+      records.push(record);
+      record = [];
+      field = "";
+    } else field += char;
   }
-  if (field !== "" || record.length) (record.push(field), records.push(record));
+  if (field !== "" || record.length) {
+    record.push(field);
+    records.push(record);
+  }
 
   return records;
 }

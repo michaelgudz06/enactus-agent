@@ -58,11 +58,18 @@ They can. There is no threshold to meet, no form, and no reason required.
    ```
 
    That rewrites the coverage report under "Gaps in the record" — the only place
-   in this file that counts anybody — from the CSV you just edited. It reads nothing
-   else: no snapshot cache, no network, no archive. It takes a second on a fresh
-   clone, it never touches the roster itself, and it is what keeps the tests
-   passing so that honouring a removal never leaves you with a red branch to
-   explain. Do not wait for a batch, a sprint, or a meeting.
+   in this file that counts anybody — from the CSV you just edited. The only
+   other thing it reads is `removed.txt` beside it: no snapshot cache, no
+   network, no archive. It takes a second on a fresh clone, it never touches the
+   roster itself, and it is what keeps the tests passing so that honouring a
+   removal never leaves you with a red branch to explain. Do not wait for a
+   batch, a sprint, or a meeting.
+
+   It reads the removal list to catch step 1 done without step 2: if a name on
+   `removed.txt` still has a row in the CSV, the refresh refuses to run and names
+   them, because adding the name without deleting the row leaves someone who
+   asked to be taken off the file still in it. Delete those rows and run it
+   again. It is not an extra step, only a check on the two above.
 4. **Reply to them and say it is done.** One line is enough. Do not ask why, do
    not ask them to reconsider, and do not offer to keep a reduced version of
    their entry.
@@ -86,7 +93,7 @@ third-party directory, a data vendor, or a social network.
 | `enactussfu.com/executives/` | Wayback, 56 distinct bodies, 2012-12 → 2019-05 | The executive roster, year by year |
 | `enactussfu.com/program-managers/` | Wayback, 21 distinct bodies, 2012 → 2017 | Project leads, the layer below exec |
 | `enactussfu.com/project-managers/` | Wayback, 2017 → 2019 | The same page after it was renamed; the only source for project leads 2017-2019 |
-| `enactussfu.com/alumni/` | Wayback, 2012-2013 captures | The chapter's founder and three pre-2012 presidents, with their terms — the only source that reaches back before 2012 |
+| `enactussfu.com/alumni/` | Wayback, 2012-2013 captures | The chapter's founder and the pre-2012 presidents, with their terms — the only source that reaches back before 2012 |
 | `enactussfu.com/…/community-spotlight-*` | Wayback, 7 posts, 2012-2013 | Alumni named in a post title, with no role and no term |
 | `enactussfu.ca/our-team` | Wayback, 2023 capture | The 2022-23 executive, from the Wix-era site |
 | `enactussfu.ca/the-team` | Wayback, 2023-10 → 2024-04 | The 2023-24 executive, from the Squarespace-era site |
@@ -209,7 +216,11 @@ The list fails closed and stays honest:
 
 `.cache/alumni-roster/` is gitignored, and must stay that way: the raw pages
 carry the role email addresses, phone numbers and employer detail that this file
-exists to leave behind.
+exists to leave behind. Both scripts enforce it rather than trusting it — each
+asks git, and refuses to write to or read from a cache directory inside this
+repository that git does not ignore, before a page is fetched or parsed. Point
+the cache somewhere else with the first argument to either script, or add that
+path to `.gitignore`.
 
 The build is deterministic apart from `captured_at`, which defaults to today. Set
 `ROSTER_CAPTURED_AT=YYYY-MM-DD` to reproduce an earlier build exactly.
