@@ -331,17 +331,51 @@ describe("resolveGeography · an unrecognised value behaves exactly as an omitte
 
   it("never reads the token CA as anything but Canada", () => {
     expect(band({ municipality: "Vancouver", region: "CA", country: "CA" })).toBe("metro_vancouver");
-    expect(resolveGeography({ country: "CA" }, lists).country).toBe("canada");
-    expect(resolveGeography({ region: "CA" }, lists).region).toBe("unparsed");
+    expect(resolveGeography({ country: "CA" }, lists).evidence.country).toBe("known");
+    // As a REGION, "CA" is not a Canadian province, so it is unknown — never California.
+    expect(resolveGeography({ region: "CA" }, lists).evidence.region).toBe("unknown");
   });
 
   // Report §8 rejected FSA-prefix geography in writing, and a coarse V3-V7 set proved it: V3G
   // and V4X are Abbotsford, not Metro Vancouver. A postal code must move nothing.
-  it("ignores a postal code entirely — it is not even an input", () => {
+  // A postal code is read ONLY for its country and province FORMAT — a Canadian postal code
+  // says Canada, and the V district says British Columbia. It never decides Metro Vancouver
+  // MEMBERSHIP: report §8 rejected FSA-prefix geography, and V3G/V4X are Abbotsford.
+  it("reads a postal code for province, never for membership", () => {
     const withPostal = { municipality: "Abbotsford", region: "BC", postal_code: "V3G 2J5" };
     expect(band(withPostal)).toBe("bc_other");
     expect(band(withPostal)).toBe(band({ municipality: "Abbotsford", region: "BC" }));
-    expect(band({ postal_code: "V5A 1S6" })).toBe("unresolved");
+    // The V district is British Columbia, and that is all it says.
+    expect(band({ postal_code: "V5A 1S6" })).toBe("bc_other");
+    expect(band({ municipality: "Abbotsford", postal_code: "V3G 2J5" })).toBe("bc_other");
+    // A malformed postal decides nothing at all.
+    expect(band({ postal_code: "not a postal code" })).toBe("unresolved");
+  });
+
+  // THE PROPERTY, not an example of it: for EVERY field, present-but-unrecognised must return an
+  // object EQUAL to omitted. Two rounds achieved never-a-kill and still diverged on the band,
+  // which is how the drift kept recurring — so this asserts deep equality of the whole verdict.
+  it.each([
+    ["country", "country", "Freedonia"],
+    ["country", "country", "British Columbia"],
+    ["region", "region", "Freedonia"],
+    ["region", "region", "WA"],
+    ["municipality", "municipality", "Nowheresville"],
+    ["postal_code", "postal_code", "not-a-postal-code"],
+  ])("an unrecognised %s resolves to the IDENTICAL verdict as an omitted one", (_l, field, value) => {
+    const rows: Record<string, string | undefined>[] = [
+      { municipality: "Burnaby", region: "BC", country: "CA" },
+      { municipality: "Burnaby" },
+      { region: "ON", country: "CA" },
+      {},
+    ];
+    for (const row of rows) {
+      const omitted = { ...row, [field]: undefined };
+      const present = { ...row, [field]: value };
+      expect(resolveGeography(present, lists), `${field}=${value} on ${JSON.stringify(row)}`).toEqual(
+        resolveGeography(omitted, lists),
+      );
+    }
   });
 
   it("puts every band a Canadian row can reach outside the kill path", () => {

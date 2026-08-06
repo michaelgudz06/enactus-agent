@@ -152,12 +152,29 @@
 //      resolvers over the same data drifted in OPPOSITE directions within one review round, and
 //      then two CALLERS of one resolver drifted again by passing it different fields.
 //
-//      AND UNRECOGNISED IS ABSENT, IN EVERY BRANCH. `RegionVerdict` is `bc | canada_other |
-//      unparsed`, and `unparsed` takes exactly the path a null region takes — same band, same
-//      weight, same outcome. Reading "not one of the BC spellings I know" as "somewhere else"
-//      terminalled a Burnaby bakery whose region was recorded as "B.C."; suppressing the alias
-//      for an unrecognised region then cost the same row its metro band. A longer spelling list
-//      is not the fix — there is always another spelling — so the guarantee is structural.
+//      AND UNRECOGNISED IS ABSENT, IN EVERY BRANCH, AT EVERY FIELD. Four consecutive geography
+//      defects came from writing a three-state question as a boolean per field: one classifier
+//      read "unrecognised" as CONTRARY and terminalled a Burnaby bakery whose province read
+//      "B.C.", another read it as PERMISSIVE and scored Vancouver, Washington as a local
+//      prospect. `Evidence` is now ONE primitive — `known | contrary | unknown` — applied to
+//      country, region and municipality alike, with ONE combination rule, and every consumer
+//      switches on all three states with a `never` default. Resolving a row with a field
+//      present-but-unrecognised returns an object EQUAL to resolving it omitted.
+//
+//      THREE CONSEQUENCES WORTH NAMING:
+//        · A bare municipality alias is trusted only on POSITIVE evidence of Canada. Vancouver
+//          BC and Vancouver WA are indistinguishable on a bare municipality, so the honest
+//          answer is `unresolved` — a thin row loses a weighting, never its place on the board.
+//        · `canada_other` needs a RECOGNISED non-BC province. Country-is-Canada with everything
+//          else unknown is `unresolved`, because P-04 reads that band as "the head office is
+//          elsewhere" and the absence rule forbids inferring it from an empty field. (The
+//          instruction said country AND province; a recognised Canadian province is itself
+//          positive evidence of Canada, so the province alone carries it — the clause that
+//          bites is the absence case, and that is closed.)
+//        · "Outside Canada" must be RECOGNISED, never merely unrecognised, so a country field
+//          reading "British Columbia" is a slip rather than a kill. The recognised-not-Canada
+//          list is deliberately incomplete; the cost is under-killing, which is the safe
+//          direction.
 //
 //  A5. AN EFFECT A RULE DESCRIBES IS PART OF ITS RETURN TYPE. Four rules in a row were found
 //      narrating an outcome nothing emitted (K-REL-08's sibling −40, L-04's email channel,
@@ -174,7 +191,6 @@ import {
   type GeographyVerdict,
   type KeyedList,
   type QualificationLists,
-  classifyRegion,
   resolveGeography,
   isDomainOrSubdomainOf,
   lookupDomainOrSubdomain,
@@ -498,7 +514,7 @@ export interface ChannelResult extends BaseResult {
 
 export interface PenaltyResult extends BaseResult {
   kind: "penalty";
-  /** e.g. "outside_metro_vancouver". */
+  /** e.g. "role_account". */
   tag: string;
   /** Negative. Reduces fit_score; the row stays in the queue and stays visible. */
   delta: number;
@@ -1377,6 +1393,7 @@ function geographyOf(a: Account, lists: QualificationLists): GeographyVerdict {
       municipality: a.address_municipality,
       region: a.address_region,
       country: a.address_country,
+      postal_code: a.postal_code,
     },
     lists,
   );
@@ -1400,8 +1417,12 @@ export function isInMetroVancouver(
   lists: QualificationLists,
   region?: string | null,
   country?: string | null,
+  postal_code?: string | null,
 ): boolean {
-  return resolveGeography({ municipality, region, country }, lists).band === "metro_vancouver";
+  return (
+    resolveGeography({ municipality, region, country, postal_code }, lists).band ===
+    "metro_vancouver"
+  );
 }
 
 /**
@@ -1431,14 +1452,23 @@ export function localityBasis(a: Account, lists: QualificationLists): LocalityRe
     // precondition applies here: a contrary region overrules the alias.
     if (geographyOf(a, lists).band === "metro_vancouver") inScope.push("registered_address");
   }
+  // DELIBERATELY PERMISSIVE, and only here. These two observations carry no province of their
+  // own — an enrichment pass recorded "this operation / this decision-maker is in <place>" — so
+  // a bare alias hit is all there is. Reading it as a Metro Vancouver presence can only ever
+  // PREVENT the K-GEO-01 terminal (the report's own Superpilot case: remote-first, Vancouver
+  // founder); it never awards a geography band, which is decided by `geographyOf` alone. Under
+  // the cardinal rule, a signal that can only rescue is safe to read permissively.
   if (o.operating_municipality) {
     available.push("operating_location");
-    if (isInMetroVancouver(o.operating_municipality, lists)) inScope.push("operating_location");
+    if (metroVancouverCanonicals(o.operating_municipality, lists).length > 0) {
+      inScope.push("operating_location");
+    }
   }
   if (o.decision_maker_municipality) {
     available.push("decision_maker_location");
-    if (isInMetroVancouver(o.decision_maker_municipality, lists))
+    if (metroVancouverCanonicals(o.decision_maker_municipality, lists).length > 0) {
       inScope.push("decision_maker_location");
+    }
   }
 
   return { in_scope: inScope.length > 0, bases_available: available, bases_in_scope: inScope };
@@ -2896,10 +2926,17 @@ export function franchiseReroute(report: FranchiseReport): PredicateResult {
   }
 }
 
-/** P-04 clause 1: the account's registered head office is somewhere other than BC. */
+/**
+ * P-04 clause 1: the account's registered head office is somewhere other than BC.
+ *
+ * Reads the EVIDENCE, not the band. `canada_other` is reachable from a recognised non-BC
+ * province, and a band that could also be reached from absence would make P-04 charge -30 to a
+ * row whose head office nobody has located yet — exactly what the captain's absence rule
+ * forbids.
+ */
 function headOfficeOutsideBc(a: Account, lists: QualificationLists): boolean {
-  const geo = geographyOf(a, lists);
-  return geo.band === "canada_other" || geo.band === "outside_canada";
+  const { evidence } = geographyOf(a, lists);
+  return evidence.region === "contrary" || evidence.country === "contrary";
 }
 
 /** P-04 clause 2: a local branch of that head office exists in scope. */
@@ -3517,7 +3554,13 @@ export function runFilter(
   };
 }
 
-/** The same signal can surface from two rules (K-GEO-03 and P-01). Charge it once. */
+/**
+ * Two rules can produce the same tag for one signal. Charge it once.
+ *
+ * The original pair (K-GEO-03 and P-01, both `outside_metro_vancouver`) was retired by the
+ * 2026-08-06 supersession — geography is a band weight now — so nothing exercises this today.
+ * It stays because the shape recurs: a §3 predicate and its §4 penalty naming one fact.
+ */
 function dedupePenalties(penalties: PenaltyResult[]): PenaltyResult[] {
   const seen = new Set<string>();
   const out: PenaltyResult[] = [];

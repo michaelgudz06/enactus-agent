@@ -637,7 +637,7 @@ describe("evaluateGates", () => {
     it.each([
       ["a municipality with no region or postal code", { municipality: "Abbotsford" }],
       ["a municipality the alias map does not carry", { municipality: "Nowheresville" }],
-      ["a postal code outside the metro prefixes, with no region", { postal_code: "V2S 1A1" }],
+      ["a bare municipality with no evidence of Canada", { municipality: "Vancouver" }],
       ["nothing at all", {}],
     ])("cannot evaluate %s", (_label, over) => {
       const g = geoGate(over);
@@ -673,13 +673,12 @@ describe("evaluateGates", () => {
       expect(g?.verdict).toBe("pass");
     });
 
-    it.each([
-      ["Burnaby", "metro"],
-      ["Anmore", "metro"],
-      ["Bowen Island", "metro"],
-    ])("passes %s from metro-vancouver.csv alone", (municipality) => {
-      expect(geoGate({ municipality })?.verdict).toBe("pass");
-    });
+    it.each(["Burnaby", "Anmore", "Bowen Island"])(
+      "passes %s from metro-vancouver.csv once the province is recorded",
+      (municipality) => {
+        expect(geoGate({ municipality, region: "BC" })?.verdict).toBe("pass");
+      },
+    );
   });
 
   it("REASSIGNS rather than blocks when G_SIZE fails", () => {
@@ -790,15 +789,18 @@ describe("G_AFFILIATION_EVIDENCE · the bar the report calls non-negotiable", ()
 
 describe("geographyBand", () => {
   const cases: [string, Partial<CompanyFacts>, string][] = [
-    ["Burnaby", { municipality: "Burnaby" }, "core"],
-    ["Vancouver", { municipality: "Vancouver" }, "core"],
-    ["Surrey", { municipality: "Surrey" }, "core"],
-    ["Richmond", { municipality: "Richmond" }, "metro_vancouver"],
+    ["Burnaby", { municipality: "Burnaby", region: "BC" }, "core"],
+    ["Vancouver", { municipality: "Vancouver", country: "CA" }, "core"],
+    ["Surrey", { municipality: "Surrey", postal_code: "V3T 0A1" }, "core"],
+    ["Richmond", { municipality: "Richmond", region: "BC" }, "metro_vancouver"],
     ["Kelowna", { municipality: "Kelowna", region: "BC" }, "bc_other"],
     // IN SCOPE at a lower weight, per the 2026-08-06 supersession.
     ["Toronto", { municipality: "Toronto", region: "ON" }, "canada_other"],
-    ["somewhere unnamed in Canada", { country: "CA" }, "canada_other"],
+    // canada_other needs a RECOGNISED province: country alone cannot reach it, because P-04
+    // reads that band as "the head office is elsewhere".
+    ["somewhere unnamed in Canada", { country: "CA" }, "unresolved"],
     ["Seattle", { municipality: "Seattle", region: "WA", country: "US" }, "outside_canada"],
+    ["a bare municipality with no evidence of Canada", { municipality: "Vancouver" }, "unresolved"],
     ["nothing at all", {}, "unresolved"],
   ];
 
@@ -808,13 +810,25 @@ describe("geographyBand", () => {
 
   // A postal code is NOT a membership signal. Report §8 rejected FSA-prefix geography, and V3G
   // and V4X are Abbotsford, V4S is Mission, V4T/V4V are Central Okanagan.
-  it("never lets a postal code decide the band", () => {
+  // A postal code is read ONLY for its country and province FORMAT. It never decides Metro
+  // Vancouver MEMBERSHIP: report §8 rejected FSA-prefix geography, and V3G and V4X are
+  // Abbotsford, V4S is Mission.
+  it("never lets a postal code decide MEMBERSHIP, only country and province", () => {
+    // A V postal says British Columbia, and nothing more.
     expect(geographyBand(company({ legal_name: "X", postal_code: "V5A 1S6" }), config, lists)).toBe(
-      "unresolved",
+      "bc_other",
     );
+    // The Abbotsford FSA is inside V3, and Abbotsford is still NOT a member jurisdiction.
     expect(
       geographyBand(
         company({ legal_name: "X", municipality: "Abbotsford", region: "BC", postal_code: "V3G 2J5" }),
+        config,
+        lists,
+      ),
+    ).toBe("bc_other");
+    expect(
+      geographyBand(
+        company({ legal_name: "X", municipality: "Abbotsford", postal_code: "V3G 2J5" }),
         config,
         lists,
       ),
@@ -833,14 +847,14 @@ describe("geographyBand", () => {
   ];
 
   it.each(PREVIOUSLY_BLOCKED)("counts %s as Metro Vancouver", (municipality) => {
-    expect(geographyBand(company({ legal_name: "X", municipality }), config, lists)).toBe(
-      "metro_vancouver",
-    );
+    expect(
+      geographyBand(company({ legal_name: "X", municipality, region: "BC" }), config, lists),
+    ).toBe("metro_vancouver");
   });
 
   it.each(PREVIOUSLY_BLOCKED)("does not let G_GEO block a business in %s", (municipality) => {
     const g = evaluateGates(
-      company({ legal_name: "X", municipality, has_consumer_storefront: true }),
+      company({ legal_name: "X", municipality, region: "BC", has_consumer_storefront: true }),
       "S2",
       config,
       { lists, now: NOW },
@@ -850,21 +864,40 @@ describe("geographyBand", () => {
 
   it("resolves a neighbourhood alias to its jurisdiction's band", () => {
     // Kitsilano is an alias of the City of Vancouver in metro-vancouver.csv.
-    expect(geographyBand(company({ legal_name: "X", municipality: "Kitsilano" }), config, lists)).toBe(
-      "core",
-    );
-    expect(geographyBand(company({ legal_name: "X", municipality: "Steveston" }), config, lists)).toBe(
-      "metro_vancouver",
-    );
+    expect(
+      geographyBand(company({ legal_name: "X", municipality: "Kitsilano", region: "BC" }), config, lists),
+    ).toBe("core");
+    expect(
+      geographyBand(company({ legal_name: "X", municipality: "Steveston", region: "BC" }), config, lists),
+    ).toBe("metro_vancouver");
   });
 
   it("agrees with the filter's membership test, because both read the same list", async () => {
     const { isInMetroVancouver } = await import("../src/lib/filter");
     for (const j of lists.metroVancouver) {
-      const band = geographyBand(company({ legal_name: "X", municipality: j.canonical }), config, lists);
-      expect(isInMetroVancouver(j.canonical, lists), j.canonical).toBe(true);
+      const band = geographyBand(
+        company({ legal_name: "X", municipality: j.canonical, region: "BC" }),
+        config,
+        lists,
+      );
+      expect(isInMetroVancouver(j.canonical, lists, "BC"), j.canonical).toBe(true);
       expect(band === "core" || band === "metro_vancouver", `${j.canonical} → ${band}`).toBe(true);
     }
+  });
+
+  // MUST-NOT-BREAK: the tightening bites ONLY the genuinely ambiguous row. Any real province
+  // evidence — a province, a country, or a Canadian postal code — still scores full weight.
+  it.each([
+    ["region BC", { region: "BC" }],
+    ["country CA", { country: "CA" }],
+    ["a V5 postal code", { postal_code: "V5A 1S6" }],
+  ])("still scores Burnaby core with %s", (_label, over) => {
+    const facts = company({ legal_name: "X", municipality: "Burnaby", ...over });
+    expect(geographyBand(facts, config, lists)).toBe("core");
+    const geography = scoreFit(facts, "S2", config, { lists, now: NOW }).terms.find(
+      (t) => t.term === "geography",
+    );
+    expect(geography?.points).toBe(config.geography.bands.core);
   });
 
   // metro-vancouver.csv ships BARE municipality names, and richmond, vancouver, surrey, langley,
@@ -879,10 +912,23 @@ describe("geographyBand", () => {
       ).toBe("canada_other");
     });
 
-    it.each(COLLIDING)("still resolves %s as Metro Vancouver with no province recorded", (municipality) => {
-      const band = geographyBand(company({ legal_name: "X", municipality }), config, lists);
-      expect(band === "core" || band === "metro_vancouver", `${municipality} → ${band}`).toBe(true);
+    // Vancouver BC and Vancouver WA are indistinguishable on a bare municipality, so the honest
+    // answer is unresolved — a weighting lost, never a place on the board.
+    it.each(COLLIDING)("resolves %s alone as unresolved rather than guessing", (municipality) => {
+      expect(geographyBand(company({ legal_name: "X", municipality }), config, lists)).toBe(
+        "unresolved",
+      );
     });
+
+    // The failure this closes: a US namesake with no country recorded used to score full metro.
+    it.each(["WA", "VA", "OR", "Washington", "Virginia"])(
+      "does not score a bare municipality as metro when the province reads %j",
+      (region) => {
+        expect(
+          geographyBand(company({ legal_name: "X", municipality: "Vancouver", region }), config, lists),
+        ).toBe("unresolved");
+      },
+    );
 
     it.each(COLLIDING)("still resolves %s as Metro Vancouver with province BC", (municipality) => {
       const band = geographyBand(company({ legal_name: "X", municipality, region: "BC" }), config, lists);
@@ -1018,7 +1064,7 @@ describe("filter and scoring never disagree about where a company is", () => {
   );
 
   it("never lets an unrecognised region drop a row or change its band in either module", () => {
-    for (const region of ["B.C.", "B.C", "British Columbia, Canada", "Freedonia", "CA"]) {
+    for (const region of ["B.C.", "B.C", "British Columbia, Canada", "BC"]) {
       const facts = company({
         legal_name: "Crema Artisan Bakers",
         municipality: "Burnaby",
@@ -1136,9 +1182,10 @@ describe("a role-account board does not empty", () => {
     expect(g?.effect).toBe(verdict === "fail" ? "block" : "none");
   });
 
-  // The compliance hole this closes: a current sponsor routed to renewal_motion whose L-04
-  // finding invalidated the claimed basis must still be stopped, not waved through.
-  it("still blocks a renewal lead whose CASL basis L-04 invalidated", () => {
+  // A renewal lead IS reached by email, so renewal_motion must not suppress the basis gate.
+  // The gate is derived from the CURRENT channel state, so it reports not_applicable only while
+  // the channel is shut, and asks the real question the moment it reopens.
+  it("asks the basis question for real on a renewal lead whose email channel is open", () => {
     const filtered = runFilter(
       {
         legal_name: "Past Sponsor",
@@ -1155,19 +1202,98 @@ describe("a role-account board does not empty", () => {
       { now: NOW, current_cycle: "2026-27" },
     );
     expect(filtered.required_channel).toBe("renewal_motion");
+    // L-04 shut the email channel, so there is no message to justify — but the finding is still
+    // carried, and the gate is not silently satisfied.
     expect(filtered.email_channel_open).toBe(false);
+    const inputs = gateInputsFromFilterResult(filtered);
+    expect(inputs.lawful_basis_strength).toBe("none");
 
-    const scored = scoreCompany(
-      company({ legal_name: "Past Sponsor", ...gateInputsFromFilterResult(filtered) }),
+    const whileClosed = scoreCompany(
+      company({ legal_name: "Past Sponsor", ...inputs }),
       config,
       { lists, now: NOW },
     );
-    expect(scored.blocking_gates).toContain("G_LAWFUL_BASIS");
+    expect(whileClosed.gates.find((g) => g.gate === "G_LAWFUL_BASIS")?.verdict).toBe(
+      "not_applicable",
+    );
+    expect(whileClosed.blocked).toBe(false);
+
+    // Reopen the channel — a human finds a named contact — and the basis question is asked for
+    // real on the path the lead would actually take.
+    const reopened = scoreCompany(
+      company({ legal_name: "Past Sponsor", ...inputs, email_channel_open: true }),
+      config,
+      { lists, now: NOW },
+    );
+    expect(reopened.gates.find((g) => g.gate === "G_LAWFUL_BASIS")?.verdict).toBe("fail");
+    expect(reopened.blocking_gates).toContain("G_LAWFUL_BASIS");
+  });
+
+  // THE GENERAL RULE: G_LAWFUL_BASIS asks whether this lead may be EMAILED, so a closed email
+  // channel is not_applicable and NEVER a block — being unreachable by one route is a routing
+  // fact, not a disqualification. The verdict is derived from the CURRENT channel state, so it
+  // is not a permanent stamp that could be used to skip the anti-spam check.
+  it("never blocks for a closed email channel, and asks for real once it reopens", () => {
+    const closed = company({
+      legal_name: "X",
+      lawful_basis_strength: "none",
+      email_channel_open: false,
+    });
+    const gClosed = evaluateGates(closed, "S2", config, { lists, now: NOW }).find(
+      (g) => g.gate === "G_LAWFUL_BASIS",
+    );
+    expect(gClosed?.verdict).toBe("not_applicable");
+    expect(gClosed?.effect).toBe("none");
+    expect(scoreCompany(closed, config, { lists, now: NOW }).blocked).toBe(false);
+
+    const reopened = { ...closed, email_channel_open: true };
+    const gOpen = evaluateGates(reopened, "S2", config, { lists, now: NOW }).find(
+      (g) => g.gate === "G_LAWFUL_BASIS",
+    );
+    expect(gOpen?.verdict).toBe("fail");
+    expect(gOpen?.effect).toBe("block");
+    expect(scoreCompany(reopened, config, { lists, now: NOW }).blocking_gates).toContain(
+      "G_LAWFUL_BASIS",
+    );
+  });
+
+  // The non-walkable role account: no storefront, so no walk list — the row must still stay on
+  // the board rather than being blocked for having nowhere to be emailed.
+  it("keeps a role account with no walkable storefront on the board", () => {
+    const filtered = runFilter(
+      {
+        legal_name: "Remote Co",
+        registrable_domain: "remote.ca",
+        email: "info@remote.ca",
+        address_municipality: "Burnaby",
+        address_region: "BC",
+        address_country: "CA",
+        lawful_basis: "conspicuous_pub",
+      },
+      lists,
+      { now: NOW },
+    );
+    expect(filtered.kills).toHaveLength(0);
+    expect(filtered.email_channel_open).toBe(false);
+    expect(filtered.required_channel).toBeNull();
+    expect(filtered.flags.map((f) => f.flag_reason)).toContain("role_account_channel_unresolved");
+
+    const scored = scoreCompany(
+      company({
+        legal_name: "Remote Co",
+        relationship_tier: "cold",
+        ...gateInputsFromFilterResult(filtered),
+      }),
+      config,
+      { lists, now: NOW },
+    );
+    expect(scored.blocked).toBe(false);
+    expect(scored.gates.find((g) => g.gate === "G_LAWFUL_BASIS")?.verdict).toBe("not_applicable");
   });
 
   it("still fails G_LAWFUL_BASIS when there is no basis AND no alternative route", () => {
     const g = evaluateGates(
-      company({ legal_name: "X", lawful_basis_strength: "none" }),
+      company({ legal_name: "X", lawful_basis_strength: "none", email_channel_open: true }),
       "S2",
       config,
       { lists, now: NOW },
@@ -1637,14 +1763,24 @@ describe("scoreCompany", () => {
   });
 
   it("is deterministic", () => {
-    const c = company({ legal_name: "X", has_consumer_storefront: true, municipality: "Burnaby" });
+    const c = company({
+      legal_name: "X",
+      has_consumer_storefront: true,
+      municipality: "Burnaby",
+      region: "BC",
+    });
     expect(JSON.stringify(scoreCompany(c, config, { lists, now: NOW }))).toBe(
       JSON.stringify(scoreCompany(c, config, { lists, now: NOW })),
     );
   });
 
   it("re-scores instantly when the weights change, with no model involved", () => {
-    const c = company({ legal_name: "X", has_consumer_storefront: true, municipality: "Burnaby" });
+    const c = company({
+      legal_name: "X",
+      has_consumer_storefront: true,
+      municipality: "Burnaby",
+      region: "BC",
+    });
     const retuned = {
       ...config,
       geography: { ...config.geography, bands: { ...config.geography.bands, core: 5 } },
@@ -1744,7 +1880,11 @@ describe("gateInputsFromFilterResult", () => {
   // L-04 is the finding that the CLAIMED CASL basis is invalid — a third-party directory URL is
   // not conspicuous publication — so G_LAWFUL_BASIS is the gate that owns it. Without this the
   // rescope from `account` to `email` silently removed L-04's only enforcement.
-  it("L-04 closes the email channel and FAILS G_LAWFUL_BASIS, with the account surviving", () => {
+  // L-04 is a finding that the CLAIMED basis is invalid. It reaches G_LAWFUL_BASIS through the
+  // adapter (DECISION 3), but the gate's verdict is derived from the CURRENT channel state: while
+  // the channel is shut there is no message to justify, and the moment it reopens the invalidated
+  // basis fails for real. The protection against a send is `email_channel_open`, not a block.
+  it("L-04 closes the email channel and its finding reaches G_LAWFUL_BASIS", () => {
     const result = runFilter(
       {
         ...base,
@@ -1774,15 +1914,25 @@ describe("gateInputsFromFilterResult", () => {
     expect(inputs.is_excluded).toBe(false);
     expect(inputs.lawful_basis_strength).toBe("none");
 
-    // ...and blocks at G_LAWFUL_BASIS rather than at G_EXCLUDED.
+    // ...and lands on G_LAWFUL_BASIS rather than on G_EXCLUDED. While the channel is shut the
+    // honest verdict is not_applicable: the row is unreachable by email, not unqualified.
     const scored = scoreCompany({ ...company({ legal_name: base.legal_name }), ...inputs }, config, {
       lists,
       now: NOW,
     });
     expect(scored.segment).not.toBe("EXCLUDED");
     expect(scored.blocking_gates).not.toContain("G_EXCLUDED");
-    expect(scored.blocking_gates).toContain("G_LAWFUL_BASIS");
-    expect(scored.blocked).toBe(true);
+    expect(scored.gates.find((g) => g.gate === "G_LAWFUL_BASIS")?.verdict).toBe("not_applicable");
+    expect(scored.blocked).toBe(false);
+
+    // Reopen the channel and the invalidated basis blocks, on the path the lead would take.
+    const reopened = scoreCompany(
+      { ...company({ legal_name: base.legal_name }), ...inputs, email_channel_open: true },
+      config,
+      { lists, now: NOW },
+    );
+    expect(reopened.blocking_gates).toContain("G_LAWFUL_BASIS");
+    expect(reopened.blocked).toBe(true);
   });
 
   it("leaves a caller's recorded lawful basis alone when the email channel stays open", () => {

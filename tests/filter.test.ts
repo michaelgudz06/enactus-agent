@@ -568,23 +568,33 @@ describe("K-GEO · geography, under the 2026-08-06 supersession", () => {
       expect(present).toBe(omitted);
     });
 
-    it("resolves identically whether an unrecognised country is present or omitted", () => {
-      const present = bandOf({ ...burnaby, address_country: "Freedonia" });
-      const omitted = bandOf({ ...burnaby, address_country: undefined });
-      // A recorded country that is not Canada IS contrary — K-GEO-01 is the surviving terminal —
-      // so this asserts the pair that matters: a BLANK country behaves as absent.
-      expect(present).toBe("outside_canada");
-      expect(bandOf({ ...burnaby, address_country: "   " })).toBe(omitted);
+    it("resolves identically whether an UNRECOGNISED country is present or omitted", () => {
+      // "British Columbia" in the country field is a plausible data-entry slip, and it must not
+      // drop a Burnaby bakery: an unrecognised country is UNKNOWN, never outside_canada.
+      for (const country of ["Freedonia", "British Columbia", "North America", "   "]) {
+        expect(bandOf({ ...burnaby, address_country: country }), country).toBe(
+          bandOf({ ...burnaby, address_country: undefined }),
+        );
+        expect(
+          run(account({ ...burnaby, address_region: "BC", address_country: country })).kills,
+          country,
+        ).toHaveLength(0);
+      }
+      // A RECOGNISED country that is not Canada is the one contrary reading.
+      expect(bandOf({ ...burnaby, address_country: "US" })).toBe("outside_canada");
     });
 
-    it("keeps the Richmond/VA precondition: a contrary province still overrules the alias", () => {
+    it("keeps the alias precondition: a bare alias needs positive evidence of Canada", () => {
       expect(
         bandOf({ address_municipality: "Richmond", address_region: "ON", address_country: "CA" }),
       ).toBe("canada_other");
       expect(bandOf({ address_municipality: "Richmond", address_region: "BC" })).toBe(
         "metro_vancouver",
       );
-      expect(bandOf({ address_municipality: "Richmond" })).toBe("metro_vancouver");
+      // Richmond BC and Richmond VA are indistinguishable on a bare municipality, so the honest
+      // answer is unresolved — a weighting lost, never a place on the board.
+      expect(bandOf({ address_municipality: "Richmond" })).toBe("unresolved");
+      expect(bandOf({ address_municipality: "Richmond", address_region: "VA" })).toBe("unresolved");
     });
   });
 
@@ -598,9 +608,9 @@ describe("K-GEO · geography, under the 2026-08-06 supersession", () => {
     // Superpilot in the seed data is this shape: Igor Faletski, SFU BSc '07.
     const remoteFirst = account({
       legal_name: "Superpilot",
-      address_region: "ON",
+      address_region: "WA",
       address_country: "US",
-      observations: { decision_maker_municipality: "Vancouver" },
+      observations: { decision_maker_municipality: "Vancouver", operating_municipality: "Vancouver" },
     });
     expect(kGeo01OutsideCanada(remoteFirst, lists, NOW).kind).toBe("pass");
   });

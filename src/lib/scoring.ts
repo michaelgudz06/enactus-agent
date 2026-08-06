@@ -160,6 +160,14 @@ export interface CompanyFacts {
    * still reached by email and must still prove a basis.
    */
   required_channel?: RequiredChannel | null;
+  /**
+   * Whether an email may still be sent to this lead at all.
+   *
+   * `false` makes G_LAWFUL_BASIS NOT APPLICABLE rather than failed — the gate asks whether the
+   * lead may be EMAILED, and a closed channel means there is no message to justify. Read fresh
+   * on every evaluation so reopening the channel restores a real basis check.
+   */
+  email_channel_open?: boolean;
 }
 
 export interface SegmentResult {
@@ -404,11 +412,10 @@ const NON_CEM_CHANNELS: ReadonlySet<RequiredChannel> = new Set<RequiredChannel>(
  * EVIDENCE RETURNS `fail`. The audit, so the next reader does not have to redo it:
  *
  *   G_GEO         reads `resolveGeography`, the SAME verdict the filter's K-GEO rules read, so
- *                 the two modules cannot place a company in different provinces. Municipality
- *                 alone, unresolved against the 23 member jurisdictions, is an unrecognised
- *                 place name and not evidence of anything — `cannot_evaluate`. A recorded
- *                 region that is not BC is the one contrary scope, and it is consulted BEFORE a
- *                 municipality alias is trusted: "Richmond, VA" is not Richmond, BC.
+ *                 the two modules cannot place a company in different provinces. A RECOGNISED
+ *                 country that is not Canada is the one contrary reading and the one that
+ *                 fails; everywhere in Canada passes at a lower band per the 2026-08-06
+ *                 supersession, and anything the module could not place is `cannot_evaluate`.
  *   G_EXISTS      contrary DNS fails; uncorroborated-but-unrecorded is `cannot_evaluate`.
  *   G_SIZE        no headcount is `cannot_evaluate`; §6 records that as a specification bug.
  *   G_DELIVERABLE unchecked is `cannot_evaluate`.
@@ -453,9 +460,9 @@ export function evaluateGates(
   });
 
   // G_GEO — soft for S6 ONLY. An alum anywhere is worth more than a stranger next door.
-  // The SAME verdict the filter's K-GEO rules read. `outside_bc` is the only contrary scope, and
-  // it is decided before any municipality alias is trusted, so "Richmond, VA" cannot pass here
-  // on the strength of a bare municipality name that also exists in British Columbia.
+  // The SAME verdict the filter's K-GEO rules read. `outside_canada` is the only failing band,
+  // and a bare municipality alias is trusted only on positive evidence of Canada, so
+  // "Vancouver, WA" resolves unresolved here rather than scoring as a local prospect.
   const geo = geographyScope(c, opts.lists);
   const geoBand = geographyBand(c, config, opts.lists);
   if (seg === "S6") {
@@ -479,7 +486,7 @@ export function evaluateGates(
       gate: "G_GEO",
       verdict: "fail",
       effect: "block",
-      message: `killed: outside_canada — ${c.country} is outside Canada, the one geographic terminal`,
+      message: `killed: outside_canada — the recorded country ${c.country} is outside Canada, the one geographic terminal`,
     });
   } else {
     // Everywhere in Canada is IN SCOPE per the 2026-08-06 supersession. Where in Canada is a
@@ -590,7 +597,24 @@ export function evaluateGates(
   });
 
   // G_LAWFUL_BASIS — the email gate, and ONLY the email gate.
-  if (c.required_channel && NON_CEM_CHANNELS.has(c.required_channel)) {
+  //
+  // Its question is "MAY THIS LEAD BE EMAILED", so it may never BLOCK a lead for being
+  // unreachable by email: that is a routing fact, not a disqualification, and blocking on it is
+  // how a corpus of role accounts empties the board. The verdict is DERIVED FROM THE CURRENT
+  // CHANNEL STATE on every evaluation and never stamped once — so the moment the email channel
+  // opens again (a human finds a named contact, a route changes) the basis question is asked
+  // for real, and a lead that reaches an outbox has passed this gate on the path it took.
+  if (c.email_channel_open === false) {
+    out.push({
+      gate: "G_LAWFUL_BASIS",
+      verdict: "not_applicable",
+      effect: "none",
+      message:
+        "the email channel is closed for this lead, so there is no commercial electronic " +
+        "message to justify. This is re-evaluated whenever the channel state changes: reopen " +
+        "the channel and the CASL basis must be proved before anything can be sent",
+    });
+  } else if (c.required_channel && NON_CEM_CHANNELS.has(c.required_channel)) {
     out.push({
       gate: "G_LAWFUL_BASIS",
       verdict: "not_applicable",
@@ -760,7 +784,12 @@ export type GeographyBand =
  */
 export function geographyScope(c: CompanyFacts, lists: QualificationLists): GeographyVerdict {
   return resolveGeography(
-    { municipality: c.municipality, region: c.region, country: c.country },
+    {
+      municipality: c.municipality,
+      region: c.region,
+      country: c.country,
+      postal_code: c.postal_code,
+    },
     lists,
   );
 }
@@ -1359,6 +1388,7 @@ export function gateInputsFromFilterResult(
   | "no_solicitation_found"
   | "deliverable_contact"
   | "required_channel"
+  | "email_channel_open"
 > &
   Partial<Pick<CompanyFacts, "lawful_basis_strength">> {
   const suppressed = result.kills.some(
@@ -1398,6 +1428,7 @@ export function gateInputsFromFilterResult(
     // would block every cold role-account lead in the corpus, which is precisely the
     // pipeline-emptying outcome §9.4's measurement exists to prevent.
     required_channel: result.required_channel,
+    email_channel_open: result.email_channel_open,
     // Every email-scoped terminal is a CASL finding that destroys the basis for sending: L-02
     // because s.10(9)(b) withdraws implied consent where the publication carries a
     // no-solicitation notice, L-04 because a third-party directory is not conspicuous
