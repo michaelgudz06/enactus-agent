@@ -1,0 +1,112 @@
+[
+  {
+    "id": "5d04d568-e7cc-4e53-88a6-22389ed4d610",
+    "prompt": "Credit unions and banks in the Lower Mainland with community grant programs",
+    "normalized": "banks community credit grant lower mainland programs unions",
+    "mode": "sponsor",
+    "params": {},
+    "result_count": 4,
+    "created_by": null,
+    "created_at": "2026-07-22T08:07:15.407841+00:00",
+    "created_by_name": "michael"
+  },
+  {
+    "id": "154accf6-f839-4c78-8a63-ea6a8713ea64",
+    "prompt": "SFU alumni-founded tech startups in Vancouver open to giving back",
+    "normalized": "alumni back founded giving open sfu startups tech vancouver",
+    "mode": "sponsor",
+    "params": {},
+    "result_count": 4,
+    "created_by": null,
+    "created_at": "2026-07-22T08:16:25.912819+00:00",
+    "created_by_name": "michael"
+  },
+  {
+    "id": "b8c5608f-f4e3-4463-b950-f91103c2f790",
+    "prompt": "give me general sales research and ways we can target younger professionals to secure long-term relationships",
+    "normalized": "can general give long professionals relationships research sales secure target term ways younger",
+    "mode": "sponsor",
+    "params": {},
+    "result_count": 3,
+    "created_by": null,
+    "created_at": "2026-07-22T08:24:20.162045+00:00",
+    "created_by_name": "Adrian"
+  },
+  {
+    "id": "f3c219d4-e6dc-45f9-9ccd-93f57ef6d763",
+    "prompt": "sales research and ways to position our messaging to target professionals, give me contacts for people like that, ask follow up questions\n\nAdditional context from user: industry can be CPG, under 5 million revenue \n",
+    "normalized": "additional ask can contacts context cpg follow give industry like messaging million our people position professionals questions research revenue sales target under user ways",
+    "mode": "sponsor",
+    "params": {},
+    "result_count": 1,
+    "created_by": null,
+    "created_at": "2026-07-22T08:29:43.614388+00:00",
+    "created_by_name": "adrian"
+  },
+  {
+    "id": "25f616b8-784b-4e2d-9c12-c09d2b6e4500",
+    "prompt": "give me general sales research and ways we can target younger professionals to secure long-term relationships who are also SFU alumni",
+    "normalized": "also alumni can general give long professionals relationships research sales secure sfu target term ways younger",
+    "mode": "sponsor",
+    "params": {},
+    "result_count": 3,
+    "created_by": null,
+    "created_at": "2026-07-22T16:47:53.943973+00:00",
+    "created_by_name": "Adrian"
+  },
+  {
+    "id": "f482c3e9-9fe9-4914-b25d-d84a4ee17418",
+    "prompt": "recent SFU-alumni with startup experience open to giving back",
+    "normalized": "alumni back experience giving open recent sfu startup",
+    "mode": "sponsor",
+    "params": {},
+    "result_count": 3,
+    "created_by": null,
+    "created_at": "2026-07-22T17:14:53.135585+00:00",
+    "created_by_name": "Adrian"
+  },
+  {
+    "id": "d8839202-1424-4f8e-b26c-2da61a3d15a4",
+    "prompt": "graduates from sfu in the last 10 years, in the startup space, working in san fransisco",
+    "normalized": "fransisco graduates last san sfu space startup working years",
+    "mode": "sponsor",
+    "params": {},
+    "result_count": 1,
+    "created_by": null,
+    "created_at": "2026-07-23T21:47:52.958664+00:00",
+    "created_by_name": "michael"
+  },
+  {
+    "id": "57078743-d120-4cfb-8a3d-386f7fc07de1",
+    "prompt": "graduates from sfu in the last 10 years, in the startup space, working in san fransisco, give me 10 companies, why did it break, continue,",
+    "normalized": "break continue did fransisco give graduates last san sfu space startup why working years",
+    "mode": "sponsor",
+    "params": {},
+    "result_count": 0,
+    "created_by": null,
+    "created_at": "2026-07-23T21:50:48.607489+00:00",
+    "created_by_name": "michael"
+  },
+  {
+    "id": "0319294c-f419-41a1-969b-713a30e4195f",
+    "prompt": "graduates or students from sfu in the startup space, working in san fransisco, give me 10 companies,\n\nAdditional context from user: dont have to be founded by sfu, just working at them, sfu affiliated startups is good\n",
+    "normalized": "additional affiliated context dont founded fransisco give good graduates have just san sfu sfu sfu space startup startups students them user working working",
+    "mode": "sponsor",
+    "params": {},
+    "result_count": 1,
+    "created_by": null,
+    "created_at": "2026-07-23T21:52:32.383483+00:00",
+    "created_by_name": "michael"
+  },
+  {
+    "id": "748be66d-a4e4-43ce-b582-29db43553bfe",
+    "prompt": "graduates or students from sfu in the startup space, working in san fransisco, give me 10 companies, go for a deeper search, find 10 people and dont remove anyone give me all 10\n\nAdditional context from user: dont have to be founded by sfu, just working at them, sfu affiliated startups is good\n",
+    "normalized": "additional affiliated all anyone context deeper dont dont founded fransisco give give good graduates have just people remove san search sfu sfu sfu space startup startups students them user working working",
+    "mode": "sponsor",
+    "params": {},
+    "result_count": 0,
+    "created_by": null,
+    "created_at": "2026-07-23T21:55:00.892536+00:00",
+    "created_by_name": "michael"
+  }
+]

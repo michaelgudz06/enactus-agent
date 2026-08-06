@@ -1,0 +1,408 @@
+[
+  {
+    "id": "aa34e136-884e-4daa-ba77-f97c434289ac",
+    "company": "Internet Backyard",
+    "website": "https://techrony.com/business/vancouver-entrepreneur-moves-to-us-to-launch-ai-startup/",
+    "industry": "AI Startup",
+    "description": "AI startup founded by SFU alum Mai Trinh, focusing on leveraging the dynamic tech environment in the US.",
+    "contact_name": "Mai Trinh",
+    "contact_role": "Founder",
+    "contact_email": null,
+    "location": "San Francisco, California",
+    "connection_type": "alum",
+    "connection_note": "Graduate of Simon Fraser University, moved from Vancouver to San Francisco to launch her AI startup.",
+    "sponsorship_type": [
+      "monetary",
+      "in_kind"
+    ],
+    "fit_score": 85,
+    "why_fit": "Mai Trinh's background in AI and community building aligns with Unify, an AI-driven platform for newcomers. Her entrepreneurial spirit also resonates with SKYES and Renovo.",
+    "reasoning": "Mai Trinh is an SFU alum who recently moved to San Francisco to launch her AI startup, Internet Backyard. Her experience in building communities (Red Thread Club) and her focus on AI make her a strong candidate to sponsor Unify, which uses AI to help newcomers settle in Canada. Her entrepreneurial background also aligns with SKYES (youth entrepreneurship) and Renovo (business programs for veterans and Indigenous communities). Given her recent move and startup launch, a monetary or in-kind sponsorship (e.g., tech resources, mentorship) would be a feasible first ask.",
+    "sources": [
+      {
+        "url": "https://techrony.com/business/vancouver-entrepreneur-moves-to-us-to-launch-ai-startup/",
+        "title": "Vancouver Entrepreneur Moves to US to Launch AI Startup - TECHRONY"
+      }
+    ],
+    "status": "prospects",
+    "mode": "sponsor",
+    "board_order": 0,
+    "search_id": null,
+    "created_by": null,
+    "created_at": "2026-07-23T21:47:52.618977+00:00",
+    "updated_at": "2026-07-23T21:47:52.618977+00:00",
+    "created_by_name": "michael"
+  },
+  {
+    "id": "62b5e482-f733-45ce-b3ff-99aff31e8228",
+    "company": "Reworkd AI",
+    "website": "https://www.linkedin.com/company/reworkd",
+    "industry": "Artificial Intelligence",
+    "description": "YC-backed AI startup co-founded by an SFU student, focusing on innovative AI applications.",
+    "contact_name": "Asim Shrestha",
+    "contact_role": "Co-Founder & CEO",
+    "contact_email": null,
+    "location": "San Francisco, California, United States",
+    "connection_type": "alum",
+    "connection_note": "Asim Shrestha is a current SFU student and co-founder of Reworkd AI.",
+    "sponsorship_type": [
+      "monetary",
+      "in_kind"
+    ],
+    "fit_score": 85,
+    "why_fit": "Reworkd AI's focus on AI aligns with Unify, Enactus SFU's AI-powered platform for newcomers. Their startup ethos and SFU connection make them a strong candidate for sponsorship.",
+    "reasoning": "Reworkd AI is a San Francisco-based startup co-founded by Asim Shrestha, a current SFU student, indicating a strong SFU connection. Their work in AI directly aligns with Unify, Enactus SFU's project that uses an AI companion to help newcomers settle in Canada. Given their startup nature and SFU ties, they may be open to supporting student-led initiatives, especially those leveraging AI. A first ask could involve funding or in-kind support for Unify's AI development, positioning it as a partnership that benefits both parties through shared technology and community impact.",
+    "sources": [
+      {
+        "url": "https://linkedin.com/in/a-shrestha",
+        "title": "Asim Shrestha"
+      }
+    ],
+    "status": "prospects",
+    "mode": "sponsor",
+    "board_order": 0,
+    "search_id": null,
+    "created_by": null,
+    "created_at": "2026-07-23T21:52:31.993914+00:00",
+    "updated_at": "2026-07-23T21:52:31.993914+00:00",
+    "created_by_name": "michael"
+  },
+  {
+    "id": "e61b5571-74c9-46a4-9f65-b4266822331d",
+    "company": "MetaOptima",
+    "website": "https://www.linkedin.com/in/maryams",
+    "industry": "Health Tech, Dermatology",
+    "description": "SFU alum-founded company specializing in intelligent skin analytics and management.",
+    "contact_name": "Maryam Sadeghi",
+    "contact_role": "CEO",
+    "contact_email": null,
+    "location": "Vancouver, BC",
+    "connection_type": "alum",
+    "connection_note": "Completed PhD at SFU, co-founded MetaOptima.",
+    "sponsorship_type": [
+      "monetary",
+      "in_kind"
+    ],
+    "fit_score": 85,
+    "why_fit": "Direct alignment with SensMS (health app for women with MS) due to their expertise in health tech and medical applications.",
+    "reasoning": "MetaOptima is an ideal sponsor for Enactus SFU due to their expertise in health tech and strong SFU alumni connection. Their focus on medical applications directly aligns with SensMS, a women’s health app for MS management, making them a natural funding partner. As an SFU-founded company, they have a vested interest in supporting student-led innovation, increasing the likelihood of a successful sponsorship ask. A strong first step would be requesting monetary support for SensMS’s development, given MetaOptima’s background in digital health solutions. Their local presence and shared SFU ties make this a highly winnable opportunity.",
+    "sources": [
+      {
+        "url": "https://www.linkedin.com/in/maryams",
+        "title": "Maryam Sadeghi"
+      }
+    ],
+    "status": "outreach_sent",
+    "mode": "sponsor",
+    "board_order": 0,
+    "search_id": null,
+    "created_by": null,
+    "created_at": "2026-07-22T08:16:25.193342+00:00",
+    "updated_at": "2026-07-22T08:16:53.307+00:00",
+    "created_by_name": "michael"
+  },
+  {
+    "id": "1cb342a9-e50a-48f6-8519-790a20d0821f",
+    "company": "Vancity",
+    "website": "https://www.vancity.com/offers/students/",
+    "industry": "Financial Services",
+    "description": "Offers student banking bundles and has a strong community investment focus.",
+    "contact_name": null,
+    "contact_role": null,
+    "contact_email": null,
+    "location": "Vancouver",
+    "connection_type": "ecosystem",
+    "connection_note": "Potential ties with SFU through student programs.",
+    "sponsorship_type": [
+      "monetary",
+      "in_kind"
+    ],
+    "fit_score": 90,
+    "why_fit": "Their community investments in sustainability and social justice align with projects like Alara, Nourish, and Unify, which focus on cleantech, food waste, and newcomer settlement.",
+    "reasoning": "Vancity is an ideal sponsor for Enactus SFU because of their deep commitment to sustainability and social impact, which directly aligns with projects like Alara (biodegradable bioplastics) and Nourish (upcycled food). As a local financial cooperative with strong ties to SFU through student banking programs, they have a vested interest in supporting student-led innovation. Their history of community investment makes them highly winnable for a monetary or in-kind sponsorship. A strong first ask would be funding for Alara’s pilot production, as cleantech aligns with Vancity’s sustainability goals. Their existing relationship with SFU increases the likelihood of a successful partnership.",
+    "sources": [
+      {
+        "url": "https://www.vancity.com/offers/students/",
+        "title": "Student Banking Bundle: Spend, Earn, Start Today - Vancity"
+      }
+    ],
+    "status": "in_conversation",
+    "mode": "sponsor",
+    "board_order": 0,
+    "search_id": null,
+    "created_by": null,
+    "created_at": "2026-07-22T08:07:15.11682+00:00",
+    "updated_at": "2026-07-22T08:08:48.54+00:00",
+    "created_by_name": "michael"
+  },
+  {
+    "id": "431ce7e8-03ee-477e-a83e-19fb91d29b89",
+    "company": "Streamline Athletes",
+    "website": "https://techcouver.com/2019/10/22/sfu-alumni-startup-streamlines-the-athletic-scholarship-process/",
+    "industry": "Education, Sports Tech",
+    "description": "SFU alumni-founded platform connecting student athletes to scholarships and post-secondary programs.",
+    "contact_name": "Alexandre Paré, Brett Montrose",
+    "contact_role": "Co-Founders",
+    "contact_email": null,
+    "location": "Vancouver, BC",
+    "connection_type": "alum",
+    "connection_note": "Founded by SFU track and field alumni.",
+    "sponsorship_type": [
+      "monetary",
+      "in_kind"
+    ],
+    "fit_score": 80,
+    "why_fit": "Aligns with SKYES (entrepreneurial education for youth) due to their focus on education and empowering students.",
+    "reasoning": "Streamline Athletes is a strong sponsor fit for Enactus SFU due to their focus on education and student empowerment, directly aligning with our SKYES youth entrepreneurship project. As an SFU alumni-founded company, they have a natural connection to our university and a shared commitment to supporting student success. Their platform, which helps student athletes access scholarships, mirrors SKYES’ mission of equipping youth with opportunities through education. A monetary or in-kind sponsorship for SKYES would be a winnable first ask, as it directly supports youth development, a cause they already champion. Their local presence and alumni ties make them an accessible and engaged potential partner.",
+    "sources": [
+      {
+        "url": "https://techcouver.com/2019/10/22/sfu-alumni-startup-streamlines-the-athletic-scholarship-process/",
+        "title": "SFU Alumni Startup Streamlines the Athletic Scholarship Process - Techcouver.com"
+      }
+    ],
+    "status": "in_conversation",
+    "mode": "sponsor",
+    "board_order": 0,
+    "search_id": null,
+    "created_by": null,
+    "created_at": "2026-07-22T08:16:25.489364+00:00",
+    "updated_at": "2026-07-22T08:16:50.916+00:00",
+    "created_by_name": "michael"
+  },
+  {
+    "id": "083d09bd-051c-44bd-971b-d96ab0972df2",
+    "company": "Intuitive AI",
+    "website": "https://venturelabs.ca/intuitive-ai-teams-up-with-reencle/",
+    "industry": "Sustainability, Waste Management",
+    "description": "SFU alumni-founded startup reshaping waste management through AI-powered composting solutions.",
+    "contact_name": "Hassan Murad, Vivek Vyas",
+    "contact_role": "Co-Founders",
+    "contact_email": null,
+    "location": "Vancouver, BC",
+    "connection_type": "alum",
+    "connection_note": "Founded by SFU alumni, part of SFU VentureLabs since 2017.",
+    "sponsorship_type": [
+      "monetary",
+      "in_kind"
+    ],
+    "fit_score": 90,
+    "why_fit": "Aligns with Alara (bioplastics) and Second Savour (food waste) due to their focus on sustainability and waste reduction.",
+    "reasoning": "Intuitive AI is an ideal sponsor for Enactus SFU given their focus on AI-driven sustainability and waste reduction, directly aligning with projects like Alara (biodegradable bioplastics) and Second Savour (upcycled citrus snacks). As an SFU alumni-founded company with deep ties to the university through VentureLabs, they have a vested interest in supporting student-led innovation. Their expertise in waste management complements our circular economy initiatives, making them a natural funding partner. A strong first ask would be a $5,000 sponsorship for Second Savour, as their AI composting solutions could provide technical insights alongside financial support. Given their local presence and shared values, this partnership is highly winnable.",
+    "sources": [
+      {
+        "url": "https://venturelabs.ca/intuitive-ai-teams-up-with-reencle/",
+        "title": "Intuitive AI Teams Up with Reencle to Make Composting Effortless at Home - SFU VentureLabs"
+      }
+    ],
+    "status": "prospects",
+    "mode": "sponsor",
+    "board_order": 0,
+    "search_id": null,
+    "created_by": null,
+    "created_at": "2026-07-22T08:16:24.806205+00:00",
+    "updated_at": "2026-07-23T09:10:06.03+00:00",
+    "created_by_name": "michael"
+  },
+  {
+    "id": "92d895be-eae4-4d05-bb9f-e326d7a8e77e",
+    "company": "Plug Vancouver",
+    "website": "https://plugvancouver.ca/",
+    "industry": "Media, Events",
+    "description": "Media network targeting Gen Z and Millennials with viral content and events.",
+    "contact_name": null,
+    "contact_role": null,
+    "contact_email": null,
+    "location": "Vancouver, BC",
+    "connection_type": "none",
+    "connection_note": null,
+    "sponsorship_type": [
+      "monetary",
+      "in_kind"
+    ],
+    "fit_score": 75,
+    "why_fit": "High reach among younger audiences could promote projects like Second Savour (food upcycling) or Unify (tech for newcomers).",
+    "reasoning": "Plug Vancouver is a strong sponsor fit for Enactus SFU due to its deep engagement with Gen Z and Millennials, aligning perfectly with our youth-focused projects like Second Savour. Their expertise in viral content and events could amplify awareness of Second Savour’s upcycled citrus snacks while reinforcing Plug’s commitment to sustainability. Since they operate locally and prioritize impactful storytelling, funding or in-kind media support for this project is a winnable ask. A suggested first step would be a sponsorship package that includes promotional content and event collaborations to showcase Second Savour’s mission. Their media reach makes them an ideal partner to drive both visibility and impact.",
+    "sources": [
+      {
+        "url": "https://plugvancouver.ca/",
+        "title": "Plug Vancouver | Vancouver's #1 Media Network for Gen Z & Millennials"
+      }
+    ],
+    "status": "prospects",
+    "mode": "sponsor",
+    "board_order": 0,
+    "search_id": null,
+    "created_by": null,
+    "created_at": "2026-07-22T08:24:19.819584+00:00",
+    "updated_at": "2026-07-22T08:24:19.819584+00:00",
+    "created_by_name": "Adrian"
+  },
+  {
+    "id": "15e2ee93-265d-446b-9b88-340f3a284f03",
+    "company": "Safe Software",
+    "website": "https://linkedin.com",
+    "industry": "Tech",
+    "description": "Co-founder and CEO of Safe Software, SFU alumnus with bachelor's and master's degrees.",
+    "contact_name": "Don Murray",
+    "contact_role": "Principal Chief Executive Officer",
+    "contact_email": null,
+    "location": "Lower Mainland",
+    "connection_type": "alum",
+    "connection_note": "SFU alumnus with strong ties to the Faculty of Applied Sciences.",
+    "sponsorship_type": [
+      "monetary"
+    ],
+    "fit_score": 85,
+    "why_fit": "Don Murray's tech background aligns with Unify (tech/SaaS) and NextSpark (STEM education). His local presence and SFU ties make him a strong candidate for sponsorship.",
+    "reasoning": "Safe Software is an ideal sponsor for Enactus SFU due to CEO Don Murray’s strong SFU alumni ties and the company’s focus on tech innovation. Their expertise in software aligns perfectly with Unify, our AI-powered newcomer integration platform, which could benefit from their mentorship and funding. As a local tech leader with SFU roots, Safe Software is highly likely to support student-led innovation. A first ask could be a $5,000 sponsorship for Unify’s AI development, with potential for future collaboration on tech mentorship. Their past engagement with SFU initiatives increases the likelihood of a positive response.",
+    "sources": [
+      {
+        "url": "https://www.linkedin.com/posts/faculty-of-applied-sciences-at-simon-fraser-university_meet-don-murray-the-co-founder-and-principal-activity-7400239563312640000-qc9B",
+        "title": "✨Meet Don Murray — the co-founder and Principal Chief Executive Officer of Safe Software — who began his academic journey at SFU, earning both his bachelor’s and master’s degrees in SFU School of… | Faculty of Applied Sciences at Simon Fraser University"
+      }
+    ],
+    "status": "prospects",
+    "mode": "sponsor",
+    "board_order": 0,
+    "search_id": null,
+    "created_by": null,
+    "created_at": "2026-07-22T17:14:51.935463+00:00",
+    "updated_at": "2026-07-22T17:14:51.935463+00:00",
+    "created_by_name": "Adrian"
+  },
+  {
+    "id": "f3384de1-c59a-4f37-8964-39c52fa3fa15",
+    "company": "Omega Environmental Drilling",
+    "website": "https://www.sfurugby.ca/sponsorships",
+    "industry": "Environmental Drilling",
+    "description": "Omega Environmental Drilling sponsors SFU Rugby and provides environmental and geotechnical drilling services.",
+    "contact_name": null,
+    "contact_role": null,
+    "contact_email": null,
+    "location": "Maple Ridge, BC",
+    "connection_type": "past_sponsor",
+    "connection_note": "Current sponsor of SFU Rugby, indicating a history of supporting SFU initiatives.",
+    "sponsorship_type": [
+      "monetary",
+      "in_kind"
+    ],
+    "fit_score": 75,
+    "why_fit": "Their focus on environmental services aligns with Alara (bioplastics) and NextSpark (STEM education), especially if they are interested in sustainability projects.",
+    "reasoning": "Omega Environmental Drilling is a strong potential sponsor for Enactus SFU due to their commitment to environmental services and existing ties to SFU as a current rugby sponsor. Their focus on sustainability aligns well with Alara, our biodegradable bioplastics project, which tackles plastic waste, a key concern in environmental industries like drilling. As a past SFU supporter, they may be open to funding student-led initiatives, making this ask winnable. A logical first step would be a monetary sponsorship for Alara’s prototyping or NextSpark’s STEM kits, both of which reflect Omega’s environmental and educational values. Their local presence in Maple Ridge also strengthens the potential for collaboration.",
+    "sources": [
+      {
+        "url": "https://www.sfurugby.ca/sponsorships",
+        "title": "SPONSORSHIPS | SFU Rugby"
+      }
+    ],
+    "status": "prospects",
+    "mode": "sponsor",
+    "board_order": 0,
+    "search_id": null,
+    "created_by": null,
+    "created_at": "2026-07-22T16:47:53.300671+00:00",
+    "updated_at": "2026-07-23T05:56:53.63+00:00",
+    "created_by_name": "Adrian"
+  },
+  {
+    "id": "3d08ed24-2256-4fe1-9423-03aea40448ab",
+    "company": "LoadMinds (Supreet Dhillon)",
+    "website": "https://supreetsinghdhillon.com/",
+    "industry": "AI, Logistics",
+    "description": "SFU alum-founded AI logistics startup acquired by MG Transport Ltd.",
+    "contact_name": "Supreet Dhillon",
+    "contact_role": "Founder",
+    "contact_email": null,
+    "location": "Vancouver, BC",
+    "connection_type": "alum",
+    "connection_note": "Recent SFU graduate in Computing Science.",
+    "sponsorship_type": [
+      "monetary",
+      "in_kind"
+    ],
+    "fit_score": 75,
+    "why_fit": "Aligns with Unify (AI companion for newcomers) due to his expertise in AI and automation.",
+    "reasoning": "LoadMinds is a strong sponsor candidate for Enactus SFU due to founder Supreet Dhillon’s SFU Computing Science background and expertise in AI-driven logistics. Their focus on automation aligns directly with Unify, which leverages AI to support newcomers navigating Canada. As a recent alum, Dhillon may be more inclined to support student innovation, making this a winnable ask. A first step could be a $5,000 sponsorship for Unify’s AI development, with potential in-kind mentorship from LoadMinds’ technical team. Their acquisition by MG Transport Ltd. also suggests capacity for meaningful support.",
+    "sources": [
+      {
+        "url": "https://supreetsinghdhillon.com/",
+        "title": "Supreet Dhillon Portfolio Website | Single Page Portfolio Site | Supreet Dhillon"
+      }
+    ],
+    "status": "researched",
+    "mode": "sponsor",
+    "board_order": 0,
+    "search_id": null,
+    "created_by": null,
+    "created_at": "2026-07-22T08:16:25.616572+00:00",
+    "updated_at": "2026-07-22T08:16:50.062+00:00",
+    "created_by_name": "michael"
+  },
+  {
+    "id": "198adf74-57a0-403a-ada9-984919c83929",
+    "company": "Tasti Products Limited",
+    "website": "https://www.linkedin.com/company/tasti-products-limited",
+    "industry": "CPG (Food & Beverage)",
+    "description": "Marketing and Innovation Director at a CPG company specializing in food products.",
+    "contact_name": "Stephanie Stuart",
+    "contact_role": "Marketing and Innovation Director",
+    "contact_email": null,
+    "location": "Auckland, New Zealand",
+    "connection_type": "none",
+    "connection_note": "No direct SFU/Enactus ties, but strong industry alignment with food-focused projects.",
+    "sponsorship_type": [
+      "monetary",
+      "in_kind"
+    ],
+    "fit_score": 75,
+    "why_fit": "Stephanie's role in CPG and food innovation aligns well with Enactus SFU's Nourish (upcycled fruit gummies) or Second Savour (citrus peel treats) projects, given Tasti's focus on food products and potential sustainability interests.",
+    "reasoning": "Tasti Products Limited is a strong sponsor fit for Enactus SFU’s Nourish project due to their expertise in food innovation and CPG. Their focus on sustainable food solutions aligns with Nourish’s mission of reducing food waste through upcycled fruit gummies. While there are no direct SFU or alumni ties, Tasti’s industry leadership makes them a winnable partner for funding or in-kind support. A first ask could be monetary sponsorship for Nourish’s product development or scaling efforts, as this directly connects to Tasti’s core business. Their CPG background also offers potential mentorship or distribution insights for the project.",
+    "sources": [
+      {
+        "url": "https://nz.linkedin.com/in/stephaniehague",
+        "title": "Stephanie Stuart"
+      }
+    ],
+    "status": "prospects",
+    "mode": "sponsor",
+    "board_order": 0,
+    "search_id": null,
+    "created_by": null,
+    "created_at": "2026-07-22T08:29:43.443473+00:00",
+    "updated_at": "2026-07-22T08:29:43.443473+00:00",
+    "created_by_name": "adrian"
+  },
+  {
+    "id": "35553fc8-4d20-4174-ac86-ac9192a00c49",
+    "company": "Idea Prize",
+    "website": "https://sfu.ca",
+    "industry": "Tech/Environmental",
+    "description": "Legacy of SFU Beedie alumnus, environmentalist, and tech entrepreneur supporting student ventures.",
+    "contact_name": null,
+    "contact_role": null,
+    "contact_email": null,
+    "location": null,
+    "connection_type": "alum",
+    "connection_note": "Family gift in memory of SFU Beedie alumnus supporting student entrepreneurship.",
+    "sponsorship_type": [
+      "monetary"
+    ],
+    "fit_score": 80,
+    "why_fit": "The alumnus's environmental focus aligns with Alara (bioplastic) and Second Savour (food waste). The philanthropic nature suggests openness to sponsoring sustainability-focused projects.",
+    "reasoning": "Idea Prize is an ideal sponsor for Enactus SFU given its roots as a family gift honoring an SFU Beedie alumnus who championed entrepreneurship and sustainability. Their focus on environmental innovation directly aligns with Alara, our biodegradable bioplastic project, which tackles plastic waste, a cause the alumnus supported. As a philanthropic initiative, Idea Prize is likely open to funding student-led ventures, making this a winnable sponsorship. A strong first ask would be a $5,000 contribution to scale Alara’s prototype development, reinforcing the alumnus’s legacy in sustainable tech.",
+    "sources": [
+      {
+        "url": "https://www.sfu.ca/beedie/news/2026/04/how-an-sfu-beedie-alumnus-s-legacy-is-helping-students-turn-idea.html",
+        "title": "How an SFU Beedie alumnus’s legacy is helping students turn ideas into ventures   - SFU Beedie School of Business - Simon Fraser University"
+      }
+    ],
+    "status": "prospects",
+    "mode": "sponsor",
+    "board_order": 0,
+    "search_id": null,
+    "created_by": null,
+    "created_at": "2026-07-22T17:14:52.277955+00:00",
+    "updated_at": "2026-07-22T17:14:52.277955+00:00",
+    "created_by_name": "Adrian"
+  }
+]
