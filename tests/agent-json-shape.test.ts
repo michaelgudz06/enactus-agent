@@ -133,11 +133,14 @@ describe("structuring step JSON shape", () => {
     expect(out.leads[1].fit_score).toBeNull();
   });
 
-  test("still rejects a lead whose company name is the wrong type", async () => {
-    const out = await runWithStructuredResponse({ leads: [{ company: 42 }] });
+  // A wrong type never reaches the record, but it costs the field it is in --
+  // and, when the record has no usable name, only that record. See
+  // tests/agent-lead-defects.test.ts for the full class.
+  test("still keeps a wrong type out of the record", async () => {
+    const out = await runWithStructuredResponse({ leads: [rawLead({ fit_score: "ninety-five" })] });
 
-    expect(out.leads).toEqual([]);
-    expect(out.errors).toHaveLength(1);
+    expect(out.leads).toHaveLength(1);
+    expect(out.leads[0].fit_score).toBeNull();
   });
 
   // A schema rejection, a rate limit and an unparseable body used to reach the

@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { AgentEvent, ConnectionType, Lead, Mode } from "./types";
-import { chatJSON, streamReasoner, REASONER } from "./llm";
+import { chatJSON, streamReasoner, validateAgainstSchema, REASONER } from "./llm";
 import { exaSearch, dedupeByDomain, ExaResult } from "./exa";
 import { supabaseAdmin, LEADS, SEARCHES, hasServiceKey } from "./supabase";
 import { createVerifiers, isAggregatorHost, EmailCheck, WebsiteCheck } from "./contact";
@@ -23,11 +23,11 @@ interface Plan {
 // structured output means: every property listed in `required`, no extras, and
 // optionality expressed as a nullable union so "present" is satisfiable by null.
 //
-// The local check is deliberately more lenient. Strictness belongs on a field,
-// never on a batch: one malformed or missing optional field must cost that one
-// field, not the other leads. So the local check requires only what the run
-// genuinely cannot proceed without and type-checks the rest when present, which
-// still keeps wrong types out of the database.
+// The local check covers the envelope only. Type-checking the leads array here
+// would make one wrong-typed field anywhere in it fatal to every lead in the
+// batch, which is the failure class this whole change exists to remove. The
+// leads themselves are checked field by field in reviewLeads, where a defect
+// costs the field it is in and is reported rather than swallowed.
 const NULLABLE_STRING = { type: ["string", "null"] };
 const NULLABLE_STRING_ARRAY = { type: ["array", "null"], items: { type: "string" } };
 
@@ -52,7 +52,9 @@ const PLAN_SCHEMA = {
   validate: { type: "object", required: ["searchQueries", "criteria"], properties: PLAN_PROPERTIES },
 };
 
-const LEAD_PROPERTIES = {
+// The per-field contract for one lead. reviewLeads checks each field against
+// this independently, so a field that does not match is the only thing lost.
+const LEAD_PROPERTIES: Record<string, Record<string, unknown>> = {
   company: { type: "string" },
   website: NULLABLE_STRING,
   industry: NULLABLE_STRING,
@@ -62,7 +64,7 @@ const LEAD_PROPERTIES = {
   contact_role: NULLABLE_STRING,
   contact_email: NULLABLE_STRING,
   // Not an enum in the local check on purpose: an unrecognised value costs this
-  // one field -- persistLead normalises it to "none" -- never the whole batch.
+  // one field -- persistLead normalises it to "none" -- never the whole lead.
   connection_type: NULLABLE_STRING,
   connection_note: NULLABLE_STRING,
   sponsorship_type: NULLABLE_STRING_ARRAY,
@@ -72,10 +74,12 @@ const LEAD_PROPERTIES = {
   source_index: { type: ["number", "null"] },
 };
 
-// The provider is still asked for the four literals; only the local check is lenient.
+// The provider is still asked for the four literals. A strict validator wants a
+// type on every node, so the nullable enum carries the same union NULLABLE_STRING
+// uses rather than an enum list on its own.
 const REQUEST_LEAD_PROPERTIES = {
   ...LEAD_PROPERTIES,
-  connection_type: { enum: [...CONNECTION_TYPES, null] },
+  connection_type: { type: ["string", "null"], enum: [...CONNECTION_TYPES, null] },
 };
 
 const LEADS_SCHEMA = {
@@ -84,12 +88,7 @@ const LEADS_SCHEMA = {
   validate: {
     type: "object",
     required: ["leads"],
-    properties: {
-      leads: {
-        type: "array",
-        items: { type: "object", required: ["company"], properties: LEAD_PROPERTIES },
-      },
-    },
+    properties: { leads: { type: "array" } },
   },
 };
 
@@ -318,11 +317,11 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
 
   // chatJSON already normalises the known shape variance through `coerce`, so
   // whatever comes back is the envelope or nothing.
-  let parsed: { leads: RawLead[] } | null = null;
+  let parsed: { leads: unknown[] } | null = null;
   let structuringError = "";
   try {
     parsed =
-      (await chatJSON<{ leads: RawLead[] } | null>(
+      (await chatJSON<{ leads: unknown[] } | null>(
         [
           { role: "system", content: `${scoreSystem} Output only the JSON described, nothing else.` },
           { role: "user", content: structureUser },
@@ -344,13 +343,18 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
     return;
   }
 
+  const { leads: reviewed, defects } = reviewLeads(parsed.leads ?? []);
+  for (const defect of defects) {
+    emit({ type: "status", step: "structure", message: defectMessage(defect) });
+  }
+
   // One verifier for the whole run: each domain costs at most one DNS query.
   // Every model-supplied detail is checked up front and concurrently, so a batch
   // of leads on dead domains costs one timeout window rather than one each --
   // this runs inside the same 60s serverless budget as the reasoning step.
   const verify = createVerifiers();
   const checked = await Promise.all(
-    (parsed.leads ?? []).map(async (raw) => {
+    reviewed.map(async (raw) => {
       const [contact, site] = await Promise.all([
         raw.contact_email ? verify.email(raw.contact_email) : null,
         raw.website ? verify.website(raw.website) : null,
@@ -434,13 +438,112 @@ function unverifiedWebsiteNote(check: Exclude<WebsiteCheck, { ok: true }>): stri
 // top-level array the rest of the time. Live testing measured the bare array at
 // 53% of completed runs, and every lead in those runs used to be thrown away.
 // Accept both shapes.
-export function coerceLeadsPayload(p: unknown): { leads: RawLead[] } | null {
-  if (Array.isArray(p)) return { leads: p as RawLead[] };
+export function coerceLeadsPayload(p: unknown): { leads: unknown[] } | null {
+  if (Array.isArray(p)) return { leads: p };
   if (p && typeof p === "object") {
     const leads = (p as { leads?: unknown }).leads;
-    if (Array.isArray(leads)) return { leads: leads as RawLead[] };
+    if (Array.isArray(leads)) return { leads };
   }
   return null;
+}
+
+export interface LeadDefect {
+  /** The company the defect belongs to, or a positional label when it has no name. */
+  lead: string;
+  field: string;
+  detail: string;
+  /** True when the whole record was unusable, false when only this field was. */
+  dropped: boolean;
+}
+
+function describeValue(value: unknown): string {
+  let text: string;
+  try {
+    text = JSON.stringify(value) ?? String(value);
+  } catch {
+    text = String(value);
+  }
+  return text.length > 80 ? `${text.slice(0, 77)}...` : text;
+}
+
+function expectedTypes(schema: Record<string, unknown>): string {
+  const declared = schema.type;
+  return Array.isArray(declared) ? (declared as string[]).join(" or ") : String(declared);
+}
+
+export function defectMessage(defect: LeadDefect): string {
+  return defect.dropped
+    ? `Dropped ${defect.lead}: ${defect.detail}.`
+    : `${defect.lead}: ignoring ${defect.field} — ${defect.detail}. The rest of the lead was kept.`;
+}
+
+/**
+ * Checks each lead on its own, field by field.
+ *
+ * One bad field costs that field and nothing else: it is removed so persistLead's
+ * existing normalisation supplies the default, and the loss is reported. A record
+ * is dropped only when it is genuinely unusable -- no company name to put on a
+ * card. A defect in one lead never touches another lead in the same response.
+ */
+export function reviewLeads(entries: unknown[]): { leads: RawLead[]; defects: LeadDefect[] } {
+  const leads: RawLead[] = [];
+  const defects: LeadDefect[] = [];
+
+  entries.forEach((entry, i) => {
+    const position = `lead ${i + 1}`;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      defects.push({
+        lead: position,
+        field: "lead",
+        detail: `expected an object, got ${describeValue(entry)}`,
+        dropped: true,
+      });
+      return;
+    }
+
+    const raw = { ...(entry as Record<string, unknown>) };
+    const company = typeof raw.company === "string" ? raw.company.trim() : "";
+    if (!company) {
+      defects.push({
+        lead: position,
+        field: "company",
+        detail: `no usable company name (got ${describeValue(raw.company)})`,
+        dropped: true,
+      });
+      return;
+    }
+
+    for (const [field, schema] of Object.entries(LEAD_PROPERTIES)) {
+      if (raw[field] === undefined) continue;
+      try {
+        validateAgainstSchema(raw[field], schema, field);
+      } catch {
+        defects.push({
+          lead: company,
+          field,
+          detail: `expected ${expectedTypes(schema)}, got ${describeValue(raw[field])}`,
+          dropped: false,
+        });
+        delete raw[field];
+      }
+    }
+
+    // A connection the code does not recognise is a claim about a real
+    // relationship, so it is reported rather than quietly becoming "none".
+    if (raw.connection_type !== undefined && !(CONNECTION_TYPES as string[]).includes(raw.connection_type as string)) {
+      defects.push({
+        lead: company,
+        field: "connection_type",
+        detail: `expected one of ${CONNECTION_TYPES.join(", ")}, got ${describeValue(raw.connection_type)}`,
+        dropped: false,
+      });
+      delete raw.connection_type;
+    }
+
+    leads.push(raw as unknown as RawLead);
+  });
+
+  return { leads, defects };
 }
 
 interface RawLead {

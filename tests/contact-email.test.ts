@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, afterEach } from "vitest";
-import { createContactEmailVerifier, createVerifiers } from "@/lib/contact";
+import { createVerifiers } from "@/lib/contact";
 
 const deliverable = new Set(["renaissancecoffeesfu.com", "gabiandjules.com"]);
 const resolver = async (domain: string) => deliverable.has(domain);
@@ -10,7 +10,7 @@ afterEach(() => {
 
 describe("contact email verification", () => {
   test("accepts a well-formed address whose domain can receive mail", async () => {
-    const verify = createContactEmailVerifier({ resolve: resolver });
+    const { email: verify } = createVerifiers({ resolve: resolver });
 
     expect(await verify("hello@renaissancecoffeesfu.com")).toEqual({
       ok: true,
@@ -19,7 +19,7 @@ describe("contact email verification", () => {
   });
 
   test("normalises surrounding whitespace and case in the domain", async () => {
-    const verify = createContactEmailVerifier({ resolve: resolver });
+    const { email: verify } = createVerifiers({ resolve: resolver });
 
     expect(await verify("  Hello@Renaissancecoffeesfu.COM ")).toEqual({
       ok: true,
@@ -29,7 +29,7 @@ describe("contact email verification", () => {
 
   test("rejects a malformed address without spending a DNS lookup", async () => {
     const resolve = vi.fn(resolver);
-    const verify = createContactEmailVerifier({ resolve });
+    const { email: verify } = createVerifiers({ resolve });
 
     const result = await verify("info at renaissance dot com");
 
@@ -38,7 +38,7 @@ describe("contact email verification", () => {
   });
 
   test("rejects an address whose domain has no mail records", async () => {
-    const verify = createContactEmailVerifier({ resolve: resolver });
+    const { email: verify } = createVerifiers({ resolve: resolver });
 
     // momentenergy.co: the fabricated domain the live-test report caught.
     expect(await verify("hello@momentenergy.co")).toEqual({
@@ -49,7 +49,7 @@ describe("contact email verification", () => {
   });
 
   test("rejects an empty or non-string value", async () => {
-    const verify = createContactEmailVerifier({ resolve: resolver });
+    const { email: verify } = createVerifiers({ resolve: resolver });
 
     expect((await verify("")).ok).toBe(false);
     expect((await verify(null)).ok).toBe(false);
@@ -58,7 +58,7 @@ describe("contact email verification", () => {
 
   test("looks each domain up only once per run", async () => {
     const resolve = vi.fn(resolver);
-    const verify = createContactEmailVerifier({ resolve });
+    const { email: verify } = createVerifiers({ resolve });
 
     await verify("a@gabiandjules.com");
     await verify("b@gabiandjules.com");
@@ -68,7 +68,7 @@ describe("contact email verification", () => {
   });
 
   test("treats a resolver that fails as unverified rather than throwing", async () => {
-    const verify = createContactEmailVerifier({
+    const { email: verify } = createVerifiers({
       resolve: async () => {
         throw new Error("EAI_AGAIN");
       },
@@ -83,7 +83,7 @@ describe("contact email verification", () => {
 
   test("gives up on a hanging resolver instead of stalling the run", async () => {
     vi.useFakeTimers();
-    const verify = createContactEmailVerifier({
+    const { email: verify } = createVerifiers({
       resolve: () => new Promise<boolean>(() => {}),
       timeoutMs: 2000,
     });

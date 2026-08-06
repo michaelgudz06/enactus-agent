@@ -148,10 +148,3 @@ export function createVerifiers(opts: { resolve?: DomainResolver; timeoutMs?: nu
     },
   };
 }
-
-/** Back-compat helper for callers that only need the email gate. */
-export function createContactEmailVerifier(
-  opts: { resolve?: DomainResolver; timeoutMs?: number } = {}
-): (email: unknown) => Promise<EmailCheck> {
-  return createVerifiers(opts).email;
-}

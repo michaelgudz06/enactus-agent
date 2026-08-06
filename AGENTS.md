@@ -60,6 +60,12 @@ schema-validate every JSON response, and reject rather than coerce. When a check
 fails, report it honestly — do not throw the work away and blame the model, and
 never present unverified data as verified.
 
+Rejection is scoped to the thing that failed. A bad field costs that field, an
+unusable record costs that record, and neither may cost the rest of the batch:
+`reviewLeads` in `src/lib/agent.ts` checks each lead on its own and emits what it
+dropped. Never validate a batch of leads atomically — one wrong-typed field
+taking every lead with it is the exact failure this agent was repaired for.
+
 ### Drafts only, never send
 
 `src/lib/gmail.ts` uses the `gmail.compose` scope deliberately. A human presses
