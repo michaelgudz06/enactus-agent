@@ -1,57 +1,18 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { ledger as db, resetLedger } from "./helpers/ledger";
 
-// A stand-in ledger. Nothing here reaches a real project: `rows` is what the
-// month has cost so far and `readFails` reproduces a project whose spend table
-// cannot be read.
-const db = vi.hoisted(() => ({
-  rows: [] as { cost_usd: number }[],
-  inserted: [] as Record<string, unknown>[],
-  readFails: null as string | null,
-  // Supabase reports a rejected insert in `error` rather than by throwing, so
-  // this is the shape a real broken ledger write arrives in.
-  writeFails: null as string | null,
-  // A hosted project answers with at most `db-max-rows` rows however many were
-  // asked for, and does not say that it truncated.
-  maxRows: 1000,
-  // A table that never ends: every page comes back full, so no read of it can
-  // ever be complete.
-  endless: false,
-  hasKey: true,
-}));
-
+// The stand-in ledger every budget-aware test reads through, in
+// ./helpers/ledger. Nothing here reaches a real project: `rows` is what the
+// month has cost so far, `readFails` reproduces a project whose spend table
+// cannot be read, and `writeFails` one whose rows are rejected.
 vi.mock("@/lib/supabase", async (orig) => {
   const actual = await orig<typeof import("@/lib/supabase")>();
-  const table = (name: string) => {
-    let from = 0;
-    let to = Number.MAX_SAFE_INTEGER;
-    const api = {
-      insert(row: Record<string, unknown>) {
-        if (db.writeFails) return Promise.resolve({ data: null, error: { message: db.writeFails } });
-        db.inserted.push({ table: name, ...row });
-        return Promise.resolve({ data: null, error: null });
-      },
-      select: () => api,
-      eq: () => api,
-      order: () => api,
-      range(start: number, end: number) {
-        from = start;
-        to = end;
-        return api;
-      },
-      then: (resolve: (v: unknown) => unknown) => {
-        if (db.readFails) {
-          return Promise.resolve({ data: null, error: { message: db.readFails } }).then(resolve);
-        }
-        const size = Math.min(to - from + 1, db.maxRows);
-        const page = db.endless
-          ? Array.from({ length: size }, () => ({ cost_usd: 0.000001 }))
-          : db.rows.slice(from, from + size);
-        return Promise.resolve({ data: page, error: null }).then(resolve);
-      },
-    };
-    return api;
+  const { ledger, spendTable } = await import("./helpers/ledger");
+  return {
+    ...actual,
+    hasServiceKey: () => ledger.hasServiceKey,
+    supabaseAdmin: { from: (name: string) => spendTable(name) },
   };
-  return { ...actual, hasServiceKey: () => db.hasKey, supabaseAdmin: { from: table } };
 });
 
 const budget = await import("@/lib/budget");
@@ -61,13 +22,7 @@ const { chatJSON, chatText, streamReasoner, STRUCTURED, REASONER } = await impor
 const originalFetch = globalThis.fetch;
 
 beforeEach(() => {
-  db.rows = [];
-  db.inserted = [];
-  db.readFails = null;
-  db.writeFails = null;
-  db.maxRows = 1000;
-  db.endless = false;
-  db.hasKey = true;
+  resetLedger();
   budget.resetSpendCacheForTests();
   vi.stubEnv("OPENROUTER_API_KEY", "test-key");
   vi.stubEnv("EXA_API_KEY", "test-key");
@@ -345,7 +300,7 @@ describe("the ledger", () => {
   });
 
   test("without a service key the cap is per-process, and says so", async () => {
-    db.hasKey = false;
+    db.hasServiceKey = false;
     budget.resetSpendCacheForTests();
 
     const status = await budget.budgetStatus(0.03);

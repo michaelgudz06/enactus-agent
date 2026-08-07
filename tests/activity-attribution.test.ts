@@ -8,13 +8,17 @@ const db = vi.hoisted(() => ({
 
 vi.mock("@/lib/supabase", async (orig) => {
   const actual = await orig<typeof import("@/lib/supabase")>();
-  const table = (name: string) => ({
-    insert: async (row: Record<string, unknown>) => {
-      if (db.failWith) return { data: null, error: { message: db.failWith } };
-      db.rows.push({ table: name, ...row });
-      return { data: null, error: null };
-    },
-  });
+  const { spendTable } = await import("./helpers/ledger");
+  const table = (name: string) => {
+    if (name === actual.SPEND) return spendTable(name);
+    return {
+      insert: async (row: Record<string, unknown>) => {
+        if (db.failWith) return { data: null, error: { message: db.failWith } };
+        db.rows.push({ table: name, ...row });
+        return { data: null, error: null };
+      },
+    };
+  };
   return { ...actual, hasServiceKey: () => db.hasKey, supabaseAdmin: { from: table } };
 });
 

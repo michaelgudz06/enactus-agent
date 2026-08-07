@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { resetLedger } from "./helpers/ledger";
 
 const stub = vi.hoisted(() => ({ chatJSON: vi.fn() }));
 
@@ -16,30 +17,28 @@ vi.mock("@/lib/llm", async (orig) => ({
   ...(await orig<typeof import("@/lib/llm")>()),
   chatJSON: stub.chatJSON,
 }));
-vi.mock("@/lib/supabase", () => {
+vi.mock("@/lib/supabase", async () => {
   // Enough of the query builder for the reads and inserts the route makes: the
-  // lead, the draft row, the spend ledger the budget gate reads, and the
-  // attribution line. Nothing here reaches a real project.
+  // lead, the draft row and the attribution line. The spend ledger the budget
+  // gate reads is the shared double, so this file does not restate how a month
+  // is read. Nothing here reaches a real project.
+  const { ledger, spendTable } = await import("./helpers/ledger");
   const single = async () => ({ data: LEAD, error: null });
   const builder = {
     select: () => builder,
     eq: () => builder,
     insert: () => builder,
-    order: () => builder,
-    range: () => builder,
     single,
-    // The spend read is awaited a page at a time without `.single()`, so the
-    // builder has to settle to an empty, error-free result: a month with
-    // nothing spent in it, and no further page to read.
     then: (resolve: (v: unknown) => unknown) => Promise.resolve({ data: [], error: null }).then(resolve),
   };
+  const SPEND = "enactus_api_spend";
   return {
-    hasServiceKey: () => true,
+    hasServiceKey: () => ledger.hasServiceKey,
     LEADS: "enactus_leads",
     DRAFTS: "enactus_email_drafts",
-    SPEND: "enactus_api_spend",
+    SPEND,
     ACTIVITY: "enactus_activity_log",
-    supabaseAdmin: { from: () => builder },
+    supabaseAdmin: { from: (name: string) => (name === SPEND ? spendTable(name) : builder) },
   };
 });
 
@@ -47,6 +46,7 @@ const { POST } = await import("@/app/api/email/draft/route");
 
 beforeEach(() => {
   vi.resetAllMocks();
+  resetLedger();
   // A configured SFU inbox, so these tests see only the model's own defects.
   // The unconfigured and non-SFU cases are covered in outreach-sender.test.ts.
   vi.stubEnv("OUTREACH_FROM_EMAIL", "enactus@sfu.ca");

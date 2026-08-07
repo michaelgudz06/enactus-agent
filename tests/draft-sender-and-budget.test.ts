@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { ledgerHolds, resetLedger } from "./helpers/ledger";
 
 // The draft route seen from the two operating parameters it now carries: it is
 // written to be sent from an SFU inbox, and it stops when the month's budget is
@@ -15,7 +16,7 @@ const LEAD = {
   sponsorship_type: ["in_kind"],
 };
 
-const db = vi.hoisted(() => ({ spentUsd: 0, logged: [] as Record<string, unknown>[] }));
+const db = vi.hoisted(() => ({ logged: [] as Record<string, unknown>[] }));
 
 vi.mock("@/lib/auth", () => ({ getSession: async () => ({ name: "Nikita" }) }));
 vi.mock("@/lib/llm", async (orig) => ({
@@ -24,10 +25,9 @@ vi.mock("@/lib/llm", async (orig) => ({
 }));
 vi.mock("@/lib/supabase", async (orig) => {
   const actual = await orig<typeof import("@/lib/supabase")>();
+  const { ledger, spendTable } = await import("./helpers/ledger");
   const table = (name: string) => {
-    // The spend read is paged: the month's one row is on the first page and
-    // every page after it comes back empty, which is where the read stops.
-    let offset = 0;
+    if (name === actual.SPEND) return spendTable(name);
     const api = {
       insert(row: Record<string, unknown>) {
         if (name === actual.ACTIVITY) db.logged.push(row);
@@ -35,22 +35,12 @@ vi.mock("@/lib/supabase", async (orig) => {
       },
       select: () => api,
       eq: () => api,
-      order: () => api,
-      range(start: number) {
-        offset = start;
-        return api;
-      },
       single: async () => ({ data: name === actual.LEADS ? LEAD : { id: "draft-1" }, error: null }),
-      then: (resolve: (v: unknown) => unknown) =>
-        Promise.resolve(
-          name === actual.SPEND && offset === 0
-            ? { data: [{ cost_usd: db.spentUsd }], error: null }
-            : { data: null, error: null }
-        ).then(resolve),
+      then: (resolve: (v: unknown) => unknown) => Promise.resolve({ data: null, error: null }).then(resolve),
     };
     return api;
   };
-  return { ...actual, hasServiceKey: () => true, supabaseAdmin: { from: table } };
+  return { ...actual, hasServiceKey: () => ledger.hasServiceKey, supabaseAdmin: { from: table } };
 });
 
 const budget = await import("@/lib/budget");
@@ -58,7 +48,7 @@ const { POST } = await import("@/app/api/email/draft/route");
 
 beforeEach(() => {
   vi.clearAllMocks();
-  db.spentUsd = 0;
+  resetLedger();
   db.logged = [];
   budget.resetSpendCacheForTests();
   vi.stubEnv("OUTREACH_FROM_EMAIL", "enactus@sfu.ca");
@@ -132,7 +122,7 @@ describe("the monthly cap reaches drafting too", () => {
   });
 
   test("stops with the cap and the spend once the month is gone", async () => {
-    db.spentUsd = budget.capUsd();
+    ledgerHolds(budget.capUsd());
     budget.resetSpendCacheForTests();
 
     const { status, json } = await draft();

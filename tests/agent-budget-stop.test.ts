@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach, vi } from "vitest";
 import { CANDIDATES, PLAN, collector, rawLead, respondsWith } from "./helpers/fixtures";
+import { ledgerHolds, resetLedger } from "./helpers/ledger";
 
 // A run either happens in full or does not start. This is the file that holds
 // that: a budget stop must never reach the user wearing the clothes of a
@@ -12,36 +13,24 @@ const stub = vi.hoisted(() => ({
   exaSearch: vi.fn(),
 }));
 
-const db = vi.hoisted(() => ({ spentUsd: 0 }));
-
 vi.mock("node:dns", async () => (await import("./helpers/dns")).dnsModule());
 vi.mock("@/lib/supabase", async (orig) => {
   const actual = await orig<typeof import("@/lib/supabase")>();
+  const { ledger, spendTable } = await import("./helpers/ledger");
   const table = (name: string) => {
-    // The spend read is paged, so the ledger's one row is on the first page and
-    // every page after it is empty -- the same shape a real month ends with.
-    let offset = 0;
+    if (name === actual.SPEND) return spendTable(name);
     const api = {
       insert: () => api,
       select: () => api,
       eq: () => api,
       order: () => api,
-      range(start: number) {
-        offset = start;
-        return api;
-      },
       limit: async () => ({ data: [], error: null }),
       single: async () => ({ data: { id: "row-1" }, error: null }),
-      then: (resolve: (v: unknown) => unknown) =>
-        Promise.resolve(
-          name === actual.SPEND && offset === 0
-            ? { data: [{ cost_usd: db.spentUsd }], error: null }
-            : { data: [], error: null }
-        ).then(resolve),
+      then: (resolve: (v: unknown) => unknown) => Promise.resolve({ data: [], error: null }).then(resolve),
     };
     return api;
   };
-  return { ...actual, hasServiceKey: () => true, supabaseAdmin: { from: table } };
+  return { ...actual, hasServiceKey: () => ledger.hasServiceKey, supabaseAdmin: { from: table } };
 });
 vi.mock("@/lib/llm", async (orig) => ({
   ...(await orig<typeof import("@/lib/llm")>()),
@@ -60,7 +49,7 @@ const INPUT = { prompt: "burnaby cafes near sfu", mode: "sponsor" as const, user
 
 beforeEach(() => {
   vi.clearAllMocks();
-  db.spentUsd = 0;
+  resetLedger();
   budget.resetSpendCacheForTests();
   vi.unstubAllEnvs();
   stub.exaSearch.mockResolvedValue(CANDIDATES);
@@ -69,7 +58,7 @@ beforeEach(() => {
 
 /** A month with nothing left in it. */
 function budgetSpent() {
-  db.spentUsd = budget.capUsd();
+  ledgerHolds(budget.capUsd());
   budget.resetSpendCacheForTests();
 }
 

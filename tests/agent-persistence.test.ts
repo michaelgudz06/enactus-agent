@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach, vi } from "vitest";
 import { CANDIDATES, PLAN, collector, rawLead, respondsWith } from "./helpers/fixtures";
+import { resetLedger } from "./helpers/ledger";
 
 const stub = vi.hoisted(() => ({
   chatJSON: vi.fn(),
@@ -19,7 +20,11 @@ const db = vi.hoisted(() => ({
 vi.mock("node:dns", async () => (await import("./helpers/dns")).dnsModule());
 vi.mock("@/lib/supabase", async (orig) => {
   const actual = await orig<typeof import("@/lib/supabase")>();
+  const { ledger, spendTable } = await import("./helpers/ledger");
   const table = (name: string) => {
+    // The budget gate reads the ledger before the run starts, and that read has
+    // a shape of its own.
+    if (name === actual.SPEND) return spendTable(name);
     let pending: Record<string, unknown> = {};
     const api = {
       insert(row: Record<string, unknown>) {
@@ -42,7 +47,7 @@ vi.mock("@/lib/supabase", async (orig) => {
     };
     return api;
   };
-  return { ...actual, hasServiceKey: () => true, supabaseAdmin: { from: table } };
+  return { ...actual, hasServiceKey: () => ledger.hasServiceKey, supabaseAdmin: { from: table } };
 });
 vi.mock("@/lib/llm", async (orig) => ({
   ...(await orig<typeof import("@/lib/llm")>()),
@@ -58,6 +63,7 @@ const { runAgent } = await import("@/lib/agent");
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetLedger();
   db.rejectFor.clear();
   db.inserted.length = 0;
   stub.exaSearch.mockResolvedValue(CANDIDATES);
