@@ -246,7 +246,11 @@ export default function BoardPage() {
       {activity.running && (
         <div className="mx-5 mt-3 text-xs rounded-lg px-3 py-2 flex items-center gap-2 border" style={{ background: "rgba(245,200,66,.08)", borderColor: "rgba(245,200,66,.35)", color: "var(--text)" }}>
           <span className="dot-pulse" style={{ color: "var(--gold)" }}>●</span>
-          The agent is still searching{activity.found > 0 ? ` — ${activity.found} lead${activity.found !== 1 ? "s" : ""} so far` : ""}. New leads appear here as they are saved.
+          <span>
+            The agent is still searching{activity.savedToBoard > 0 ? ` — ${activity.savedToBoard} lead${activity.savedToBoard !== 1 ? "s" : ""} on the board so far` : ""}.{" "}
+            {activity.unsaved > 0 && `${activity.unsaved} lead${activity.unsaved !== 1 ? "s" : ""} could not be saved and ${activity.unsaved !== 1 ? "are" : "is"} not coming to the board. `}
+            New leads appear here as they are saved.
+          </span>
         </div>
       )}
 

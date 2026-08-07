@@ -6,6 +6,7 @@ import {
   initialRunState,
   RunState,
   runHasWorkspace,
+  runSavedToBoard,
 } from "@/lib/run-store";
 import { AgentEvent, Lead } from "@/lib/types";
 
@@ -190,6 +191,136 @@ describe("runHasWorkspace", () => {
     const second = store.start({ prompt: "credit unions", mode: "sponsor" });
     expect(second.started).toBe(true);
     expect(store.getState().cancelled).toBe(false);
+    store.cancel();
+  });
+});
+
+// The board's banner says leads "appear here as they are saved", so its number
+// has to be leads that were saved. A `lead` event is emitted whether or not the
+// insert succeeded; the failure arrives as a `persist` status immediately
+// before that lead, which is the only thing in the stream that says so — and it
+// is emitted by code, not by the model.
+
+describe("how many of the run's leads are on the board", () => {
+  const persistFailed = (company: string): AgentEvent => ({
+    type: "status",
+    step: "persist",
+    message: `${company} was NOT saved to the board: column "connection_note" does not exist`,
+  });
+
+  test("counts every lead when the database accepted them all", async () => {
+    const script = scriptedRun();
+    const store = createRunStore({ fetchImpl: script.fetchImpl });
+    const outcome = store.start({ prompt: "catering in Burnaby", mode: "sponsor" });
+    if (!outcome.started) throw new Error(outcome.reason);
+
+    script.emit({ type: "lead", lead: lead("a", "Bakery") });
+    script.emit({ type: "lead", lead: lead("b", "Roasters") });
+    await settle();
+
+    expect(runSavedToBoard(store.getState())).toBe(2);
+    store.cancel();
+  });
+
+  test("a lead the database rejected is not counted as on the board", async () => {
+    const script = scriptedRun();
+    const store = createRunStore({ fetchImpl: script.fetchImpl });
+    const outcome = store.start({ prompt: "catering in Burnaby", mode: "sponsor" });
+    if (!outcome.started) throw new Error(outcome.reason);
+
+    script.emit({ type: "lead", lead: lead("a", "Bakery") });
+    await settle();
+    expect(runSavedToBoard(store.getState())).toBe(1);
+
+    script.emit(persistFailed("Roasters"));
+    script.emit({ type: "lead", lead: lead("b", "Roasters") });
+    await settle();
+
+    expect(store.getState().leads).toHaveLength(2);
+    expect(store.getState().persistFailures).toBe(1);
+    expect(runSavedToBoard(store.getState())).toBe(1);
+    store.cancel();
+  });
+
+  test("never reads as less than nothing when the first lead is the one that failed", async () => {
+    const script = scriptedRun();
+    const store = createRunStore({ fetchImpl: script.fetchImpl });
+    const outcome = store.start({ prompt: "catering in Burnaby", mode: "sponsor" });
+    if (!outcome.started) throw new Error(outcome.reason);
+
+    // The failure is emitted before its lead, so this is the window in which a
+    // plain subtraction would show -1.
+    script.emit(persistFailed("Bakery"));
+    await settle();
+    expect(runSavedToBoard(store.getState())).toBe(0);
+
+    script.emit({ type: "lead", lead: lead("a", "Bakery") });
+    await settle();
+    expect(runSavedToBoard(store.getState())).toBe(0);
+    store.cancel();
+  });
+
+  test("a status step that is not a persist failure costs the board nothing", async () => {
+    const script = scriptedRun();
+    const store = createRunStore({ fetchImpl: script.fetchImpl });
+    const outcome = store.start({ prompt: "catering in Burnaby", mode: "sponsor" });
+    if (!outcome.started) throw new Error(outcome.reason);
+
+    script.emit({ type: "status", step: "research", message: "Analyzing fit" });
+    script.emit({ type: "lead", lead: lead("a", "Bakery") });
+    await settle();
+
+    expect(runSavedToBoard(store.getState())).toBe(1);
+    store.cancel();
+  });
+
+  test("agrees with the count the finished run reports", async () => {
+    const script = scriptedRun();
+    const store = createRunStore({ fetchImpl: script.fetchImpl });
+    const outcome = store.start({ prompt: "catering in Burnaby", mode: "sponsor" });
+    if (!outcome.started) throw new Error(outcome.reason);
+
+    script.emit({ type: "lead", lead: lead("a", "Bakery") });
+    script.emit(persistFailed("Roasters"));
+    script.emit({ type: "lead", lead: lead("b", "Roasters") });
+    script.emit({ type: "lead", lead: lead("c", "Cannery") });
+    await settle();
+    const whileRunning = runSavedToBoard(store.getState());
+
+    script.emit({ type: "done", count: 3, saved: 2, searchId: null });
+    script.finish();
+    await outcome.finished;
+
+    expect(whileRunning).toBe(2);
+    expect(runSavedToBoard(store.getState())).toBe(store.getState().saved);
+    expect(runSavedToBoard(store.getState())).toBe(2);
+  });
+
+  test("a second run counts from nothing, not from the last run's failures", async () => {
+    const first = scriptedRun();
+    const second = scriptedRun();
+    const scripts = [first, second];
+    let call = 0;
+    const store = createRunStore({
+      fetchImpl: ((...args: Parameters<typeof fetch>) =>
+        scripts[call++].fetchImpl(...args)) as unknown as typeof fetch,
+    });
+    const one = store.start({ prompt: "catering in Burnaby", mode: "sponsor" });
+    if (!one.started) throw new Error(one.reason);
+
+    first.emit(persistFailed("Bakery"));
+    first.emit({ type: "lead", lead: lead("a", "Bakery") });
+    await settle();
+    store.cancel();
+    expect(store.getState().persistFailures).toBe(1);
+
+    const two = store.start({ prompt: "credit unions", mode: "sponsor" });
+    expect(two.started).toBe(true);
+    expect(store.getState().persistFailures).toBe(0);
+
+    second.emit({ type: "lead", lead: lead("b", "Roasters") });
+    await settle();
+    expect(runSavedToBoard(store.getState())).toBe(1);
     store.cancel();
   });
 });

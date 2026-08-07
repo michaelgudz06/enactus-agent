@@ -40,6 +40,14 @@ export interface RunState {
   done: boolean;
   /** How many leads the database actually accepted, from the `done` event. */
   saved: number;
+  /**
+   * How many leads the run found but could not write. `runAgent` emits a
+   * `persist` status for a lead the insert rejected and for nothing else, just
+   * before that lead's own event, so counting them here is code reading code —
+   * the model has no say in it. It is what lets the board say how many leads are
+   * on it rather than how many were found.
+   */
+  persistFailures: number;
   /** Set when the user stopped the run rather than it finishing. */
   cancelled: boolean;
   /**
@@ -64,6 +72,7 @@ export const initialRunState: RunState = {
   error: "",
   done: false,
   saved: 0,
+  persistFailures: 0,
   cancelled: false,
   leadSignal: 0,
 };
@@ -76,7 +85,11 @@ export const initialRunState: RunState = {
 export function applyEvent(state: RunState, ev: AgentEvent): RunState {
   switch (ev.type) {
     case "status":
-      return { ...state, steps: [...state.steps, { step: ev.step, message: ev.message }] };
+      return {
+        ...state,
+        steps: [...state.steps, { step: ev.step, message: ev.message }],
+        persistFailures: ev.step === "persist" ? state.persistFailures + 1 : state.persistFailures,
+      };
     case "reasoning":
       return { ...state, reasoning: state.reasoning + ev.text };
     case "similar":
@@ -117,6 +130,24 @@ export function runHasWorkspace(state: RunState): boolean {
     state.error !== "" ||
     state.clarify !== null
   );
+}
+
+/**
+ * How many of the run's leads actually reached the board — which is not how
+ * many it found. A lead is emitted whether or not the insert succeeded, so
+ * counting the leads would have the board claim rows it does not have, and the
+ * failure is exactly what `persistLead` reports so the UI need not guess.
+ *
+ * The failing lead's `persist` status arrives just before that lead's own
+ * event, so the subtraction is transiently one low between them — hence the
+ * clamp, which is what stops the first lead of a failing run reading as -1.
+ * Once the run is done the `done` event's own count is authoritative and used
+ * directly, so the number the student watched cannot end up disagreeing with
+ * the number the run finished on.
+ */
+export function runSavedToBoard(state: RunState): number {
+  if (state.done) return state.saved;
+  return Math.max(0, state.leads.length - state.persistFailures);
 }
 
 export interface RunInput {
@@ -281,6 +312,7 @@ export function createRunStore(options: { fetchImpl?: typeof fetch } = {}): RunS
         error: "",
         done: false,
         saved: 0,
+        persistFailures: 0,
         cancelled: false,
       });
 

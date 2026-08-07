@@ -7,6 +7,7 @@ import {
   initialRunState,
   RunInput,
   RunState,
+  runSavedToBoard,
   StartOutcome,
 } from "@/lib/run-store";
 
@@ -35,14 +36,20 @@ export interface RunActivity {
   running: boolean;
   /** Ticks when a lead may have reached the database; the board reads again. */
   leadSignal: number;
-  /** Leads found so far in the run in flight. */
-  found: number;
+  /**
+   * Leads the run has actually written, not leads it has found. The board may
+   * only say what is on it, so the found count is deliberately not published
+   * here: a consumer cannot render a number the database never accepted.
+   */
+  savedToBoard: number;
+  /** Leads found but rejected by the database, so never coming to the board. */
+  unsaved: number;
 }
 
 const OUTSIDE_PROVIDER = "The agent run provider is not mounted.";
 
 const RunStateContext = createContext<RunState>(initialRunState);
-const RunActivityContext = createContext<RunActivity>({ running: false, leadSignal: 0, found: 0 });
+const RunActivityContext = createContext<RunActivity>({ running: false, leadSignal: 0, savedToBoard: 0, unsaved: 0 });
 const RunControlsContext = createContext<RunControls>({
   // Refusing out loud rather than doing nothing: a page rendered outside the
   // provider would otherwise have a Run button that silently did nothing.
@@ -75,9 +82,16 @@ export default function RunProvider({ children }: { children: React.ReactNode })
     [store]
   );
 
+  const savedToBoard = runSavedToBoard(state);
+
   const activity = useMemo<RunActivity>(
-    () => ({ running: state.running, leadSignal: state.leadSignal, found: state.leads.length }),
-    [state.running, state.leadSignal, state.leads.length]
+    () => ({
+      running: state.running,
+      leadSignal: state.leadSignal,
+      savedToBoard,
+      unsaved: state.persistFailures,
+    }),
+    [state.running, state.leadSignal, savedToBoard, state.persistFailures]
   );
 
   // `children` is created by the layout, which does not re-render, so React
