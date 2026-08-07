@@ -758,10 +758,13 @@ export function evaluateGates(
     });
   }
 
-  // G_SIZE. The bounds are the segment's own, BOUNDED by the captain's 5–250 SMB band — and the
-  // floor is the band's alone. The verdict order below is deliberate: applicability is decided
-  // BEFORE the headcount is read, so an absent headcount can never be mistaken for an out-of-band
-  // one. `reassign` is unchanged and still not `block`: this gate has never dropped a row.
+  // G_SIZE. The bounds are `effectiveSizeBounds`, where the captain's 5–250 SMB band is the
+  // DEFAULT ENVELOPE and not an override: it narrows a segment from above and LOWERS it from
+  // below, so the floor is the band's EXCEPT where the segment declares it reaches lower, and a
+  // segment is never judged out of band for a headcount its own declared band reaches. The verdict
+  // order below is deliberate: applicability is decided BEFORE the headcount is read, so an absent
+  // headcount can never be mistaken for an out-of-band one. `reassign` is unchanged and still not
+  // `block`: this gate has never dropped a row.
   const { floor, ceiling } = effectiveSizeBounds(segment, config);
   const { value: headcount, received: fillerHeadcount } = knownHeadcount(c);
   const bandNote = smbBandApplies(segment, config)
