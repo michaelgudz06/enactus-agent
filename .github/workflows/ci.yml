@@ -30,8 +30,8 @@ env:
 
 jobs:
   # Four separate jobs, not one job with four steps, deliberately: each reports
-  # its own check so a failure names the thing that broke. It also means the
-  # known-red lint job cannot mask a genuine build or test regression.
+  # its own check so a failure names the thing that broke, and no one job's
+  # failure can mask a genuine regression in another.
   typecheck:
     name: typecheck
     runs-on: ubuntu-latest
@@ -76,11 +76,9 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-  # KNOWN RED. Two pre-existing react-hooks/set-state-in-effect errors in
-  # src/app/(app)/board/page.tsx and src/components/EmailModal.tsx fail this job
-  # today. They are owned by a separate change and are not silenced here:
-  # weakening the config or ignoring those files would defeat the point of
-  # adding CI. This job goes green on its own once that fix lands.
+  # Green. The two react-hooks/set-state-in-effect errors this job was added
+  # red for are fixed; nothing is silenced or ignored to keep it that way, and
+  # weakening the config to hide a future one would defeat the point of the job.
   lint:
     name: lint
     runs-on: ubuntu-latest

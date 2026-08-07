@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Sparkles, ArrowUp, Brain, History, Lightbulb, CircleDashed, CheckCircle2, AlertTriangle } from "lucide-react";
+import Link from "next/link";
+import { Sparkles, ArrowUp, Brain, History, Lightbulb, CircleDashed, CheckCircle2, AlertTriangle, Square } from "lucide-react";
 import { useApp } from "@/components/AppShell";
-import { AgentEvent, Lead, SearchRow } from "@/lib/types";
+import { useRunControls, useRunState } from "@/components/RunProvider";
+import { runHasWorkspace, runSavedToBoard } from "@/lib/run-store";
+import { Lead, SearchRow } from "@/lib/types";
 import LeadCard from "@/components/LeadCard";
 import EmailModal from "@/components/EmailModal";
-
-interface Step { step: string; message: string; }
 
 const EXAMPLES_SPONSOR = [
   "Catering & food companies in Burnaby that could sponsor student events",
@@ -20,21 +21,41 @@ const EXAMPLES_SALES = [
   "BC startups that recently raised funding and are hiring ops roles",
 ];
 
+/**
+ * A refusal the provider gave, and whether a run was in flight when it gave it.
+ * The pairing is what lets the message be derived rather than cleared later: a
+ * refusal earned by a run in flight ("a search is already running") is a claim
+ * about that run, so it stops being shown the moment the run ends and the Run
+ * button works again. A refusal earned with nothing running — an empty prompt —
+ * is about the prompt and stays until the next attempt.
+ */
+export type Refusal = { reason: string; whileRunning: boolean };
+
+export const NO_REFUSAL: Refusal = { reason: "", whileRunning: false };
+
+export function refusalToShow(refusal: Refusal, running: boolean): string {
+  if (refusal.whileRunning && !running) return "";
+  return refusal.reason;
+}
+
+/**
+ * This page renders the run; it does not own it. Everything about the run in
+ * flight lives in the provider mounted at the `(app)` layout, so leaving for the
+ * board and coming back re-reads the same state rather than starting from a
+ * blank form.
+ */
 export default function AgentPage() {
-  const { mode, name } = useApp();
-  const [prompt, setPrompt] = useState("");
-  const [running, setRunning] = useState(false);
-  const [steps, setSteps] = useState<Step[]>([]);
-  const [reasoning, setReasoning] = useState("");
-  const [similar, setSimilar] = useState<{ message: string; suggestion: string } | null>(null);
-  const [clarify, setClarify] = useState<string[] | null>(null);
-  const [answers, setAnswers] = useState("");
-  const [leads, setLeads] = useState<Lead[]>([]);
-  const [error, setError] = useState("");
-  const [done, setDone] = useState(false);
-  const [saved, setSaved] = useState(0);
+  const { mode } = useApp();
+  const run = useRunState();
+  const controls = useRunControls();
+  const { draft, answers, running, steps, reasoning, similar, clarify, leads, error, done, saved, cancelled, persistFailures } = run;
+  const stoppedReachedBoard = runSavedToBoard(run);
+
+  // Local to this page: neither belongs to the run, and neither has to survive
+  // the trip to the board.
   const [history, setHistory] = useState<SearchRow[]>([]);
   const [emailLead, setEmailLead] = useState<Lead | null>(null);
+  const [refusal, setRefusal] = useState<Refusal>(NO_REFUSAL);
   const reasonRef = useRef<HTMLDivElement>(null);
 
   const examples = mode === "sales" ? EXAMPLES_SALES : EXAMPLES_SPONSOR;
@@ -47,62 +68,25 @@ export default function AgentPage() {
     if (reasonRef.current) reasonRef.current.scrollTop = reasonRef.current.scrollHeight;
   }, [reasoning]);
 
-  async function run(withAnswers?: string) {
-    setRunning(true);
-    setError("");
-    setSteps([]);
-    setReasoning("");
-    setSimilar(null);
-    setClarify(null);
-    setLeads([]);
-    setDone(false);
+  // Derived, not cleared by an effect: the message and the condition it was true
+  // under are held together, so the render that re-enables the Run button is the
+  // same render that stops claiming a search is running. An effect would clear
+  // it a commit later, which is the shape this repo already removed once.
+  const notice = refusalToShow(refusal, running);
 
-    try {
-      const res = await fetch("/api/agent/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, mode, answers: withAnswers, skipClarify: Boolean(withAnswers) }),
-      });
-      if (!res.ok || !res.body) {
-        const d = await res.json().catch(() => ({}));
-        throw new Error(d.error || `Request failed (${res.status})`);
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      while (true) {
-        const { done: rdone, value } = await reader.read();
-        if (rdone) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split("\n");
-        buf = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          let ev: AgentEvent;
-          try { ev = JSON.parse(line); } catch { continue; }
-          handleEvent(ev);
-        }
-      }
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setRunning(false);
-    }
+  // The provider is the gate on a second run, not this handler: it refuses
+  // synchronously and says why, and the reason is shown rather than swallowed.
+  function start(withAnswers?: string) {
+    const outcome = controls.start({ prompt: draft, mode, answers: withAnswers });
+    setRefusal(outcome.started ? NO_REFUSAL : { reason: outcome.reason, whileRunning: running });
   }
 
-  function handleEvent(ev: AgentEvent) {
-    switch (ev.type) {
-      case "status": setSteps((s) => [...s, { step: ev.step, message: ev.message }]); break;
-      case "reasoning": setReasoning((r) => r + ev.text); break;
-      case "similar": setSimilar({ message: ev.message, suggestion: ev.suggestion }); break;
-      case "clarify": setClarify(ev.questions); break;
-      case "lead": setLeads((l) => [...l, ev.lead]); break;
-      case "done": setSaved(ev.saved); setDone(true); break;
-      case "error": setError(ev.message); break;
-    }
+  function stop() {
+    setRefusal(NO_REFUSAL);
+    controls.cancel();
   }
 
-  const showWorkspace = running || steps.length > 0 || leads.length > 0 || error || clarify;
+  const showWorkspace = runHasWorkspace(run);
 
   return (
     <div className="max-w-6xl mx-auto px-5 py-6">
@@ -118,32 +102,51 @@ export default function AgentPage() {
 
         <div className="rounded-2xl border p-3" style={{ background: "var(--surface)", borderColor: "var(--border)" }}>
           <textarea
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && prompt.trim() && !running) run(); }}
+            value={draft}
+            onChange={(e) => controls.setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) start(); }}
             placeholder={mode === "sales" ? "Describe the customers you want to find…" : "Describe the sponsors you want to find…"}
             rows={3}
             className="w-full bg-transparent outline-none text-sm resize-none px-1"
           />
           <div className="flex items-center justify-between mt-2">
-            <span className="text-[11px]" style={{ color: "var(--faint)" }}>⌘/Ctrl + Enter to run</span>
-            <button
-              onClick={() => run()}
-              disabled={running || !prompt.trim()}
-              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-black disabled:opacity-50"
-              style={{ background: "var(--gold)" }}
-            >
-              {running ? "Running…" : "Run agent"} <ArrowUp size={15} />
-            </button>
+            <span className="text-[11px]" style={{ color: "var(--faint)" }}>
+              {running ? "Keep browsing — this keeps running if you switch to the board" : "⌘/Ctrl + Enter to run"}
+            </span>
+            <div className="flex items-center gap-2">
+              {running && (
+                <button
+                  onClick={stop}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-semibold border"
+                  style={{ borderColor: "var(--border)", color: "var(--muted)" }}
+                >
+                  <Square size={13} /> Stop
+                </button>
+              )}
+              <button
+                onClick={() => start()}
+                disabled={running || !draft.trim()}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-black disabled:opacity-50"
+                style={{ background: "var(--gold)" }}
+              >
+                {running ? "Running…" : "Run agent"} <ArrowUp size={15} />
+              </button>
+            </div>
           </div>
         </div>
+
+        {notice && (
+          <div className="mt-2 text-xs rounded-lg px-3 py-2 border" style={{ background: "rgba(245,200,66,.08)", borderColor: "rgba(245,200,66,.35)", color: "var(--text)" }}>
+            {notice}
+          </div>
+        )}
 
         {!showWorkspace && (
           <div className="mt-3 flex flex-wrap gap-2">
             {examples.map((ex) => (
               <button
                 key={ex}
-                onClick={() => setPrompt(ex)}
+                onClick={() => controls.setDraft(ex)}
                 className="text-xs px-3 py-1.5 rounded-full border text-left"
                 style={{ background: "var(--surface)", borderColor: "var(--border)", color: "var(--muted)" }}
               >
@@ -179,13 +182,13 @@ export default function AgentPage() {
                 </ul>
                 <textarea
                   value={answers}
-                  onChange={(e) => setAnswers(e.target.value)}
+                  onChange={(e) => controls.setAnswers(e.target.value)}
                   rows={2}
                   placeholder="Type your answers here…"
                   className="w-full rounded-lg px-3 py-2 text-sm outline-none border mb-2"
                   style={{ background: "var(--surface2)", borderColor: "var(--border)" }}
                 />
-                <button onClick={() => run(answers)} disabled={running} className="px-3 py-2 rounded-lg text-xs font-semibold text-black" style={{ background: "var(--gold)" }}>
+                <button onClick={() => start(answers)} disabled={running} className="px-3 py-2 rounded-lg text-xs font-semibold text-black" style={{ background: "var(--gold)" }}>
                   Continue with answers
                 </button>
               </div>
@@ -197,11 +200,26 @@ export default function AgentPage() {
               </div>
             )}
 
+            {/* A stopped run keeps the leads it already found, because each was
+                written as it was found rather than at the end — but a stopped
+                run never receives the `done` event that says how many the
+                database accepted, so the count below is the most that can have
+                reached the board, not a confirmed total. */}
+            {cancelled && (
+              <div className="mb-3 rounded-xl border p-3 text-xs" style={{ background: "var(--surface)", borderColor: "var(--border)", color: "var(--muted)" }}>
+                Search stopped.{" "}
+                {leads.length === 0
+                  ? "Nothing had been found yet."
+                  : `${leads.length} lead${leads.length !== 1 ? "s" : ""} ${leads.length === 1 ? "was" : "were"} found. At most ${stoppedReachedBoard} reached the board — a stopped run never gets the database's final count, so open the board to see what is there.`}
+                {persistFailures > 0 && ` ${persistFailures} could not be saved and ${persistFailures === 1 ? "is" : "are"} not on the board.`}
+              </div>
+            )}
+
             {leads.length > 0 && (
               <div className="flex items-center justify-between mb-2">
                 <div className="text-sm font-semibold">{leads.length} lead{leads.length !== 1 ? "s" : ""} found</div>
                 {done && saved === leads.length && (
-                  <a href="/board" className="text-xs" style={{ color: "var(--gold)" }}>Added to Prospects → View board</a>
+                  <Link href="/board" className="text-xs" style={{ color: "var(--gold)" }}>Added to Prospects → View board</Link>
                 )}
                 {done && saved < leads.length && (
                   <span className="text-xs" style={{ color: "var(--faint)" }}>
@@ -276,7 +294,7 @@ export default function AgentPage() {
           </div>
           <div className="space-y-1.5">
             {history.slice(0, 6).map((h) => (
-              <button key={h.id} onClick={() => setPrompt(h.prompt)} className="w-full text-left text-xs px-3 py-2 rounded-lg border flex items-center justify-between" style={{ background: "var(--surface)", borderColor: "var(--border)" }}>
+              <button key={h.id} onClick={() => controls.setDraft(h.prompt)} className="w-full text-left text-xs px-3 py-2 rounded-lg border flex items-center justify-between" style={{ background: "var(--surface)", borderColor: "var(--border)" }}>
                 <span className="truncate" style={{ color: "var(--text)" }}>{h.prompt}</span>
                 <span className="shrink-0 ml-3" style={{ color: "var(--faint)" }}>{h.result_count} leads · {h.created_by_name}</span>
               </button>
