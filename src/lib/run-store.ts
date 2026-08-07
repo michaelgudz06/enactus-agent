@@ -144,6 +144,15 @@ export function runHasWorkspace(state: RunState): boolean {
  * Once the run is done the `done` event's own count is authoritative and used
  * directly, so the number the student watched cannot end up disagreeing with
  * the number the run finished on.
+ *
+ * WHAT THIS CANNOT KNOW, and why it is an UPPER BOUND until `done` lands: it
+ * counts only the failures the stream reports, and the stream does not report
+ * all of them. `persistLead` returns `error: null` when the service-role key is
+ * missing, and the emit is guarded on that error, so a run against a project
+ * with no key writes nothing and reports no failure — this returns every lead
+ * found. A caller that can see the write channel is shut (the board has the
+ * warning from `/api/leads`) must not present this number, and a caller with no
+ * `done` event must not present it as confirmed.
  */
 export function runSavedToBoard(state: RunState): number {
   if (state.done) return state.saved;

@@ -4,10 +4,12 @@ import {
   applyEvent,
   createRunStore,
   initialRunState,
+  NOTHING_TO_RUN,
   RunState,
   runHasWorkspace,
   runSavedToBoard,
 } from "@/lib/run-store";
+import { NO_REFUSAL, refusalToShow } from "@/app/(app)/agent/page";
 import { AgentEvent, Lead } from "@/lib/types";
 
 // The run used to live in `useState` on the agent page, so navigating to the
@@ -622,5 +624,51 @@ describe("a request that never streams", () => {
 
     expect(store.getState().error).toBe("Failed to fetch");
     expect(store.getState().running).toBe(false);
+  });
+});
+
+// A refused second run is reported to the student, and the report must not
+// outlive the run that justified it: once the first run ends the Run button
+// works again, so "a search is already running" would be the opposite of the
+// truth. The message is derived from the refusal and the run state together
+// rather than cleared afterwards, so it cannot lag by a render.
+
+describe("a refusal shown above the composer", () => {
+  test("the already-running refusal disappears the moment the run ends", () => {
+    const refusal = { reason: ALREADY_RUNNING, whileRunning: true };
+
+    expect(refusalToShow(refusal, true)).toBe(ALREADY_RUNNING);
+    expect(refusalToShow(refusal, false)).toBe("");
+  });
+
+  test("a refusal earned with nothing running survives, because no run explains it", () => {
+    const refusal = { reason: NOTHING_TO_RUN, whileRunning: false };
+
+    expect(refusalToShow(refusal, false)).toBe(NOTHING_TO_RUN);
+  });
+
+  test("a started run shows nothing", () => {
+    expect(refusalToShow(NO_REFUSAL, true)).toBe("");
+    expect(refusalToShow(NO_REFUSAL, false)).toBe("");
+  });
+
+  test("the store still supplies both refusals it is asked about", () => {
+    const script = scriptedRun();
+    const store = createRunStore({ fetchImpl: script.fetchImpl });
+
+    const empty = store.start({ prompt: "   ", mode: "sponsor" });
+    expect(empty.started).toBe(false);
+    if (!empty.started) expect(refusalToShow({ reason: empty.reason, whileRunning: false }, false)).toBe(NOTHING_TO_RUN);
+
+    const first = store.start({ prompt: "catering", mode: "sponsor" });
+    expect(first.started).toBe(true);
+    const second = store.start({ prompt: "credit unions", mode: "sponsor" });
+    expect(second.started).toBe(false);
+    if (!second.started) {
+      const shown = { reason: second.reason, whileRunning: true };
+      expect(refusalToShow(shown, true)).toBe(ALREADY_RUNNING);
+      store.cancel();
+      expect(refusalToShow(shown, store.getState().running)).toBe("");
+    }
   });
 });

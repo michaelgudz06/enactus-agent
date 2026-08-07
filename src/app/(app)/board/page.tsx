@@ -169,6 +169,14 @@ export default function BoardPage() {
   // still going. It goes through the same ticket sequence as every other read,
   // which is what stops a tick mid-flight from landing out of order or over an
   // unsettled drag.
+  //
+  // KNOWN AND DEFERRED: this one effect serves three triggers — mount, a mode
+  // switch and `leadSignal` — and tags all three `auto`, so an unsettled
+  // mutation defers a mode-switch read too and the board sits under shimmer
+  // until the debt is paid. It self-heals through the owed read, and it is dead
+  // code today because `src/components/AppShell.tsx` hardcodes mode "sponsor".
+  // Telling the three triggers apart means restructuring this effect, which is
+  // out of scope for the navigation change; it was deferred, not missed.
   useEffect(() => {
     readLeads("auto").then(applyLeads);
     return () => reads.abandon();
@@ -246,11 +254,20 @@ export default function BoardPage() {
       {activity.running && (
         <div className="mx-5 mt-3 text-xs rounded-lg px-3 py-2 flex items-center gap-2 border" style={{ background: "rgba(245,200,66,.08)", borderColor: "rgba(245,200,66,.35)", color: "var(--text)" }}>
           <span className="dot-pulse" style={{ color: "var(--gold)" }}>●</span>
-          <span>
-            The agent is still searching{activity.savedToBoard > 0 ? ` — ${activity.savedToBoard} lead${activity.savedToBoard !== 1 ? "s" : ""} on the board so far` : ""}.{" "}
-            {activity.unsaved > 0 && `${activity.unsaved} lead${activity.unsaved !== 1 ? "s" : ""} could not be saved and ${activity.unsaved !== 1 ? "are" : "is"} not coming to the board. `}
-            New leads appear here as they are saved.
-          </span>
+          {/* Nothing can reach the board while the warning below is up, and the
+              run stream cannot tell that path apart: `persistLead` returns no
+              error when the service key is missing, so no `persist` status is
+              emitted and the derived count reads as every lead found. The board
+              knows better than the stream here, so it claims no number. */}
+          {warning ? (
+            <span>The agent is still searching.</span>
+          ) : (
+            <span>
+              The agent is still searching{activity.savedToBoard > 0 ? ` — ${activity.savedToBoard} lead${activity.savedToBoard !== 1 ? "s" : ""} on the board so far` : ""}.{" "}
+              {activity.unsaved > 0 && `${activity.unsaved} lead${activity.unsaved !== 1 ? "s" : ""} could not be saved and ${activity.unsaved !== 1 ? "are" : "is"} not coming to the board. `}
+              New leads appear here as they are saved.
+            </span>
+          )}
         </div>
       )}
 

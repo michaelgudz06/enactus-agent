@@ -5,7 +5,7 @@ import Link from "next/link";
 import { Sparkles, ArrowUp, Brain, History, Lightbulb, CircleDashed, CheckCircle2, AlertTriangle, Square } from "lucide-react";
 import { useApp } from "@/components/AppShell";
 import { useRunControls, useRunState } from "@/components/RunProvider";
-import { runHasWorkspace } from "@/lib/run-store";
+import { runHasWorkspace, runSavedToBoard } from "@/lib/run-store";
 import { Lead, SearchRow } from "@/lib/types";
 import LeadCard from "@/components/LeadCard";
 import EmailModal from "@/components/EmailModal";
@@ -22,6 +22,23 @@ const EXAMPLES_SALES = [
 ];
 
 /**
+ * A refusal the provider gave, and whether a run was in flight when it gave it.
+ * The pairing is what lets the message be derived rather than cleared later: a
+ * refusal earned by a run in flight ("a search is already running") is a claim
+ * about that run, so it stops being shown the moment the run ends and the Run
+ * button works again. A refusal earned with nothing running — an empty prompt —
+ * is about the prompt and stays until the next attempt.
+ */
+export type Refusal = { reason: string; whileRunning: boolean };
+
+export const NO_REFUSAL: Refusal = { reason: "", whileRunning: false };
+
+export function refusalToShow(refusal: Refusal, running: boolean): string {
+  if (refusal.whileRunning && !running) return "";
+  return refusal.reason;
+}
+
+/**
  * This page renders the run; it does not own it. Everything about the run in
  * flight lives in the provider mounted at the `(app)` layout, so leaving for the
  * board and coming back re-reads the same state rather than starting from a
@@ -31,13 +48,14 @@ export default function AgentPage() {
   const { mode } = useApp();
   const run = useRunState();
   const controls = useRunControls();
-  const { draft, answers, running, steps, reasoning, similar, clarify, leads, error, done, saved, cancelled } = run;
+  const { draft, answers, running, steps, reasoning, similar, clarify, leads, error, done, saved, cancelled, persistFailures } = run;
+  const stoppedReachedBoard = runSavedToBoard(run);
 
   // Local to this page: neither belongs to the run, and neither has to survive
   // the trip to the board.
   const [history, setHistory] = useState<SearchRow[]>([]);
   const [emailLead, setEmailLead] = useState<Lead | null>(null);
-  const [notice, setNotice] = useState("");
+  const [refusal, setRefusal] = useState<Refusal>(NO_REFUSAL);
   const reasonRef = useRef<HTMLDivElement>(null);
 
   const examples = mode === "sales" ? EXAMPLES_SALES : EXAMPLES_SPONSOR;
@@ -50,24 +68,21 @@ export default function AgentPage() {
     if (reasonRef.current) reasonRef.current.scrollTop = reasonRef.current.scrollHeight;
   }, [reasoning]);
 
-  // A refusal describes the run that was in flight when it was refused. Once
-  // that run ends the Run button works again, so leaving "a search is already
-  // running" on screen would tell the student the opposite of the truth. A
-  // refusal made while nothing was running — an empty prompt — is untouched,
-  // because `running` did not change.
-  useEffect(() => {
-    if (!running) setNotice("");
-  }, [running]);
+  // Derived, not cleared by an effect: the message and the condition it was true
+  // under are held together, so the render that re-enables the Run button is the
+  // same render that stops claiming a search is running. An effect would clear
+  // it a commit later, which is the shape this repo already removed once.
+  const notice = refusalToShow(refusal, running);
 
   // The provider is the gate on a second run, not this handler: it refuses
   // synchronously and says why, and the reason is shown rather than swallowed.
   function start(withAnswers?: string) {
     const outcome = controls.start({ prompt: draft, mode, answers: withAnswers });
-    setNotice(outcome.started ? "" : outcome.reason);
+    setRefusal(outcome.started ? NO_REFUSAL : { reason: outcome.reason, whileRunning: running });
   }
 
   function stop() {
-    setNotice("");
+    setRefusal(NO_REFUSAL);
     controls.cancel();
   }
 
@@ -185,11 +200,18 @@ export default function AgentPage() {
               </div>
             )}
 
-            {/* A stopped run keeps the leads it already found: they were written
-                to the board as they were found, not at the end. */}
+            {/* A stopped run keeps the leads it already found, because each was
+                written as it was found rather than at the end — but a stopped
+                run never receives the `done` event that says how many the
+                database accepted, so the count below is the most that can have
+                reached the board, not a confirmed total. */}
             {cancelled && (
               <div className="mb-3 rounded-xl border p-3 text-xs" style={{ background: "var(--surface)", borderColor: "var(--border)", color: "var(--muted)" }}>
-                Search stopped. {leads.length > 0 ? `The ${leads.length} lead${leads.length !== 1 ? "s" : ""} found so far ${leads.length === 1 ? "was" : "were"} already saved to the board.` : "Nothing had been found yet."}
+                Search stopped.{" "}
+                {leads.length === 0
+                  ? "Nothing had been found yet."
+                  : `${leads.length} lead${leads.length !== 1 ? "s" : ""} ${leads.length === 1 ? "was" : "were"} found. At most ${stoppedReachedBoard} reached the board — a stopped run never gets the database's final count, so open the board to see what is there.`}
+                {persistFailures > 0 && ` ${persistFailures} could not be saved and ${persistFailures === 1 ? "is" : "are"} not on the board.`}
               </div>
             )}
 
