@@ -202,8 +202,9 @@ new number in isolation. Full record: `/Users/test/firstmate/data/decisions/capt
   **An unknown headcount is never a kill and never a penalty** — absence may only penalise after a
   documented attempt to resolve it. 24 of the 25 seeded rows record no headcount, so a band that
   fired on absence would empty the board. `knownHeadcount` is the ONE place that decides what
-  headcount the code knows, and every reader goes through it: a recorded 0 or less is filler, not a
-  company below the floor, so it reads as unknown and the rewrite is announced on the size_band
+  headcount the code knows, and every reader goes through it: a recorded 0 or less is filler and a
+  non-finite value is a failed coercion (`Number("200+ employees")`), not a company below the floor
+  or one the gate may pass, so both read as unknown and the rewrite is announced on the size_band
   reason and the G_SIZE message rather than applied silently. Applicability is decided per SEGMENT before the
   headcount is read (`smbBandApplies`): a credit union or a foundation makes no size judgement,
   S1 makes none by design because prior sponsorship already answered it, and Vancity must survive
@@ -220,9 +221,13 @@ new number in isolation. Full record: `/Users/test/firstmate/data/decisions/capt
   with a non-zero `amount_high`: a $0 rung would value every advisory commitment on a
   no-cash-ask lead at zero, which is the same preference arriving through the knob.
 
-**Known gap, upstream of this layer:** nothing can supply `advisory_commitments` yet. The
-`sponsorship_type` column in `supabase-setup.sql` carries only `monetary` and `in_kind`, so 0 of
-25 seeded rows can record a mentor even though two describe one in prose.
+**Known gap, upstream of this layer:** nothing can supply `advisory_commitments` yet, and **this is
+not a schema gap — do not write a migration for it.** `sponsorship_type` in `supabase-setup.sql` is
+an untyped `text[]` with no CHECK, enum or domain, so it could already hold a mentor. What blocks
+one is the leads prompt in `src/lib/agent.ts`, which asks for an array subset of
+`["monetary","in_kind"]`, and the fact that no code maps a stored lead onto
+`CompanyFacts.advisory_commitments` at all. So 0 of 25 seeded rows can record a mentor even though
+two describe one in prose; the fix is prompt vocabulary plus a field mapping.
 
 ## Policy lives in `config/`, not in code
 

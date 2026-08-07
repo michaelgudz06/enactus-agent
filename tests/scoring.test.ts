@@ -2324,11 +2324,17 @@ describe("CAPTAIN'S RULING — small-to-medium is 5 to 250 employees", () => {
       ...over,
     });
 
-  /** Every shape an UNKNOWN headcount arrives in: never set, and the filler values 0 and below. */
+  /**
+   * Every shape an UNKNOWN headcount arrives in: never set, the filler values 0 and below, and the
+   * non-finite residue of a failed coercion — `Number("200+ employees")` is how the one seeded row
+   * that states a headcount would arrive here.
+   */
   const UNKNOWN_HEADCOUNTS: [string, Partial<CompanyFacts>][] = [
     ["never set", {}],
     ["recorded as 0", { headcount: 0 }],
     ["recorded as -1", { headcount: -1 }],
+    ["recorded as NaN", { headcount: Number("200+ employees") }],
+    ["recorded as Infinity", { headcount: Infinity }],
   ];
 
   it.each(UNKNOWN_HEADCOUNTS)(
@@ -2352,14 +2358,16 @@ describe("CAPTAIN'S RULING — small-to-medium is 5 to 250 employees", () => {
     },
   );
 
-  it("reads a RECORDED headcount of 0 or less as unknown, scoring it exactly like a never-set one", () => {
+  it("reads an UNUSABLE recorded headcount as unknown, scoring it exactly like a never-set one", () => {
     // A real one-person business is 1, not 0; 0 is what a scraper or a model emits for a field it
     // could not fill. Trusting it fires the 5-person floor on filler and deletes exactly the small
-    // local businesses the absence rule exists to protect. Asserted against the never-set row
+    // local businesses the absence rule exists to protect. A non-finite value is worse in the other
+    // direction: it loses every comparison, so it is neither below the floor nor above the ceiling
+    // and G_SIZE would return `pass` on evidence nobody has. Asserted against the never-set row
     // rather than against numbers, so retuning any weight cannot make this pass vacuously.
     const unset = scoreCompany(bakery(), config, { lists, now: NOW });
 
-    for (const filler of [0, -1, -250]) {
+    for (const filler of [0, -1, -250, Number("200+ employees"), Infinity, -Infinity]) {
       const r = scoreCompany(bakery({ headcount: filler }), config, { lists, now: NOW });
       expect(r.segment, `${filler}`).toBe(unset.segment);
       expect(r.fit.score, `${filler}`).toBe(unset.fit.score);
@@ -2385,13 +2393,20 @@ describe("CAPTAIN'S RULING — small-to-medium is 5 to 250 employees", () => {
       r.gates.find((g) => g.gate === "G_SIZE")?.message ?? "";
 
     const unset = scoreCompany(bakery(), config, { lists, now: NOW });
-    const zero = scoreCompany(bakery({ headcount: 0 }), config, { lists, now: NOW });
 
-    expect(basisOf(zero)).not.toBe(basisOf(unset));
-    expect(gateOf(zero)).not.toBe(gateOf(unset));
-    for (const said of [basisOf(zero), gateOf(zero)]) {
-      expect(said).toContain("A headcount of 0 was RECEIVED and is read as UNKNOWN");
-      expect(said).toContain("filler");
+    for (const [filler, why] of [
+      [0, "filler"],
+      [Number("200+ employees"), "non-finite"],
+    ] as const) {
+      const r = scoreCompany(bakery({ headcount: filler }), config, { lists, now: NOW });
+      expect(basisOf(r), `${filler}`).not.toBe(basisOf(unset));
+      expect(gateOf(r), `${filler}`).not.toBe(gateOf(unset));
+      for (const said of [basisOf(r), gateOf(r)]) {
+        expect(said, `${filler}`).toContain(
+          `A headcount of ${filler} was RECEIVED and is read as UNKNOWN`,
+        );
+        expect(said, `${filler}`).toContain(why);
+      }
     }
     // The never-set row says nothing of the kind, because nothing was received.
     expect(basisOf(unset)).not.toContain("RECEIVED");
@@ -2818,10 +2833,11 @@ describe("CAPTAIN'S RULING — a mentor or project advisor is worth the same as 
  *
  *  - `headcount`. One row out of 25 states a number anywhere ("200+ employees", Safe Software)
  *    and it is in the description prose, not a column. Every other row is UNKNOWN.
- *  - `advisory_commitments`. The `sponsorship_type` column carries only `monetary` and `in_kind`;
- *    there is no value it could take that would record a mentor. Two rows describe advisory
- *    capacity in prose (Superpilot's SFU advisory-board seat, Second Savour's "mentor sessions")
- *    and neither can be stored.
+ *  - `advisory_commitments`. Not for a schema reason: `sponsorship_type` is an untyped `text[]`
+ *    and could hold a mentor today. The leads prompt in src/lib/agent.ts asks for a subset of
+ *    `monetary` / `in_kind`, and nothing maps a stored lead onto `advisory_commitments` at all, so
+ *    no seeded row carries one. Two rows describe advisory capacity in prose (Superpilot's SFU
+ *    advisory-board seat, Second Savour's "mentor sessions") and neither reaches this field.
  *
  * `relationship_tier` stays `cold` for every row. The seed's `connection_type` records how the
  * company relates to SFU — a JDC West sponsorship, an alumnus founder, an ecosystem funder — not
@@ -2981,8 +2997,10 @@ describe("the corpus proof — the SMB band on the club's own 25 seeded rows", (
 
 describe("the corpus proof — advisory parity on the club's own 25 seeded rows", () => {
   it("FINDING: not one seeded row CAN record advisory capacity, so the objective is inapplicable across the corpus", () => {
-    // `sponsorship_type` in supabase-setup.sql carries only `monetary` and `in_kind`. There is no
-    // value that records a mentor, which is why this measures zero rather than a small number.
+    // Nothing upstream can supply the field: the leads prompt in src/lib/agent.ts asks for a
+    // subset of `monetary` / `in_kind`, and no code maps a stored lead onto `advisory_commitments`.
+    // `sponsorship_type` itself is an untyped `text[]`, so this is a prompt-and-mapping gap rather
+    // than a schema one — which is why this measures zero rather than a small number.
     for (const name of SEEDED) {
       const r = scoreCompany(seedRow(name), config, { lists, now: NOW });
       expect(r.objectives.advisory_capacity.applicable, name).toBe(false);

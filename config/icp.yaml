@@ -81,9 +81,11 @@ geography:
 #
 # A RECORDED HEADCOUNT OF 0 OR LESS COUNTS AS UNKNOWN, not as a company below the floor. A real
 # one-person business is 1, not 0; 0 is what a scraper or a model emits for a field it could not
-# fill. The rewrite is never silent — the lead's size_band reason and its G_SIZE gate message both
-# say the value arrived and was read as unknown. `knownHeadcount` in src/lib/scoring.ts is the one
-# place that decides this, and every reader of these two numbers goes through it.
+# fill. A NON-FINITE value counts as unknown too — that is what a failed coercion leaves behind,
+# and the one seeded row that states a headcount states it as the prose "200+ employees". The
+# rewrite is never silent — the lead's size_band reason and its G_SIZE gate message both say the
+# value arrived and was read as unknown. `knownHeadcount` in src/lib/scoring.ts is the one place
+# that decides this, and every reader of these two numbers goes through it.
 #
 # The band is the DEFAULT ENVELOPE for the per-segment bands under `segments:`. It never applies
 # to a segment that makes no size judgement at all (S1 by design — see its block below — S8 scores

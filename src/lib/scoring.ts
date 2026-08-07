@@ -119,8 +119,9 @@ export interface CompanyFacts {
    * ABSENT MEANS UNKNOWN, NEVER SMALL AND NEVER LARGE. No free source publishes headcount for BC
    * micro-businesses and 24 of the 25 seeded rows carry none, so no reader of this field touches
    * it directly: every one goes through `knownHeadcount`, which is the single place that decides
-   * what the code actually knows. Absence may only penalise after a documented attempt to resolve
-   * it; a merely-missing headcount costs nothing anywhere.
+   * what the code actually knows and reads 0, a negative and a non-finite value as unknown too.
+   * Absence may only penalise after a documented attempt to resolve it; a merely-missing headcount
+   * costs nothing anywhere.
    */
   headcount?: number | null;
   /**
@@ -224,30 +225,42 @@ export interface CompanyFacts {
  * unsafe silently deletes real small local businesses, which are the leads the captain most wants
  * and the precise harm the absence rule was written to prevent.
  *
- * THE REWRITE IS NEVER SILENT. `received` carries the non-positive number the field arrived with,
- * so a row that was filled with filler stays distinguishable on the evidence trail from a row
- * where nothing was ever recorded — the same reason every other model-output repair in this
- * project is announced. It is carried in the strings that already answer "why is this score what
- * it is" (the size_band `basis` and the G_SIZE `message`) rather than as a new field on
- * `ScoreResult`, because a computed-then-discarded signal is its own defect class.
+ * A NON-FINITE HEADCOUNT IS READ AS UNKNOWN FOR THE SAME REASON, and it is the likelier arrival:
+ * the one seeded row that states a headcount states it as the prose "200+ employees", so a
+ * research step doing `Number("200+")` produces NaN. Left as known, NaN loses every comparison —
+ * so it is neither below the floor nor above the ceiling, and G_SIZE returns `pass` asserting
+ * evidence nobody has. That is the failure this whole helper exists to close, so it is closed
+ * HERE and nowhere else.
+ *
+ * THE REWRITE IS NEVER SILENT. `received` carries the unusable number the field arrived with, so
+ * a row that was filled with filler stays distinguishable on the evidence trail from a row where
+ * nothing was ever recorded — the same reason every other model-output repair in this project is
+ * announced. It is carried in the strings that already answer "why is this score what it is" (the
+ * size_band `basis` and the G_SIZE `message`) rather than as a new field on `ScoreResult`,
+ * because a computed-then-discarded signal is its own defect class.
  */
 export function knownHeadcount(c: Pick<CompanyFacts, "headcount">): {
   /** The headcount the code knows, or `null` when nothing usable arrived. */
   value: number | null;
-  /** The non-positive value the field arrived carrying, or `null` when it was never set. */
+  /** The unusable value the field arrived carrying, or `null` when it was never set. */
   received: number | null;
 } {
   if (c.headcount == null) return { value: null, received: null };
-  if (c.headcount <= 0) return { value: null, received: c.headcount };
+  if (!Number.isFinite(c.headcount) || c.headcount <= 0) {
+    return { value: null, received: c.headcount };
+  }
   return { value: c.headcount, received: null };
 }
 
 /** The one sentence that explains a rewritten headcount, so the gate and the score say it alike. */
 function fillerNote(received: number | null): string {
-  return received == null
-    ? ""
-    : `. A headcount of ${received} was RECEIVED and is read as UNKNOWN: 0 or less is filler from ` +
-        `a scraper or a model, never a measurement — a sole proprietor is 1, not 0`;
+  if (received == null) return "";
+  const why = Number.isFinite(received)
+    ? `0 or less is filler from a scraper or a model, never a measurement — a sole proprietor is ` +
+      `1, not 0`
+    : `a non-finite value is not a measurement — it is what a failed coercion leaves behind, and ` +
+      `the one seeded row that states a headcount states it as the prose "200+ employees"`;
+  return `. A headcount of ${received} was RECEIVED and is read as UNKNOWN: ${why}`;
 }
 
 export interface SegmentResult {
