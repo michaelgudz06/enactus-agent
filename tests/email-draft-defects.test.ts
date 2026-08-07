@@ -25,9 +25,12 @@ vi.mock("@/lib/supabase", () => {
     select: () => builder,
     eq: () => builder,
     insert: () => builder,
+    order: () => builder,
+    range: () => builder,
     single,
-    // The spend read is awaited without `.single()`, so the builder has to
-    // settle to an empty, error-free result: a month with nothing spent in it.
+    // The spend read is awaited a page at a time without `.single()`, so the
+    // builder has to settle to an empty, error-free result: a month with
+    // nothing spent in it, and no further page to read.
     then: (resolve: (v: unknown) => unknown) => Promise.resolve({ data: [], error: null }).then(resolve),
   };
   return {

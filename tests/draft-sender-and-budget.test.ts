@@ -25,6 +25,9 @@ vi.mock("@/lib/llm", async (orig) => ({
 vi.mock("@/lib/supabase", async (orig) => {
   const actual = await orig<typeof import("@/lib/supabase")>();
   const table = (name: string) => {
+    // The spend read is paged: the month's one row is on the first page and
+    // every page after it comes back empty, which is where the read stops.
+    let offset = 0;
     const api = {
       insert(row: Record<string, unknown>) {
         if (name === actual.ACTIVITY) db.logged.push(row);
@@ -32,10 +35,17 @@ vi.mock("@/lib/supabase", async (orig) => {
       },
       select: () => api,
       eq: () => api,
+      order: () => api,
+      range(start: number) {
+        offset = start;
+        return api;
+      },
       single: async () => ({ data: name === actual.LEADS ? LEAD : { id: "draft-1" }, error: null }),
       then: (resolve: (v: unknown) => unknown) =>
         Promise.resolve(
-          name === actual.SPEND ? { data: [{ cost_usd: db.spentUsd }], error: null } : { data: null, error: null }
+          name === actual.SPEND && offset === 0
+            ? { data: [{ cost_usd: db.spentUsd }], error: null }
+            : { data: null, error: null }
         ).then(resolve),
     };
     return api;

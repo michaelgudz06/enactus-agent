@@ -113,6 +113,34 @@ describe("nothing secret reaches the log", () => {
     });
   }
 
+  // The type says primitives; a call site handing this a parsed request body is
+  // not bound by it, and a nested value is where a token or an email body would
+  // ride in unread. The scrub is the enforcement, so it has to hold at runtime.
+  test("redacts a nested object rather than writing it through", async () => {
+    const patch = { note: "looks fine", authorization: "Bearer sk-or-v1-abcdefabcdef" };
+
+    await logActivity({
+      actor: "Nikita",
+      action: "lead_updated",
+      subject: "lead",
+      detail: { patch } as unknown as Parameters<typeof logActivity>[0]["detail"],
+    });
+
+    const written = db.rows[0].detail as Record<string, unknown>;
+    expect(written.patch).toBe(REDACTED);
+    expect(JSON.stringify(written)).not.toContain("sk-or-v1");
+  });
+
+  test("redacts an array, a function and an undefined value the same way", () => {
+    const scrubbed = scrubDetail({
+      tags: ["one", "two"],
+      later: () => "hi",
+      missing: undefined,
+    } as unknown as Parameters<typeof scrubDetail>[0]);
+
+    expect(scrubbed).toEqual({ tags: REDACTED, later: REDACTED, missing: REDACTED });
+  });
+
   // An email body under a harmless key is still an email body.
   test("redacts anything long enough to be prose", async () => {
     const paragraph = "Hi Jessica, ".repeat(20);

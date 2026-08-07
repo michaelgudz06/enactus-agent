@@ -10,12 +10,20 @@ const db = vi.hoisted(() => ({
   // Supabase reports a rejected insert in `error` rather than by throwing, so
   // this is the shape a real broken ledger write arrives in.
   writeFails: null as string | null,
+  // A hosted project answers with at most `db-max-rows` rows however many were
+  // asked for, and does not say that it truncated.
+  maxRows: 1000,
+  // A table that never ends: every page comes back full, so no read of it can
+  // ever be complete.
+  endless: false,
   hasKey: true,
 }));
 
 vi.mock("@/lib/supabase", async (orig) => {
   const actual = await orig<typeof import("@/lib/supabase")>();
   const table = (name: string) => {
+    let from = 0;
+    let to = Number.MAX_SAFE_INTEGER;
     const api = {
       insert(row: Record<string, unknown>) {
         if (db.writeFails) return Promise.resolve({ data: null, error: { message: db.writeFails } });
@@ -24,10 +32,22 @@ vi.mock("@/lib/supabase", async (orig) => {
       },
       select: () => api,
       eq: () => api,
-      then: (resolve: (v: unknown) => unknown) =>
-        Promise.resolve(
-          db.readFails ? { data: null, error: { message: db.readFails } } : { data: db.rows, error: null }
-        ).then(resolve),
+      order: () => api,
+      range(start: number, end: number) {
+        from = start;
+        to = end;
+        return api;
+      },
+      then: (resolve: (v: unknown) => unknown) => {
+        if (db.readFails) {
+          return Promise.resolve({ data: null, error: { message: db.readFails } }).then(resolve);
+        }
+        const size = Math.min(to - from + 1, db.maxRows);
+        const page = db.endless
+          ? Array.from({ length: size }, () => ({ cost_usd: 0.000001 }))
+          : db.rows.slice(from, from + size);
+        return Promise.resolve({ data: page, error: null }).then(resolve);
+      },
     };
     return api;
   };
@@ -45,6 +65,8 @@ beforeEach(() => {
   db.inserted = [];
   db.readFails = null;
   db.writeFails = null;
+  db.maxRows = 1000;
+  db.endless = false;
   db.hasKey = true;
   budget.resetSpendCacheForTests();
   vi.stubEnv("OPENROUTER_API_KEY", "test-key");
@@ -355,6 +377,64 @@ describe("the ledger", () => {
     const status = await budget.budgetStatus(0.03);
 
     expect(status.error).toContain("connection reset");
+    expect(status.runsRemaining).toBe(0);
+  });
+});
+
+// A month is one ledger row per paid call, so a busy month is thousands of them
+// while a single select comes back capped at the project's row limit and says
+// nothing about what it left behind. A total that is silently short relaxes the
+// cap without telling anybody, which is the failure this module exists against.
+describe("a month longer than one page of ledger", () => {
+  /** `count` charges of `each` USD on file. */
+  function ledgerOf(count: number, each: number) {
+    db.rows = Array.from({ length: count }, () => ({ cost_usd: each }));
+    budget.resetSpendCacheForTests();
+  }
+
+  test("counts every charge in the month, not just the first page", async () => {
+    ledgerOf(2500, 0.001);
+
+    expect(await budget.monthToDateUsd()).toBeCloseTo(2.5, 6);
+  });
+
+  test("counts the whole month however few rows a page comes back with", async () => {
+    db.maxRows = 100;
+    ledgerOf(2500, 0.001);
+
+    expect(await budget.monthToDateUsd()).toBeCloseTo(2.5, 6);
+  });
+
+  // The rows past the first page are the ones that took this month over the cap.
+  test("stops a run that only the unread pages had already paid past", async () => {
+    ledgerOf(2500, 0.01);
+
+    const error = await refusalFrom(budget.assertHeadroom(0.01, "a full agent run"));
+
+    expect(error).toBeInstanceOf(budget.BudgetExceededError);
+    expect(error.message).toContain("The cap is $20.00 CAD");
+  });
+
+  // A read that cannot be finished is the same unknown as one that failed
+  // outright, and unknown is spent.
+  test("refuses rather than returning a short total when the read cannot be completed", async () => {
+    db.endless = true;
+    budget.resetSpendCacheForTests();
+
+    const error = await refusalFrom(budget.assertHeadroom(0.01, "a call"));
+
+    expect(error).toBeInstanceOf(budget.BudgetExceededError);
+    expect(error.message).toContain("could not be read in full");
+    expect(error.message).toContain("Nothing ran");
+  });
+
+  test("reports that read as unknown spend rather than as a month's total", async () => {
+    db.endless = true;
+    budget.resetSpendCacheForTests();
+
+    const status = await budget.budgetStatus(0.03);
+
+    expect(status.error).toContain("could not be read in full");
     expect(status.runsRemaining).toBe(0);
   });
 });

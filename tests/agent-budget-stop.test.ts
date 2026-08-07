@@ -18,16 +18,25 @@ vi.mock("node:dns", async () => (await import("./helpers/dns")).dnsModule());
 vi.mock("@/lib/supabase", async (orig) => {
   const actual = await orig<typeof import("@/lib/supabase")>();
   const table = (name: string) => {
+    // The spend read is paged, so the ledger's one row is on the first page and
+    // every page after it is empty -- the same shape a real month ends with.
+    let offset = 0;
     const api = {
       insert: () => api,
       select: () => api,
       eq: () => api,
       order: () => api,
+      range(start: number) {
+        offset = start;
+        return api;
+      },
       limit: async () => ({ data: [], error: null }),
       single: async () => ({ data: { id: "row-1" }, error: null }),
       then: (resolve: (v: unknown) => unknown) =>
         Promise.resolve(
-          name === actual.SPEND ? { data: [{ cost_usd: db.spentUsd }], error: null } : { data: [], error: null }
+          name === actual.SPEND && offset === 0
+            ? { data: [{ cost_usd: db.spentUsd }], error: null }
+            : { data: [], error: null }
         ).then(resolve),
     };
     return api;

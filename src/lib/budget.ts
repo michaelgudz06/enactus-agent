@@ -279,16 +279,43 @@ function pendingForMonth(month: string): number {
   return pendingUsd;
 }
 
+// PostgREST answers a select with at most `db-max-rows` rows -- 1,000 on a
+// hosted project -- and says nothing about the ones it left behind. The ledger
+// is append-only and a month holds one row per paid call, so a single select
+// stops being the month long before the cap is reached. It is therefore read a
+// page at a time, ordered so the pages stitch together, until one comes back
+// empty.
+//
+// The bound is there so a pathological table cannot spin forever, and hitting
+// it is an unreadable ledger rather than a total: a sum that is silently short
+// relaxes the cap without telling anyone, which is the one failure this module
+// exists to prevent. Unknown spend is spent.
+const LEDGER_PAGE_ROWS = 1000;
+const LEDGER_MAX_PAGES = 200;
+
 async function loadMonthToDateUsd(month: string): Promise<number> {
   if (!hasServiceKey()) return 0;
-  const { data, error } = await supabaseAdmin.from(SPEND).select("cost_usd").eq("billing_month", month);
-  if (error) throw new Error(error.message);
   let total = 0;
-  for (const row of (data ?? []) as { cost_usd: number | string | null }[]) {
-    const value = Number(row.cost_usd ?? 0);
-    if (Number.isFinite(value)) total += value;
+  let read = 0;
+  for (let page = 0; page < LEDGER_MAX_PAGES; page++) {
+    const { data, error } = await supabaseAdmin
+      .from(SPEND)
+      .select("cost_usd")
+      .eq("billing_month", month)
+      .order("id", { ascending: true })
+      .range(read, read + LEDGER_PAGE_ROWS - 1);
+    if (error) throw new Error(error.message);
+    const rows = (data ?? []) as { cost_usd: number | string | null }[];
+    for (const row of rows) {
+      const value = Number(row.cost_usd ?? 0);
+      if (Number.isFinite(value)) total += value;
+    }
+    if (rows.length === 0) return total;
+    read += rows.length;
   }
-  return total;
+  throw new Error(
+    `this month's ledger did not end after ${read} rows, so what has been spent could not be read in full`
+  );
 }
 
 /**

@@ -14,7 +14,8 @@
 // labels -- a lead id, a company name, which fields were edited -- and never a
 // key, a token, a session cookie or the body of an email. `scrubDetail` below
 // is the backstop that enforces it rather than trusting each call site to
-// remember, and it is the reason `detail` may only hold primitives.
+// remember, and it is what holds `detail` to primitives at runtime rather than
+// only in the type.
 
 import { supabaseAdmin, ACTIVITY, hasServiceKey } from "./supabase";
 
@@ -79,8 +80,16 @@ export function scrubDetail(detail: ActivityDetail | undefined): ActivityDetail 
       safe[key] = REDACTED;
       continue;
     }
-    if (typeof value !== "string") {
+    // The type says primitives; a call site handing this a parsed request body
+    // is not bound by the type. Anything that is not genuinely a primitive is
+    // redacted rather than written through, because a nested value is exactly
+    // where a token or an email body would ride in unread.
+    if (value === null || typeof value === "number" || typeof value === "boolean") {
       safe[key] = value;
+      continue;
+    }
+    if (typeof value !== "string") {
+      safe[key] = REDACTED;
       continue;
     }
     if (value.length > MAX_VALUE_LENGTH || SECRET_VALUE.some((p) => p.test(value))) {

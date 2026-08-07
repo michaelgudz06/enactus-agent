@@ -1,8 +1,9 @@
 import { describe, test, expect } from "vitest";
-import { budgetLine } from "@/app/(app)/agent/page";
+import { budgetLine } from "@/lib/budget-line";
 
-// What a student reads before pressing run. Kept a plain function so the
-// wording is testable without a browser, the same way `draftIsLoading` is.
+// What a student reads before pressing run. Kept a plain function in a plain
+// module so the wording is testable without a browser, and so the page it is
+// rendered from exports only what Next.js expects a page to export.
 
 function status(over: Partial<Parameters<typeof budgetLine>[0]> = {}) {
   return {

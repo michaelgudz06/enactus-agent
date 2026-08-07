@@ -4,50 +4,11 @@ import { useEffect, useRef, useState } from "react";
 import { Sparkles, ArrowUp, Brain, History, Lightbulb, CircleDashed, CheckCircle2, AlertTriangle, Wallet } from "lucide-react";
 import { useApp } from "@/components/AppShell";
 import { AgentEvent, Lead, SearchRow } from "@/lib/types";
+import { Budget, budgetLine } from "@/lib/budget-line";
 import LeadCard from "@/components/LeadCard";
 import EmailModal from "@/components/EmailModal";
 
 interface Step { step: string; message: string; }
-
-/** What `/api/budget` reports. `null` while it is loading or if it failed. */
-interface Budget {
-  monthLabel: string;
-  capCad: number;
-  spentCad: number;
-  remainingCad: number;
-  runsRemaining: number;
-  persisted: boolean;
-  error: string | null;
-  ledgerWriteError: string | null;
-}
-
-/**
- * The budget line, in the words a student needs. Kept out of the component so
- * the wording is testable on its own.
- *
- * A budget that could not be read says so rather than showing a number nobody
- * should act on, and the run button stays enabled either way -- the server holds
- * the cap, and a UI that blocks on its own guess would be a guard that fires
- * early.
- *
- * A ledger that cannot be written is the same unknown one step later: the spend
- * happened, the row did not, and the number on screen is only what this server
- * has counted since it started. Saying so is the point -- a figure that looks
- * like a live cap and is not is the failure this file's rules exist to prevent.
- */
-export function budgetLine(budget: Budget): string {
-  if (budget.error) return `Monthly API budget: could not be read. ${budget.error}`;
-  const spend = `$${budget.spentCad.toFixed(2)} of $${budget.capCad.toFixed(2)} CAD used in ${budget.monthLabel}`;
-  const line =
-    budget.runsRemaining < 1
-      ? `${spend}. Not enough left for another run. It resets at the start of next month.`
-      : `${spend}, about ${budget.runsRemaining} run${budget.runsRemaining === 1 ? "" : "s"} left`;
-  if (!budget.ledgerWriteError) return line;
-  return (
-    `${line}${line.endsWith(".") ? "" : "."} Spend is not being recorded: ${budget.ledgerWriteError}. ` +
-    `This counts only what this server has spent since it started, so the cap is not being held across restarts.`
-  );
-}
 
 const EXAMPLES_SPONSOR = [
   "Catering & food companies in Burnaby that could sponsor student events",
