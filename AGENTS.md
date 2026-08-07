@@ -201,7 +201,10 @@ new number in isolation. Full record: `/Users/test/firstmate/data/decisions/capt
   per-segment bands and supplies the enterprise line the §4 ladder used to carry as a literal 500.
   **An unknown headcount is never a kill and never a penalty** — absence may only penalise after a
   documented attempt to resolve it. 24 of the 25 seeded rows record no headcount, so a band that
-  fired on absence would empty the board. Applicability is decided per SEGMENT before the
+  fired on absence would empty the board. `knownHeadcount` is the ONE place that decides what
+  headcount the code knows, and every reader goes through it: a recorded 0 or less is filler, not a
+  company below the floor, so it reads as unknown and the rewrite is announced on the size_band
+  reason and the G_SIZE message rather than applied silently. Applicability is decided per SEGMENT before the
   headcount is read (`smbBandApplies`): a credit union or a foundation makes no size judgement,
   S1 makes none by design because prior sponsorship already answered it, and Vancity must survive
   it. **A segment is never judged out of band for a headcount its own declared band reaches** —

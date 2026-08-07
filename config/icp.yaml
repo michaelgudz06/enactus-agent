@@ -73,11 +73,17 @@ geography:
 #                         its reasoning are unchanged. See ENTERPRISE FLOOR in src/lib/scoring.ts.
 #
 # ⚠ THE ABSENCE RULE GOVERNS THIS BLOCK. Headcount is frequently unknown or stale on a small
-# business — 0 of the 25 seeded rows record one, and no free source publishes headcount for BC
-# micro-businesses. An UNKNOWN headcount is NEVER a kill and NEVER a penalty on its own: absence
-# may only penalise after a documented attempt to resolve it, never on a value that is merely
-# missing. Every reader of these two numbers tests `headcount != null` first. Getting this wrong
-# silently deletes exactly the small local businesses the club most wants.
+# business — 24 of the 25 seeded rows record none (only Safe Software states a number, "200+
+# employees", and it is in band), and no free source publishes headcount for BC micro-businesses.
+# An UNKNOWN headcount is NEVER a kill and NEVER a penalty on its own: absence may only penalise
+# after a documented attempt to resolve it, never on a value that is merely missing. Getting this
+# wrong silently deletes exactly the small local businesses the club most wants.
+#
+# A RECORDED HEADCOUNT OF 0 OR LESS COUNTS AS UNKNOWN, not as a company below the floor. A real
+# one-person business is 1, not 0; 0 is what a scraper or a model emits for a field it could not
+# fill. The rewrite is never silent — the lead's size_band reason and its G_SIZE gate message both
+# say the value arrived and was read as unknown. `knownHeadcount` in src/lib/scoring.ts is the one
+# place that decides this, and every reader of these two numbers goes through it.
 #
 # The band is the DEFAULT ENVELOPE for the per-segment bands under `segments:`. It never applies
 # to a segment that makes no size judgement at all (S1 by design — see its block below — S8 scores

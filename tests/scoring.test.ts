@@ -379,9 +379,15 @@ describe("§4 ambiguity 2 · franchise location or head office?", () => {
     expect(r.segment).toBe("S8");
   });
 
-  it("but S15 DOES win once headcount is actually known to exceed 500", () => {
+  it("but S15 DOES win once headcount is known to exceed the configured SMB band", () => {
+    // One person above `smb_band.max_headcount`, never a number far above it: the report's old
+    // 500-person line would leave a loose assertion green, and the captain superseded that number.
     const r = assignSegment(
-      company({ legal_name: "Red Bull", has_structured_brand_programme: true, headcount: 5000 }),
+      company({
+        legal_name: "Red Bull",
+        has_structured_brand_programme: true,
+        headcount: config.smb_band.max_headcount + 1,
+      }),
       config,
       { now: NOW },
     );
@@ -2308,29 +2314,88 @@ describe("CAPTAIN'S RULING — small-to-medium is 5 to 250 employees", () => {
   });
 
   // ── The part that matters most ────────────────────────────────────────────
-  it("NEVER reaches a row whose headcount is merely missing, whatever the band says", () => {
-    const unknown = company({
+  const bakery = (over: Partial<CompanyFacts> = {}) =>
+    company({
       legal_name: "A Local Bakery",
       has_consumer_storefront: true,
       municipality: "Burnaby",
       region: "BC",
       country: "CA",
+      ...over,
     });
-    const under = (cfg: IcpConfig) => scoreCompany(unknown, cfg, { lists, now: NOW });
 
-    for (const cfg of [PRE_RULING, HOSTILE_BAND, withBand(5, 250), withBand(1, 1)]) {
-      const r = under(cfg);
-      expect(r.segment).toBe("S2");
-      expect(r.fit.score).toBe(under(config).fit.score);
-      expect(r.affinity.score).toBe(under(config).affinity.score);
-      expect(r.access.score).toBe(under(config).access.score);
-      // The gate cannot evaluate it, and `cannot_evaluate` carries effect `none`.
-      const g = r.gates.find((x) => x.gate === "G_SIZE");
-      expect(g?.verdict).toBe("cannot_evaluate");
-      expect(g?.effect).toBe("none");
-      expect(r.blocking_gates).not.toContain("G_SIZE");
-      expect(r.missing_inputs).toContain("headcount");
+  /** Every shape an UNKNOWN headcount arrives in: never set, and the filler values 0 and below. */
+  const UNKNOWN_HEADCOUNTS: [string, Partial<CompanyFacts>][] = [
+    ["never set", {}],
+    ["recorded as 0", { headcount: 0 }],
+    ["recorded as -1", { headcount: -1 }],
+  ];
+
+  it.each(UNKNOWN_HEADCOUNTS)(
+    "NEVER reaches a row whose headcount is unknown (%s), whatever the band says",
+    (label, over) => {
+      const under = (cfg: IcpConfig) => scoreCompany(bakery(over), cfg, { lists, now: NOW });
+
+      for (const cfg of [PRE_RULING, HOSTILE_BAND, withBand(5, 250), withBand(1, 1)]) {
+        const r = under(cfg);
+        expect(r.segment, label).toBe("S2");
+        expect(r.fit.score, label).toBe(under(config).fit.score);
+        expect(r.affinity.score, label).toBe(under(config).affinity.score);
+        expect(r.access.score, label).toBe(under(config).access.score);
+        // The gate cannot evaluate it, and `cannot_evaluate` carries effect `none`.
+        const g = r.gates.find((x) => x.gate === "G_SIZE");
+        expect(g?.verdict, label).toBe("cannot_evaluate");
+        expect(g?.effect, label).toBe("none");
+        expect(r.blocking_gates, label).not.toContain("G_SIZE");
+        expect(r.missing_inputs, label).toContain("headcount");
+      }
+    },
+  );
+
+  it("reads a RECORDED headcount of 0 or less as unknown, scoring it exactly like a never-set one", () => {
+    // A real one-person business is 1, not 0; 0 is what a scraper or a model emits for a field it
+    // could not fill. Trusting it fires the 5-person floor on filler and deletes exactly the small
+    // local businesses the absence rule exists to protect. Asserted against the never-set row
+    // rather than against numbers, so retuning any weight cannot make this pass vacuously.
+    const unset = scoreCompany(bakery(), config, { lists, now: NOW });
+
+    for (const filler of [0, -1, -250]) {
+      const r = scoreCompany(bakery({ headcount: filler }), config, { lists, now: NOW });
+      expect(r.segment, `${filler}`).toBe(unset.segment);
+      expect(r.fit.score, `${filler}`).toBe(unset.fit.score);
+      expect(sizePoints(r.fit), `${filler}`).toBe(sizePoints(unset.fit));
+      expect(r.affinity.score, `${filler}`).toBe(unset.affinity.score);
+      expect(r.access.score, `${filler}`).toBe(unset.access.score);
+      expect(r.blocking_gates, `${filler}`).toEqual(unset.blocking_gates);
+      expect(r.objectives, `${filler}`).toEqual(unset.objectives);
+      expect(r.missing_inputs, `${filler}`).toContain("headcount");
+      // Not `fail` / `out_of_band: too_small`: the floor may not fire on a value nobody measured.
+      const g = (x: typeof r) => x.gates.find((y) => y.gate === "G_SIZE");
+      expect(g(r)?.verdict, `${filler}`).toBe(g(unset)?.verdict);
+      expect(g(r)?.effect, `${filler}`).toBe(g(unset)?.effect);
     }
+  });
+
+  it("but SAYS SO: the filler row scores the same as the never-set row and explains itself differently", () => {
+    // The two halves of the rule. A silent rewrite would teach nobody that the source is emitting
+    // filler, so the reason strings that already answer "why is this score what it is" carry it.
+    const basisOf = (r: ReturnType<typeof scoreCompany>) =>
+      r.fit.terms.find((t) => t.term === "size_band")?.basis ?? "";
+    const gateOf = (r: ReturnType<typeof scoreCompany>) =>
+      r.gates.find((g) => g.gate === "G_SIZE")?.message ?? "";
+
+    const unset = scoreCompany(bakery(), config, { lists, now: NOW });
+    const zero = scoreCompany(bakery({ headcount: 0 }), config, { lists, now: NOW });
+
+    expect(basisOf(zero)).not.toBe(basisOf(unset));
+    expect(gateOf(zero)).not.toBe(gateOf(unset));
+    for (const said of [basisOf(zero), gateOf(zero)]) {
+      expect(said).toContain("A headcount of 0 was RECEIVED and is read as UNKNOWN");
+      expect(said).toContain("filler");
+    }
+    // The never-set row says nothing of the kind, because nothing was received.
+    expect(basisOf(unset)).not.toContain("RECEIVED");
+    expect(gateOf(unset)).not.toContain("RECEIVED");
   });
 
   it("keeps the OrgBook SP/GP proxy, which is the only micro-business signal the club can get free", () => {

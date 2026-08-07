@@ -117,9 +117,10 @@ export interface CompanyFacts {
    * Employees. Read against the captain's 5–250 SMB band in config/icp.yaml.
    *
    * ABSENT MEANS UNKNOWN, NEVER SMALL AND NEVER LARGE. No free source publishes headcount for BC
-   * micro-businesses and 0 of the 25 seeded rows carry one, so every reader of this field tests
-   * `!= null` before the band is consulted at all. Absence may only penalise after a documented
-   * attempt to resolve it; a merely-missing headcount costs nothing anywhere.
+   * micro-businesses and 24 of the 25 seeded rows carry none, so no reader of this field touches
+   * it directly: every one goes through `knownHeadcount`, which is the single place that decides
+   * what the code actually knows. Absence may only penalise after a documented attempt to resolve
+   * it; a merely-missing headcount costs nothing anywhere.
    */
   headcount?: number | null;
   /**
@@ -206,6 +207,47 @@ export interface CompanyFacts {
    * on every evaluation so reopening the channel restores a real basis check.
    */
   email_channel_open?: boolean;
+}
+
+/**
+ * WHAT HEADCOUNT DOES THE CODE ACTUALLY KNOW?
+ *
+ * Stated ONCE, here, and read by every consumer of `CompanyFacts.headcount` — the enterprise rung
+ * in the §4 ladder, G_SIZE, and `scoreFit`'s size_band term — so the ladder, the gate and the
+ * score can never disagree about what arrived. A second normalisation somewhere downstream is the
+ * failure shape this codebase has closed repeatedly, one level higher each time.
+ *
+ * A HEADCOUNT OF 0 OR LESS IS READ AS UNKNOWN, NOT AS A KNOWN SUB-FLOOR VALUE. A genuinely
+ * zero-employee company is barely a category — a sole proprietor is 1, not 0 — while 0 is exactly
+ * what scrapers and models emit for a field they could not fill, so almost all the probability
+ * mass sits on "unknown". Failing safe costs a weighting on a company that may not exist; failing
+ * unsafe silently deletes real small local businesses, which are the leads the captain most wants
+ * and the precise harm the absence rule was written to prevent.
+ *
+ * THE REWRITE IS NEVER SILENT. `received` carries the non-positive number the field arrived with,
+ * so a row that was filled with filler stays distinguishable on the evidence trail from a row
+ * where nothing was ever recorded — the same reason every other model-output repair in this
+ * project is announced. It is carried in the strings that already answer "why is this score what
+ * it is" (the size_band `basis` and the G_SIZE `message`) rather than as a new field on
+ * `ScoreResult`, because a computed-then-discarded signal is its own defect class.
+ */
+export function knownHeadcount(c: Pick<CompanyFacts, "headcount">): {
+  /** The headcount the code knows, or `null` when nothing usable arrived. */
+  value: number | null;
+  /** The non-positive value the field arrived carrying, or `null` when it was never set. */
+  received: number | null;
+} {
+  if (c.headcount == null) return { value: null, received: null };
+  if (c.headcount <= 0) return { value: null, received: c.headcount };
+  return { value: c.headcount, received: null };
+}
+
+/** The one sentence that explains a rewritten headcount, so the gate and the score say it alike. */
+function fillerNote(received: number | null): string {
+  return received == null
+    ? ""
+    : `. A headcount of ${received} was RECEIVED and is read as UNKNOWN: 0 or less is filler from ` +
+        `a scraper or a model, never a measurement — a sole proprietor is 1, not 0`;
 }
 
 export interface SegmentResult {
@@ -322,10 +364,12 @@ function ladder(c: CompanyFacts, config: IcpConfig, now: Date): SegmentResult {
   }
 
   // ENTERPRISE FLOOR. The number is `smb_band.max_headcount`, never a literal here — see the
-  // captain supersession noted on `assignSegment`. A MISSING headcount cannot fire this rung:
+  // captain supersession noted on `assignSegment`. An UNKNOWN headcount cannot fire this rung, and
+  // what counts as known is `knownHeadcount`'s call rather than this rung's:
   // `is_national_enterprise` is the only other way in, and it is an observation, not an absence.
   const enterpriseFloor = config.smb_band.max_headcount;
-  if ((c.headcount != null && c.headcount > enterpriseFloor) || c.is_national_enterprise) {
+  const knownSize = knownHeadcount(c).value;
+  if ((knownSize != null && knownSize > enterpriseFloor) || c.is_national_enterprise) {
     return out(
       "S15",
       `headcount above ${enterpriseFloor} or a national enterprise — above the in-scope SMB band ` +
@@ -706,6 +750,7 @@ export function evaluateGates(
   // BEFORE the headcount is read, so an absent headcount can never be mistaken for an out-of-band
   // one. `reassign` is unchanged and still not `block`: this gate has never dropped a row.
   const { floor, ceiling } = effectiveSizeBounds(segment, config);
+  const { value: headcount, received: fillerHeadcount } = knownHeadcount(c);
   const bandNote = smbBandApplies(segment, config)
     ? ` (the segment's own ceiling bounded by the captain's ${config.smb_band.min_headcount}-${config.smb_band.max_headcount} SMB band)`
     : "";
@@ -714,11 +759,12 @@ export function evaluateGates(
       gate: "G_SIZE",
       verdict: "not_applicable",
       effect: "none",
-      message: seg
-        ? `segment ${seg} has no headcount ceiling, so the SMB band makes no size judgement here either`
-        : "no segment assigned",
+      message:
+        (seg
+          ? `segment ${seg} has no headcount ceiling, so the SMB band makes no size judgement here either`
+          : "no segment assigned") + fillerNote(fillerHeadcount),
     });
-  } else if (c.headcount == null) {
+  } else if (headcount == null) {
     out.push({
       gate: "G_SIZE",
       verdict: "cannot_evaluate",
@@ -726,32 +772,32 @@ export function evaluateGates(
       message:
         `no headcount is available, and no free source publishes headcount for BC micro-businesses. ` +
         `The ${ceiling}-person ceiling for ${seg}${bandNote} cannot be tested; absence of evidence ` +
-        `is never a kill and never a penalty`,
+        `is never a kill and never a penalty${fillerNote(fillerHeadcount)}`,
     });
-  } else if (floor != null && c.headcount < floor) {
+  } else if (floor != null && headcount < floor) {
     out.push({
       gate: "G_SIZE",
       verdict: "fail",
       effect: "reassign",
       message:
-        `out_of_band: too_small — headcount ${c.headcount} is below the ${floor}-person floor ` +
+        `out_of_band: too_small — headcount ${headcount} is below the ${floor}-person floor ` +
         `${seg} is judged against (the in-scope SMB band, lowered wherever the segment declares it ` +
         `reaches lower), which is too small to carry a sponsorship budget (CAPTAIN'S RULING ` +
         `2026-08-06). Reassign rather than drop`,
     });
-  } else if (ceiling != null && c.headcount > ceiling) {
+  } else if (ceiling != null && headcount > ceiling) {
     out.push({
       gate: "G_SIZE",
       verdict: "fail",
       effect: "reassign",
-      message: `killed: too_big — headcount ${c.headcount} exceeds the ${ceiling}-person ceiling for ${seg}${bandNote}. Reassign rather than drop`,
+      message: `killed: too_big — headcount ${headcount} exceeds the ${ceiling}-person ceiling for ${seg}${bandNote}. Reassign rather than drop`,
     });
   } else {
     out.push({
       gate: "G_SIZE",
       verdict: "pass",
       effect: "reassign",
-      message: `headcount ${c.headcount} is within the ${ceiling}-person ceiling for ${seg}${bandNote}`,
+      message: `headcount ${headcount} is within the ${ceiling}-person ceiling for ${seg}${bandNote}`,
     });
   }
 
@@ -1039,38 +1085,41 @@ export function scoreFit(
     basis: seg ? `matched ${seg} cleanly` : `no segment predicate matched (${segment})`,
   });
 
-  // size_band: full weight INSIDE the ideal band, half inside the ceiling but outside it.
+  // size_band: full weight INSIDE the ideal band, half inside the bounds but outside it, zero
+  // outside the bounds.
   //
-  // The captain's 5–250 SMB band is the OUTER ENVELOPE of both: a headcount outside it is outside
-  // the club's in-scope small-to-medium definition altogether, so it earns neither the full nor
-  // the half weight, whichever segment band it happens to sit in. Below the floor is treated
-  // exactly as above the ceiling — "too small to carry a sponsorship budget" is a fit statement,
-  // and it is a PENALTY on a known value, never a kill and never reachable from a missing one.
+  // The bounds are `effectiveSizeBounds`, where the captain's 5–250 SMB band is the DEFAULT
+  // ENVELOPE rather than an override: it narrows a segment from above and LOWERS it from below,
+  // and a segment is never judged out of band for a headcount its own declared band reaches. So an
+  // S6 row at a headcount of 1 keeps the FULL size weight while sitting outside 5–250, because S6
+  // declares `ideal_low: 1` and the floor is the `min` of the two. Where the band does bind, below
+  // the floor is treated exactly as above the ceiling — "too small to carry a sponsorship budget"
+  // is a fit statement, and it is a PENALTY on a KNOWN value, never a kill and never reachable
+  // from an unknown one. What counts as known is `knownHeadcount`'s call, not this term's.
   const cfgSeg = seg ? config.segments[seg] : null;
-  if (c.headcount != null && cfgSeg) {
+  const { value: headcount, received: fillerHeadcount } = knownHeadcount(c);
+  if (headcount != null && cfgSeg) {
     const bounds = effectiveSizeBounds(segment, config);
-    const belowFloor = bounds.floor != null && c.headcount < bounds.floor;
-    const aboveBandCeiling = bounds.ceiling != null && c.headcount > bounds.ceiling;
+    const belowFloor = bounds.floor != null && headcount < bounds.floor;
+    const aboveBandCeiling = bounds.ceiling != null && headcount > bounds.ceiling;
+    // Inside the bounds is the same statement as inside the segment's own ceiling: the bounds are
+    // never looser than the ceiling the segment declared, so there is no third state to narrate.
     const inSmbBand = !belowFloor && !aboveBandCeiling;
     const inIdeal =
       inSmbBand &&
-      (cfgSeg.ideal_low == null || c.headcount >= cfgSeg.ideal_low) &&
-      (cfgSeg.ideal_high == null || c.headcount <= cfgSeg.ideal_high);
-    const inCeiling =
-      inSmbBand && (cfgSeg.headcount_ceiling == null || c.headcount <= cfgSeg.headcount_ceiling);
+      (cfgSeg.ideal_low == null || headcount >= cfgSeg.ideal_low) &&
+      (cfgSeg.ideal_high == null || headcount <= cfgSeg.ideal_high);
     terms.push({
       term: "size_band",
-      points: inIdeal ? w.size_band : inCeiling ? w.size_band / 2 : 0,
+      points: inIdeal ? w.size_band : inSmbBand ? w.size_band / 2 : 0,
       max: w.size_band,
       basis: belowFloor
-        ? `headcount ${c.headcount} is below the ${bounds.floor}-person floor ${seg} is judged against — too small to carry a sponsorship budget`
+        ? `headcount ${headcount} is below the ${bounds.floor}-person floor ${seg} is judged against — too small to carry a sponsorship budget`
         : aboveBandCeiling
-          ? `headcount ${c.headcount} is above the ${bounds.ceiling}-person ceiling ${seg} is judged against`
+          ? `headcount ${headcount} is above the ${bounds.ceiling}-person ceiling ${seg} is judged against`
           : inIdeal
-            ? `headcount ${c.headcount} is inside ${seg}'s ideal band`
-            : inCeiling
-              ? `headcount ${c.headcount} is under ${seg}'s ceiling but outside its ideal band`
-              : `headcount ${c.headcount} is above ${seg}'s ceiling`,
+            ? `headcount ${headcount} is inside ${seg}'s ideal band`
+            : `headcount ${headcount} is under ${seg}'s ceiling but outside its ideal band`,
     });
   } else if (c.orgbook_entity_type === "SP" || c.orgbook_entity_type === "GP") {
     // §6.6: entity_type SP/GP is direct machine evidence of an owner-operated micro-business,
@@ -1087,7 +1136,9 @@ export function scoreFit(
       term: "size_band",
       points: w.size_band,
       max: w.size_band,
-      basis: `no headcount available, but OrgBook entity_type ${c.orgbook_entity_type} is direct evidence of an owner-operated micro-business`,
+      basis:
+        `no headcount available, but OrgBook entity_type ${c.orgbook_entity_type} is direct ` +
+        `evidence of an owner-operated micro-business${fillerNote(fillerHeadcount)}`,
     });
   } else {
     opts.missing?.push("headcount");
@@ -1096,7 +1147,8 @@ export function scoreFit(
       points: 0,
       max: w.size_band,
       basis:
-        "NO HEADCOUNT AVAILABLE. This score is depressed by missing data, not by a bad fit — no free source publishes headcount for BC micro-businesses",
+        "NO HEADCOUNT AVAILABLE. This score is depressed by missing data, not by a bad fit — no " +
+        `free source publishes headcount for BC micro-businesses${fillerNote(fillerHeadcount)}`,
     });
   }
 
