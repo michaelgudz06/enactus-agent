@@ -79,6 +79,14 @@ any day for any reason. `config/alumni/README.md` is authoritative and carries t
 removal procedure — read it before touching that directory or wiring it into the
 pipeline.
 
+Anything that changes who is in that file is a file the build reads, never a hand
+edit to the CSV, because the CSV is generated and the next rebuild undoes a hand
+edit: `removed.txt` for a removal, `confirmed-spellings.tsv` for a name the club's
+own pages spelled two ways. Both are matched on `nameKey`, so a removal lands
+under either spelling of a name that has been confirmed — and where it has not,
+`build.ts` reports a listed name within one edit of a surviving row rather than
+merging anything, because choosing a spelling would invent a name.
+
 ### Code decides, the model reports
 
 The model proposes; code verifies and has the last word. Anything a model
