@@ -1729,27 +1729,81 @@ describe("refreshing what the README says about the roster", () => {
     const CONFIRMED =
       "Tim MacDougal\tTim MacDougall\thttps://web.archive.org/web/20260516055532id_/https://www.enactussfu.ca/competition\tcaptain\t2026-08-06\n";
 
-    test("is the same unfinished removal as any other, and stops the refresh", () => {
-      const run = runRefresh({ removals: "Tim MacDougal\n", spellings: CONFIRMED });
+    test.each(["Tim MacDougal", "Tim MacDougall"])(
+      "written as %s it is the same unfinished removal as any other, and stops the refresh",
+      (written) => {
+        const run = runRefresh({ removals: `${written}\n`, spellings: CONFIRMED });
+
+        expect(run.status).not.toBe(0);
+        expect(run.stderr).toContain("unfinished removal");
+        // Names the row as the file spells it, so the student knows what to delete.
+        expect(run.stderr).toContain("Tim MacDougall");
+        expect(readFileSync(run.readme, "utf8")).toBe(run.before.readme);
+      },
+    );
+
+    test("the correction row left behind stops the refresh, and says which file holds it", () => {
+      // Step 1 done, and only half of step 2: the roster row is gone, the row in
+      // confirmed-spellings.tsv is not. This is the state the refresh used to
+      // pass silently on, leaving a removed person named in the directory.
+      const run = runRefresh({
+        dropRowsFor: "Tim MacDougall",
+        removals: "Tim MacDougal\nTim MacDougall\n",
+        spellings: CONFIRMED,
+      });
 
       expect(run.status).not.toBe(0);
       expect(run.stderr).toContain("unfinished removal");
-      // Names the row as the file spells it, so the student knows what to delete.
       expect(run.stderr).toContain("Tim MacDougall");
+      expect(run.stderr).toContain("confirmed-spellings.tsv");
+      expect(readFileSync(run.readme, "utf8")).toBe(run.before.readme);
+      expect(readFileSync(run.csv, "utf8")).toBe(run.before.csv);
+    });
+
+    test("one refusal names every record still holding them, not one file at a time", () => {
+      const run = runRefresh({ removals: "Tim MacDougall\n", spellings: CONFIRMED });
+
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain("past-executives.csv");
+      expect(run.stderr).toContain("confirmed-spellings.tsv");
+    });
+
+    test("passes once both rows are gone, with every spelling on the list", () => {
+      const run = runRefresh({
+        dropRowsFor: "Tim MacDougall",
+        removals: "Tim MacDougal\nTim MacDougall\n",
+        spellings: "# nothing confirmed any more\n",
+      });
+      const after = claimsIn(readFileSync(run.readme, "utf8"));
+
+      expect(run.status).toBe(0);
+      expect(run.stderr).not.toContain("unfinished removal");
+      expect(after.people).toBe(parseRosterCsv(readFileSync(run.csv, "utf8")).length);
+    });
+
+    test.each([
+      ["a list nobody is on", "# nobody yet\n"],
+      ["an empty list", ""],
+      ["no list at all", null],
+    ])("a correction row alongside %s leaves the refresh exactly as it was", (_case, removals) => {
+      // The committed state of this repository: a confirmed spelling for a
+      // person nobody has asked to remove must never refuse or warn.
+      const run = runRefresh({ removals, spellings: CONFIRMED });
+
+      expect(run.status).toBe(0);
+      expect(run.stderr).not.toContain("unfinished removal");
       expect(readFileSync(run.readme, "utf8")).toBe(run.before.readme);
     });
 
-    test("passes once the row is gone, under either spelling", () => {
-      for (const written of ["Tim MacDougal", "Tim MacDougall"]) {
-        const run = runRefresh({
-          dropRowsFor: "Tim MacDougall",
-          removals: `${written}\n`,
-          spellings: CONFIRMED,
-        });
+    test("a removal for somebody with no correction row of their own still passes", () => {
+      const run = runRefresh({
+        dropRowsFor: "Minna Van",
+        removals: "Minna Van\n",
+        spellings: CONFIRMED,
+      });
 
-        expect(run.status).toBe(0);
-        expect(run.stderr).not.toContain("unfinished removal");
-      }
+      expect(run.status).toBe(0);
+      expect(run.stderr).not.toContain("unfinished removal");
     });
 
     test("with nothing confirmed it is a warning naming the other spelling, never a refusal", () => {

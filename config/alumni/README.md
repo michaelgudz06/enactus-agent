@@ -64,9 +64,9 @@ They can. There is no threshold to meet, no form, and no reason required.
    row is there, the build renames the published spelling to the confirmed one,
    so one name covers the person everywhere; once it is gone nothing renames
    anything, and a removal list carrying only the confirmed spelling no longer
-   reaches the sightings the club published under the other one. Both spellings
-   on the list first, then delete the two rows.
-3. **Run the refresh, then commit all three changes that day:**
+   reaches the sightings the club published under the other one. Every spelling
+   on the list first, then delete the rows.
+3. **Run the refresh, then commit every change that day:**
 
    ```bash
    node --experimental-strip-types scripts/alumni-roster/build.ts --refresh-readme
@@ -82,10 +82,14 @@ They can. There is no threshold to meet, no form, and no reason required.
    batch, a sprint, or a meeting.
 
    It reads the removal list to catch step 1 done without step 2: if a name on
-   `removed.txt` still has a row in the CSV, the refresh refuses to run and names
-   them, because adding the name without deleting the row leaves someone who
-   asked to be taken off the file still in it. Delete those rows and run it
-   again. It is not an extra step, only a check on the two above.
+   `removed.txt` still has a row in `past-executives.csv` **or in
+   `confirmed-spellings.tsv`**, the refresh refuses to run and names them,
+   listing every row still to go, because adding the name without deleting the
+   rows leaves someone who asked to be taken off these files still named in
+   them. Both are durable records of a person, so both refuse on the same terms;
+   this is an exact match on the name, not a guess, and the thing that clears it
+   is the deletion step 2 already asked for. Delete those rows and run it again.
+   It is not an extra step, only a check on the steps above.
 
    It also says — as a warning, never a refusal — when a name on the list is one
    character from a name **still in the file**. **The club's pages spell some

@@ -121,16 +121,34 @@ function reportNearMissRemovals(listed: string[], surviving: string[], removalPa
  * file has to be fixable the same way.
  */
 /**
- * Honouring a removal is two edits — the name onto removed.txt, the row out of
- * the roster — and only the second one takes the person out of the file that
- * ships. The first without the second leaves someone who asked to be taken off
- * a list still on it, with nothing to say so. So when the refresh reads the
- * roster it also reads the list beside it, and stops if it finds a name on both.
+ * Honouring a removal takes the person out of every durable record in this
+ * directory, the same day. Adding the name to removed.txt is what makes it
+ * survive a rebuild; deleting the rows is what takes them out of the files that
+ * ship. The first without the second leaves someone who asked to be taken off a
+ * list still named on it, with nothing to say so. So when the refresh reads the
+ * roster it also reads the list and the confirmed spellings beside it, and stops
+ * if a name on the list still has a row in either.
  *
- * It fails on that and nothing else: no list, an empty list, or a listed name
- * whose row is properly gone all pass exactly as before, silently. It reads the
- * files in one directory, so it stays as cache-free and offline as the refresh
- * it runs inside, and it adds no step to the procedure a student follows.
+ * Both records are checked at once and refused together, because a student
+ * honouring a removal should be told the whole remaining job in one message
+ * rather than discovering the second row after fixing the first.
+ *
+ * `confirmed-spellings.tsv` refuses on the same terms as the roster rather than
+ * warning, for three reasons — do not soften it back to a warning:
+ *   (a) it is an exact `nameKey` match against a row's published or confirmed
+ *       spelling, not the one-edit heuristic `reportNearMissRemovals` uses, so
+ *       it cannot be a misread and the never-refuse-on-a-misread rule that
+ *       governs that warning does not reach this;
+ *   (b) it cannot block a removal, because the act that clears the refusal is
+ *       the deletion the student already owed;
+ *   (c) two near-identical checks behaving differently is how somebody learns
+ *       the wrong rule and then trusts it.
+ *
+ * It fails on that and nothing else: no list, an empty list, a listed name whose
+ * rows are properly gone, and a confirmed spelling for somebody nobody has asked
+ * to remove all pass exactly as before, silently. It reads the files in one
+ * directory, so it stays as cache-free and offline as the refresh it runs
+ * inside, and it adds no step to the procedure a student follows.
  *
  * Both sides are read through the confirmed spellings first, so a request
  * written under the spelling the club published still names the row the roster
@@ -142,17 +160,40 @@ function refuseUnfinishedRemoval(rows: RosterRow[], csvFile: string, alumniDir: 
   if (!existsSync(removalPath)) return;
 
   const contents = readFileSync(removalPath, "utf8");
-  const spellings = confirmedSpellingMap(loadConfirmedSpellings(alumniDir));
-  const removed = canonicaliseRemovals(parseRemovalList(contents), spellings);
+  const spellingsPath = path.join(alumniDir, "confirmed-spellings.tsv");
+  const spellingRows = loadConfirmedSpellings(alumniDir);
+  const spellings = confirmedSpellingMap(spellingRows);
+  const listed = parseRemovalList(contents);
+  const removed = canonicaliseRemovals(listed, spellings);
   const stillListed = rows.filter((row) => removed.has(nameKey(canonicalName(row.name, spellings))));
+  const stillSpelled = spellingRows.filter(
+    (row) => listed.has(nameKey(row.published)) || listed.has(nameKey(row.confirmed)),
+  );
 
-  if (stillListed.length) {
+  if (stillListed.length || stillSpelled.length) {
+    const named = [
+      ...stillListed.map((row) => row.name),
+      ...stillSpelled.map((row) => row.confirmed),
+    ];
+    const seen = new Set<string>();
+    const people = named.filter((name) => !seen.has(nameKey(name)) && seen.add(nameKey(name)));
+    const records = [
+      ...stillListed.map((row) => `  ${csvFile}: ${row.name}`),
+      ...stillSpelled.map((row) => `  ${spellingsPath}: ${row.published} -> ${row.confirmed}`),
+    ];
+
     console.error(
-      `unfinished removal: ${stillListed.map((row) => row.name).join(", ")}\n` +
-        `Named on ${removalPath}, but ${csvFile} still carries a row for each of them.\n` +
-        `Deleting the row is what takes someone out of the file that ships, so the\n` +
-        `removal is not done yet. Delete those rows and run this command again —\n` +
-        `nothing else is needed, and no cache or network either way.`,
+      `unfinished removal: ${people.join(", ")}\n` +
+        `Named on ${removalPath}, and this directory still holds a row naming each of them:\n` +
+        `${records.join("\n")}\n` +
+        `Deleting those rows is what takes someone out of the files that ship, so the\n` +
+        `removal is not done yet. Delete every row listed above and run this command\n` +
+        `again — nothing else is needed, and no cache or network either way.` +
+        (stillSpelled.length
+          ? `\nOrder matters for a confirmed-spellings row: put every spelling it carries on\n` +
+            `${removalPath} before you delete it, or the spelling nobody registered comes\n` +
+            `back at the next full rebuild.`
+          : ""),
     );
     process.exit(1);
   }
