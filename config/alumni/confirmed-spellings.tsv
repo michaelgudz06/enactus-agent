@@ -18,9 +18,17 @@
 # pages still spell it both ways, so the next rebuild splits the person again —
 # the same failure removed.txt exists to prevent.
 #
-# It is also on the removal path. A person holding two rows can ask to be
-# removed under either spelling; because the correction makes them one name,
-# `removed.txt` matches whichever one they wrote.
+# It is also on the removal path, in both directions. A person holding two rows
+# can ask to be removed under either spelling; because the correction makes them
+# one name, `removed.txt` matches whichever one they wrote.
+#
+# AND A REMOVAL DELETES THEIR ROW HERE TOO. This file names a real person, so
+# leaving their row behind leaves them named in this directory after they asked
+# not to be. Put EVERY spelling in their row on `removed.txt` FIRST, then delete
+# the row: once it is gone nothing renames the published spelling, and a list
+# carrying only the confirmed one — removals match exactly — lets the next
+# rebuild restore them under the spelling nobody registered. See "If someone asks
+# to be removed" in README.md, which is the authoritative procedure.
 #
 # ADDING A ROW IS A HUMAN CONFIRMATION, NOT A GUESS. One character apart is
 # evidence, not proof. Only add a row when somebody who knows the person has

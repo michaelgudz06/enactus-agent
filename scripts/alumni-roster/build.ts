@@ -512,13 +512,27 @@ reportNearMissRemovals(
 );
 
 // A correction nothing matches any more: the club has retired the page carrying
-// the spelling it fixes, or the roster no longer reaches that far back. Reported
-// for the same reason a stale exemption is — an entry that does nothing should
-// not look like an entry that does.
+// the spelling it fixes, the roster no longer reaches that far back, or the
+// person asked to be removed. Reported for the same reason a stale exemption is
+// — an entry that does nothing should not look like an entry that does, and a
+// removed person left named here is the removal only half honoured.
+//
+// Survival is what makes the removed case visible: the raw sightings still carry
+// the published spelling whether or not the person was dropped, so testing them
+// alone stays quiet forever. `kept` cannot be tested instead — it has already
+// been canonicalised, so no name in it carries the published spelling and every
+// row would read as stale. So the raw sightings are filtered by whether removal
+// kept them, which is the same question `applyRemovals` asked.
+const survivingSightings = sightings.filter(
+  (sighting) => !removed.has(nameKey(canonicalName(sighting.name, confirmed))),
+);
 for (const spelling of spellings) {
-  if (!sightings.some((sighting) => nameKey(sighting.name) === nameKey(spelling.published))) {
+  if (!survivingSightings.some((sighting) => nameKey(sighting.name) === nameKey(spelling.published))) {
     console.warn(
-      `\nstale entry on confirmed-spellings.tsv: no source spells anyone ${spelling.published} any more, so it corrects nothing`,
+      `\nstale entry on confirmed-spellings.tsv: nothing this roster keeps spells anyone\n` +
+        `${spelling.published} any more, so it corrects nothing. Either the club retired the page\n` +
+        `carrying that spelling, or the person asked to be removed — and a removal deletes this\n` +
+        `row too, once every spelling of their name is on ${removalPath}.`,
     );
   }
 }

@@ -48,9 +48,24 @@ They can. There is no threshold to meet, no form, and no reason required.
    itself is not optional: `build.ts` refuses to write a roster at all if
    `removed.txt` is missing, and prints how many names it read on every run,
    including zero. A list nobody is on is an empty file, never a deleted one.
-2. **Delete their row from `past-executives.csv`.** Just the line. (Rebuilding
+
+   **If their name appears in `confirmed-spellings.tsv`, every spelling in that
+   row goes on the list** — the one the club published *and* the one that was
+   confirmed, on separate lines. Removals match `nameKey` exactly, so a spelling
+   nobody registered is a spelling the next full rebuild puts straight back. That
+   row is where you learn the other spelling; read it before you write the list.
+2. **Delete their row from `past-executives.csv` — and from
+   `confirmed-spellings.tsv` if they have one there.** Just the lines. (Rebuilding
    also produces the correct file, but you do not need a working cache to honour
    a removal — that is the point.)
+
+   **Order matters here, and it is the whole mechanism of the trap.** Step 1 has
+   to be finished before the `confirmed-spellings.tsv` row is deleted. While the
+   row is there, the build renames the published spelling to the confirmed one,
+   so one name covers the person everywhere; once it is gone nothing renames
+   anything, and a removal list carrying only the confirmed spelling no longer
+   reaches the sightings the club published under the other one. Both spellings
+   on the list first, then delete the two rows.
 3. **Run the refresh, then commit all three changes that day:**
 
    ```bash
@@ -89,14 +104,19 @@ They can. There is no threshold to meet, no form, and no reason required.
    check the file for the other spelling yourself before you delete the rows.
    Neither check can refuse, because one character apart is evidence and not
    proof, and nothing here may ever stop a removal. Where the spelling has
-   already been settled in `confirmed-spellings.tsv`, there is nothing to
-   notice: the request lands under either spelling.
+   already been settled in `confirmed-spellings.tsv`, the request lands under
+   either spelling **for as long as that row is there** — which is exactly why
+   step 1 registers both spellings before step 2 deletes it.
 4. **Reply to them and say it is done.** One line is enough. Do not ask why, do
    not ask them to reconsider, and do not offer to keep a reduced version of
    their entry.
 5. If they ask what was held about them, tell them exactly: their name, the role
-   the club published, the years, and the archived page it came from. That is the
-   whole record. Show them this file if it helps.
+   the club published, the years, and the archived page it came from. **If they
+   also had a row in `confirmed-spellings.tsv`, that row is part of the record
+   too** — the other spelling the club published, the snapshot that spelling was
+   read from, and the role that confirmed which one was right, with the date it
+   was confirmed. Between the two rows, that is the whole record. Show them this
+   file if it helps.
 
 Whoever holds the External Relations portfolio owns this. If you are reading this
 because you just inherited the role: this paragraph is the part of the handover
@@ -422,7 +442,16 @@ page would credit the page that was wrong.
 A missing file means nothing has been confirmed — the strictest reading, and the
 one that keeps both rows. A malformed row stops the run, because a correction
 silently skipped is one person back as two rows. An entry nothing matches any
-more is reported as stale, like an entry on `expected-empty-sources.txt`.
+more is reported as stale, like an entry on `expected-empty-sources.txt` — and
+that includes an entry left behind by a removal, because the check asks whether
+any sighting the roster *keeps* still carries the published spelling, not whether
+the cache ever held one.
+
+**A row here names a real person, so a removal deletes it.** It is a second
+durable record of them, not an index into the first: honouring a removal means
+both spellings on `removed.txt` and then both rows gone, in that order, exactly
+as steps 1 and 2 of the removal procedure above say. Leaving the row behind
+leaves somebody who asked to be taken out of this directory named in it.
 
 The file ships with one row:
 

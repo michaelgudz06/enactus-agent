@@ -1237,6 +1237,76 @@ describe("a person the club's pages spell two ways, through the build", () => {
     expect(run.status).toBe(0);
     expect(run.stderr).toMatch(/stale entry on confirmed-spellings.tsv[\s\S]*Tim MacDougal/);
   });
+
+  test("a correction left behind by a removal is reported as stale too", () => {
+    // The cache still spells him both ways, so the raw sightings do too — but
+    // the roster keeps neither. Nothing said so, and the row naming him stayed
+    // in the directory indefinitely with the removal looking complete.
+    const run = runBuild({
+      variantSpellings: true,
+      spellings: `${CONFIRMED}\n`,
+      removals: "Tim MacDougall\n",
+    });
+
+    expect(run.status).toBe(0);
+    expect(namesIn(run.outFile).filter((name) => name.startsWith("Tim MacDoug"))).toEqual([]);
+    expect(run.stderr).toMatch(/stale entry on confirmed-spellings.tsv[\s\S]*Tim MacDougal/);
+  });
+
+  test("a confirmed spelling still in use is not reported as stale", () => {
+    const run = runBuild({ variantSpellings: true, spellings: `${CONFIRMED}\n` });
+
+    expect(run.status).toBe(0);
+    expect(run.stderr).not.toContain("stale entry on confirmed-spellings.tsv");
+  });
+});
+
+describe("honouring a removal for someone who had a confirmed spelling", () => {
+  const CONFIRMED = [
+    "Tim MacDougal",
+    "Tim MacDougall",
+    "https://web.archive.org/web/20260516055532id_/https://www.enactussfu.ca/competition",
+    "captain",
+    "2026-08-06",
+  ].join("\t");
+
+  const namesIn = (file: string) =>
+    parseRosterCsv(readFileSync(file, "utf8")).map((row) => row.name);
+
+  test("every spelling on the list, then the row deleted, takes them out for good", () => {
+    // The procedure in config/alumni/README.md, done in the order it states:
+    // both spellings registered first, then both rows gone — the roster's and
+    // the correction's.
+    const run = runBuild({
+      variantSpellings: true,
+      spellings: "# nothing confirmed any more\n",
+      removals: "Tim MacDougal\nTim MacDougall\n",
+    });
+
+    expect(run.status).toBe(0);
+    expect(namesIn(run.outFile).filter((name) => name.startsWith("Tim MacDoug"))).toEqual([]);
+    // The build read a correction file that no longer names him, so there is no
+    // second record of him left for a later run to restore or to disclose.
+    expect(run.stdout).toMatch(/spellings:\s+0 confirmed, 0 sighting\(s\) renamed/);
+    expect(run.stderr).not.toContain("possibly unfinished removal");
+    expect(run.stderr).not.toContain("stale entry on confirmed-spellings.tsv");
+  });
+
+  test("the row deleted with only one spelling registered restores them, and is reported", () => {
+    // The ordering hazard: with the correction gone, nothing renames the
+    // published spelling, so a list carrying only the confirmed one leaves the
+    // other sighting standing.
+    const run = runBuild({
+      variantSpellings: true,
+      spellings: "# nothing confirmed any more\n",
+      removals: "Tim MacDougall\n",
+    });
+
+    expect(run.status).toBe(0);
+    expect(namesIn(run.outFile)).toContain("Tim MacDougal");
+    expect(run.stderr).toContain("possibly unfinished removal");
+    expect(run.stderr).toMatch(/on the list: Tim MacDougall\s+\/\s+still in the file: Tim MacDougal/);
+  });
 });
 
 describe("the committed roster and the README that describes it", () => {
