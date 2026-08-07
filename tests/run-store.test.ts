@@ -154,6 +154,44 @@ describe("runHasWorkspace", () => {
     const finished: RunState = { ...initialRunState, done: true, steps: [{ step: "done", message: "Done" }] };
     expect(runHasWorkspace(finished)).toBe(true);
   });
+
+  // The workspace is the only place the "Search stopped" banner renders, so a
+  // run stopped before it had anything to show has to keep it. Otherwise the
+  // page falls back to the example chips and Stop reads as having done nothing.
+  test("a run stopped before its first event still shows the workspace", async () => {
+    const script = scriptedRun();
+    const store = createRunStore({ fetchImpl: script.fetchImpl });
+
+    const outcome = store.start({ prompt: "catering in Burnaby", mode: "sponsor" });
+    if (!outcome.started) throw new Error(outcome.reason);
+    await settle();
+
+    store.cancel();
+    const state = store.getState();
+
+    expect(state.running).toBe(false);
+    expect(state.cancelled).toBe(true);
+    expect(state.steps).toHaveLength(0);
+    expect(state.leads).toHaveLength(0);
+    expect(state.error).toBe("");
+    expect(runHasWorkspace(state)).toBe(true);
+  });
+
+  test("starting again clears the stop, so the banner belongs to one run only", async () => {
+    const script = scriptedRun();
+    const store = createRunStore({ fetchImpl: script.fetchImpl });
+
+    const first = store.start({ prompt: "catering in Burnaby", mode: "sponsor" });
+    if (!first.started) throw new Error(first.reason);
+    await settle();
+    store.cancel();
+    expect(store.getState().cancelled).toBe(true);
+
+    const second = store.start({ prompt: "credit unions", mode: "sponsor" });
+    expect(second.started).toBe(true);
+    expect(store.getState().cancelled).toBe(false);
+    store.cancel();
+  });
 });
 
 describe("a run surviving a navigation away and back", () => {

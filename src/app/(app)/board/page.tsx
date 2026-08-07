@@ -13,28 +13,89 @@ import EmailModal from "@/components/EmailModal";
 type LeadsResult = { ticket: number; mode: Mode; leads: Lead[]; warning?: string };
 
 /**
+ * A read the student asked for — the mode effect's read, or Refresh — against
+ * one the run asked for by finding a lead. Only the second is held back by a
+ * mutation in flight, because only it arrives at a moment nobody chose.
+ */
+export type ReadKind = "auto" | "manual";
+
+/**
  * Every read of the board takes a ticket, and only the newest ticket may write
  * what is on screen. A read that a later one superseded — a mode switch, or a
  * second Refresh — is dropped rather than landing as the wrong mode's leads.
- * One sequence covers both paths that read, the mode effect and Refresh, so the
- * rule cannot drift apart between them, and it compares tickets rather than
- * modes captured in a closure, which would be the mode of the render that
- * started the read rather than the current one.
+ * One sequence covers every path that reads, so the rule cannot drift apart
+ * between them, and it compares tickets rather than modes captured in a
+ * closure, which would be the mode of the render that started the read rather
+ * than the current one.
+ *
+ * The same sequence also orders reads against the optimistic mutations — a drag
+ * between columns, a delete — because that is the same question and may not
+ * grow a second mechanism beside this one. `moveTo`/`del` write the new state
+ * on screen and only then await the server, so an automatic read overlapping
+ * that window carries pre-mutation rows: applying it would snap a dragged card
+ * back or resurrect a deleted one. Such a read is refused, and recorded as owed
+ * so the lead that triggered it still reaches the board once the mutation
+ * settles — a refusal that dropped it would trade a visible snap-back for an
+ * invisible missing lead.
  */
 export type ReadSequence = {
   /** Take the newest ticket, superseding every read still in flight. */
-  start: () => number;
+  start: (kind?: ReadKind) => number;
+  /** The ordering half of the rule: is this the newest read? */
   isCurrent: (ticket: number) => boolean;
+  /** The whole rule, and the only gate `applyLeads` asks. */
+  mayApply: (ticket: number) => boolean;
   /** Supersede every read in flight without starting one. */
   abandon: () => void;
+  /** Open the window in which an optimistic mutation is unconfirmed; the
+   *  returned function closes it. */
+  beginMutation: () => () => void;
+  /** Whether a refused automatic read is now owed, and may be run again. */
+  takeOwed: () => boolean;
 };
 
 export function createReadSequence(): ReadSequence {
   let current = 0;
+  let currentKind: ReadKind = "manual";
+  // Ticks on both ends of every mutation, so "did a mutation open or close
+  // while this read was in flight?" is one comparison rather than a history.
+  let mutationTick = 0;
+  let startedAt = 0;
+  let mutating = 0;
+  let owed = false;
+
   return {
-    start: () => (current += 1),
+    start: (kind = "manual") => {
+      current += 1;
+      currentKind = kind;
+      startedAt = mutationTick;
+      return current;
+    },
     isCurrent: (ticket) => ticket === current,
+    mayApply: (ticket) => {
+      if (ticket !== current) return false;
+      if (currentKind === "manual") return true;
+      if (mutating === 0 && mutationTick === startedAt) return true;
+      owed = true;
+      return false;
+    },
     abandon: () => { current += 1; },
+    beginMutation: () => {
+      mutating += 1;
+      mutationTick += 1;
+      let settled = false;
+      return () => {
+        if (settled) return;
+        settled = true;
+        mutating -= 1;
+        mutationTick += 1;
+      };
+    },
+    takeOwed: () => {
+      if (!owed || mutating > 0) return false;
+      owed = false;
+      return true;
+    },
   };
 }
 
@@ -65,22 +126,39 @@ export default function BoardPage() {
   const [emailLead, setEmailLead] = useState<Lead | null>(null);
   const [warning, setWarning] = useState("");
   const [reads] = useState(createReadSequence);
+  // Bumped when the sequence says a refused automatic read is owed. It is a
+  // dependency of the read effect rather than a read of its own, so the owed
+  // read is issued by the same effect, for the mode on screen now — a re-read
+  // fired from inside a mutation would carry the mode of the render that
+  // started it and could leave the board loading a mode it had left.
+  const [owedRead, setOwedRead] = useState(0);
 
   const loading = boardIsLoading(mode, loadedMode, refreshing);
 
-  const readLeads = useCallback(async (): Promise<LeadsResult> => {
-    const ticket = reads.start();
+  const readLeads = useCallback(async (kind: ReadKind): Promise<LeadsResult> => {
+    const ticket = reads.start(kind);
     const res = await fetch(`/api/leads?mode=${mode}`);
     const data = await res.json();
     return { ticket, mode, leads: data.leads || [], warning: data.warning };
   }, [mode, reads]);
 
-  // Reading and applying are separate so a superseded response can be dropped:
+  const settleMutation = useCallback((settle: () => void) => {
+    settle();
+    if (reads.takeOwed()) setOwedRead((n) => n + 1);
+  }, [reads]);
+
+  // Reading and applying are separate so a refused response can be dropped:
   // it would otherwise land as the wrong mode's leads and leave the board
-  // reading as loading forever. Every caller applies through here, so both the
-  // effect and Refresh are held to the one rule.
+  // reading as loading forever, or as pre-mutation rows over a drag the student
+  // can still see. Every caller applies through here, so the effect, Refresh
+  // and the run's own ticks are held to the one rule.
   const applyLeads = useCallback((result: LeadsResult) => {
-    if (!reads.isCurrent(result.ticket)) return;
+    if (!reads.mayApply(result.ticket)) {
+      // Refused by a mutation that has already settled: nothing else is coming
+      // to release the debt, so run the owed read from here.
+      if (reads.takeOwed()) setOwedRead((n) => n + 1);
+      return;
+    }
     setLeads(result.leads);
     if (result.warning) setWarning(result.warning);
     setLoadedMode(result.mode);
@@ -89,17 +167,18 @@ export default function BoardPage() {
   // `leadSignal` ticks once per lead the run has already tried to write, so the
   // board reads again and the student watches leads land while the search is
   // still going. It goes through the same ticket sequence as every other read,
-  // which is what stops a tick mid-flight from landing out of order.
+  // which is what stops a tick mid-flight from landing out of order or over an
+  // unsettled drag.
   useEffect(() => {
-    readLeads().then(applyLeads);
+    readLeads("auto").then(applyLeads);
     return () => reads.abandon();
-  }, [readLeads, applyLeads, reads, activity.leadSignal]);
+  }, [readLeads, applyLeads, reads, activity.leadSignal, owedRead]);
 
   async function refresh() {
     setRefreshing(true);
     // A superseded refresh drops its leads but is still no longer refreshing;
     // leaving the flag set would wedge the board as loading just as badly.
-    applyLeads(await readLeads());
+    applyLeads(await readLeads("manual"));
     setRefreshing(false);
   }
 
@@ -117,22 +196,36 @@ export default function BoardPage() {
     return map;
   }, [filtered]);
 
+  // The optimistic write happens first and the server confirms it after, so the
+  // mutation is declared to the sequence for exactly that window — in a
+  // `finally`, so a request that throws still closes it rather than holding
+  // every later lead off the board.
   async function moveTo(id: string, status: Status) {
     const prev = leads;
+    const settle = reads.beginMutation();
     setLeads((ls) => ls.map((l) => (l.id === id ? { ...l, status } : l)));
-    const res = await fetch(`/api/leads/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status }),
-    });
-    if (!res.ok) setLeads(prev);
+    try {
+      const res = await fetch(`/api/leads/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      });
+      if (!res.ok) setLeads(prev);
+    } finally {
+      settleMutation(settle);
+    }
   }
 
   async function del(id: string) {
     const prev = leads;
+    const settle = reads.beginMutation();
     setLeads((ls) => ls.filter((l) => l.id !== id));
-    const res = await fetch(`/api/leads/${id}`, { method: "DELETE" });
-    if (!res.ok) setLeads(prev);
+    try {
+      const res = await fetch(`/api/leads/${id}`, { method: "DELETE" });
+      if (!res.ok) setLeads(prev);
+    } finally {
+      settleMutation(settle);
+    }
   }
 
   return (

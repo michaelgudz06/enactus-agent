@@ -102,10 +102,16 @@ export function applyEvent(state: RunState, ev: AgentEvent): RunState {
  * Whether the agent page should show the run workspace rather than the empty
  * composer. Derived from the state alone, so coming back to the page mid-run
  * shows the run in progress instead of a blank form.
+ *
+ * `cancelled` counts even with nothing else to show: a run stopped before its
+ * first event has no steps and no leads, and the workspace is the only place
+ * the "Search stopped" banner can render — without it, Stop would look like it
+ * had done nothing at all.
  */
 export function runHasWorkspace(state: RunState): boolean {
   return (
     state.running ||
+    state.cancelled ||
     state.steps.length > 0 ||
     state.leads.length > 0 ||
     state.error !== "" ||

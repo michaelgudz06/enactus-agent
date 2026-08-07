@@ -50,6 +50,15 @@ export default function AgentPage() {
     if (reasonRef.current) reasonRef.current.scrollTop = reasonRef.current.scrollHeight;
   }, [reasoning]);
 
+  // A refusal describes the run that was in flight when it was refused. Once
+  // that run ends the Run button works again, so leaving "a search is already
+  // running" on screen would tell the student the opposite of the truth. A
+  // refusal made while nothing was running — an empty prompt — is untouched,
+  // because `running` did not change.
+  useEffect(() => {
+    if (!running) setNotice("");
+  }, [running]);
+
   // The provider is the gate on a second run, not this handler: it refuses
   // synchronously and says why, and the reason is shown rather than swallowed.
   function start(withAnswers?: string) {
