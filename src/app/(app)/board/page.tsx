@@ -113,7 +113,7 @@ export default function BoardPage() {
   const { mode } = useApp();
   // A run started on the agent view keeps streaming while the board is on
   // screen, because it is owned by the `(app)` layout rather than that page.
-  // This is the board's cheap view of it: three primitives, so a run streaming
+  // This is the board's cheap view of it: two primitives, so a run streaming
   // reasoning tokens does not re-render every lead card on the board.
   const activity = useRunActivity();
   const [leads, setLeads] = useState<Lead[]>([]);
@@ -254,20 +254,21 @@ export default function BoardPage() {
       {activity.running && (
         <div className="mx-5 mt-3 text-xs rounded-lg px-3 py-2 flex items-center gap-2 border" style={{ background: "rgba(245,200,66,.08)", borderColor: "rgba(245,200,66,.35)", color: "var(--text)" }}>
           <span className="dot-pulse" style={{ color: "var(--gold)" }}>●</span>
-          {/* Nothing can reach the board while the warning below is up, and the
-              run stream cannot tell that path apart: `persistLead` returns no
-              error when the service key is missing, so no `persist` status is
-              emitted and the derived count reads as every lead found. The board
-              knows better than the stream here, so it claims no number. */}
-          {warning ? (
-            <span>The agent is still searching.</span>
-          ) : (
-            <span>
-              The agent is still searching{activity.savedToBoard > 0 ? ` — ${activity.savedToBoard} lead${activity.savedToBoard !== 1 ? "s" : ""} on the board so far` : ""}.{" "}
-              {activity.unsaved > 0 && `${activity.unsaved} lead${activity.unsaved !== 1 ? "s" : ""} could not be saved and ${activity.unsaved !== 1 ? "are" : "is"} not coming to the board. `}
-              New leads appear here as they are saved.
-            </span>
-          )}
+          {/* No number while the run is in flight, and no promise that the leads
+              it has found are here. The only count the code can prove is the
+              `done` event's, and this banner is gone by then; anything derived
+              from the stream is an upper bound, because a lead that never
+              reached the database can arrive without a `persist` status — that
+              is what `persistLead` does when the service-role key is missing.
+              The banner says what the agent is doing, not how many rows landed.
+              The board's own lead count in the header above is a read of the
+              database, so it stays. The second sentence is dropped under the
+              warning below, where nothing can load and it would be a promise
+              this page already knows it cannot keep. */}
+          <span>
+            The agent is still searching.
+            {!warning && " New leads appear here as they are saved."}
+          </span>
         </div>
       )}
 

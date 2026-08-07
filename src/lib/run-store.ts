@@ -44,8 +44,8 @@ export interface RunState {
    * How many leads the run found but could not write. `runAgent` emits a
    * `persist` status for a lead the insert rejected and for nothing else, just
    * before that lead's own event, so counting them here is code reading code —
-   * the model has no say in it. It is what lets the board say how many leads are
-   * on it rather than how many were found.
+   * the model has no say in it. It is a floor under the failures, not a total:
+   * see `runSavedToBoard` for the path that fails without emitting one.
    */
   persistFailures: number;
   /** Set when the user stopped the run rather than it finishing. */
@@ -135,7 +135,7 @@ export function runHasWorkspace(state: RunState): boolean {
 /**
  * How many of the run's leads actually reached the board — which is not how
  * many it found. A lead is emitted whether or not the insert succeeded, so
- * counting the leads would have the board claim rows it does not have, and the
+ * counting the leads would claim rows the database does not have, and the
  * failure is exactly what `persistLead` reports so the UI need not guess.
  *
  * The failing lead's `persist` status arrives just before that lead's own
@@ -150,9 +150,10 @@ export function runHasWorkspace(state: RunState): boolean {
  * all of them. `persistLead` returns `error: null` when the service-role key is
  * missing, and the emit is guarded on that error, so a run against a project
  * with no key writes nothing and reports no failure — this returns every lead
- * found. A caller that can see the write channel is shut (the board has the
- * warning from `/api/leads`) must not present this number, and a caller with no
- * `done` event must not present it as confirmed.
+ * found. So it may only ever be shown as the bound it is. Its one caller is the
+ * agent view's stopped-run banner, which says "at most N reached the board" and
+ * sends the student to the board to see what is actually there; nothing renders
+ * it as a running total, which is why `RunActivity` publishes no count at all.
  */
 export function runSavedToBoard(state: RunState): number {
   if (state.done) return state.saved;

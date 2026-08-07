@@ -7,7 +7,6 @@ import {
   initialRunState,
   RunInput,
   RunState,
-  runSavedToBoard,
   StartOutcome,
 } from "@/lib/run-store";
 
@@ -27,29 +26,27 @@ export interface RunControls {
 }
 
 /**
- * The board's view of the run. Three primitives rather than the whole state:
- * the reasoning stream writes state dozens of times a second, and a board full
- * of lead cards must not re-render on every token. This value only changes when
- * one of the three changes, so it does not.
+ * The board's view of the run. Two primitives rather than the whole state: the
+ * reasoning stream writes state dozens of times a second, and a board full of
+ * lead cards must not re-render on every token. This value only changes when one
+ * of the two changes, so it does not.
+ *
+ * No count of any kind is published here, deliberately. Every number a run in
+ * flight can offer is an upper bound — `runSavedToBoard` says so itself — and a
+ * consumer given one will render it as fact. The authoritative count arrives on
+ * the `done` event as `RunState.saved`, which the agent view reads from the full
+ * state; a mid-run consumer gets the signal to re-read the database instead.
  */
 export interface RunActivity {
   running: boolean;
   /** Ticks when a lead may have reached the database; the board reads again. */
   leadSignal: number;
-  /**
-   * Leads the run has actually written, not leads it has found. The board may
-   * only say what is on it, so the found count is deliberately not published
-   * here: a consumer cannot render a number the database never accepted.
-   */
-  savedToBoard: number;
-  /** Leads found but rejected by the database, so never coming to the board. */
-  unsaved: number;
 }
 
 const OUTSIDE_PROVIDER = "The agent run provider is not mounted.";
 
 const RunStateContext = createContext<RunState>(initialRunState);
-const RunActivityContext = createContext<RunActivity>({ running: false, leadSignal: 0, savedToBoard: 0, unsaved: 0 });
+const RunActivityContext = createContext<RunActivity>({ running: false, leadSignal: 0 });
 const RunControlsContext = createContext<RunControls>({
   // Refusing out loud rather than doing nothing: a page rendered outside the
   // provider would otherwise have a Run button that silently did nothing.
@@ -82,16 +79,12 @@ export default function RunProvider({ children }: { children: React.ReactNode })
     [store]
   );
 
-  const savedToBoard = runSavedToBoard(state);
-
   const activity = useMemo<RunActivity>(
     () => ({
       running: state.running,
       leadSignal: state.leadSignal,
-      savedToBoard,
-      unsaved: state.persistFailures,
     }),
-    [state.running, state.leadSignal, savedToBoard, state.persistFailures]
+    [state.running, state.leadSignal]
   );
 
   // `children` is created by the layout, which does not re-render, so React
