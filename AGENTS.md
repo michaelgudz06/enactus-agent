@@ -81,13 +81,13 @@ pipeline.
 
 ### Attribution is not accountability
 
-`src/lib/activity.ts` records who was signed in for each action: creating,
-editing or deleting a lead, generating a draft, running the agent, signing in.
-Name, action, record id. **No credential, session token or email body ever
-reaches that table** — `scrubDetail` enforces it on every entry rather than
-trusting each call site, and it also strips contact names and addresses, which
-belong on the lead and not in an audit line. `detail` holds primitives only so
-nothing nested can smuggle a secret past it.
+`src/lib/activity.ts` records who was signed in for each action; the
+`ActivityAction` union in that file is the list of them. Name, action, record
+id. **No credential, session token or email body ever reaches that table** —
+`scrubDetail` enforces it on every entry rather than trusting each call site,
+and it also strips contact names and addresses, which belong on the lead and
+not in an audit line. `detail` holds primitives only so nothing nested can
+smuggle a secret past it.
 
 Two different things are easily conflated here, and only the first is built.
 Privacy law wants **one designated individual** answerable for the whole
@@ -269,7 +269,9 @@ a row, and leave `value` blank with a note rather than asserting an unverified d
   in-memory lead, which is what the suite relies on. A test that mocks
   `@/lib/supabase` wholesale must export every table constant the code under
   test touches (`SPEND` and `ACTIVITY` included) — vitest throws on a missing
-  one, and the budget gate reads it before anything else runs.
+  one, and the budget gate reads it before anything else runs. Use the shared
+  spend-ledger double in `tests/helpers/ledger.ts` rather than restating how the
+  ledger is queried; its header shows the wiring.
 - Provider prices in `src/lib/budget.ts` are **verified live, never guessed**,
   and dated in the file. Re-verify against `GET
   https://openrouter.ai/api/v1/models` and `docs.exa.ai/reference/pricing` when a

@@ -34,6 +34,7 @@ Credentials live in `.env.local`, which is gitignored. Never print, log or commi
 | `APP_TEAM_PASSWORD` | yes | The single shared team password. |
 | `SESSION_SECRET` | yes | Signs the session and Gmail cookies. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` | for Gmail drafts | OAuth for creating drafts in a teammate's Gmail. |
+| `APP_URL` | for Gmail drafts | Where the Gmail OAuth flow returns to. Defaults to `http://localhost:3000`, so a deployment must set it. |
 | `OUTREACH_FROM_EMAIL` | recommended | The club's `@sfu.ca` inbox that outreach is sent from. Anything that is not an `@sfu.ca` address is refused, not used. |
 | `API_BUDGET_CAD` | no | The monthly cap. Defaults to `20`. Anything unparseable, zero or negative falls back to `20` rather than lifting the cap. |
 | `API_BUDGET_USD_TO_CAD` | no | FX rate for converting provider bills into the CAD cap. Defaults to `1.4024`, pinned 2026-08-06. |
