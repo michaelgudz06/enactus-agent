@@ -12,11 +12,3 @@ export default function ConnectionChip({ type }: { type: ConnectionType }) {
     </span>
   );
 }
-
-export function fitColor(score: number | null): string {
-  if (score == null) return "var(--faint)";
-  if (score >= 80) return "var(--green)";
-  if (score >= 60) return "var(--gold)";
-  if (score >= 40) return "#f59e0b";
-  return "var(--faint)";
-}
