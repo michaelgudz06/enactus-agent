@@ -76,10 +76,9 @@ They can. There is no threshold to meet, no form, and no reason required.
    in this file that counts anybody — from the CSV you just edited. The only
    other things it reads are `removed.txt` and `confirmed-spellings.tsv` beside
    it: no snapshot cache, no network, no archive. It takes a second on a fresh
-   clone, it never touches the
-   roster itself, and it is what keeps the tests passing so that honouring a
-   removal never leaves you with a red branch to explain. Do not wait for a
-   batch, a sprint, or a meeting.
+   clone, it never touches the roster itself, and it is what keeps the tests
+   passing so that honouring a removal never leaves you with a red branch to
+   explain. Do not wait for a batch, a sprint, or a meeting.
 
    It reads the removal list to catch step 1 done without step 2: if a name on
    `removed.txt` still has a row in `past-executives.csv` **or in
@@ -197,7 +196,10 @@ three rather than quietly skipping any:
 1. **A row in `sources.tsv`** — six tab-separated columns: key, kind
    (`archived`, `spotlight` or `live`), cache prefix, CDX pattern, URL, and the
    post filter a `spotlight` sweep matches its posts by. Write `-` in a column
-   the kind does not use; an empty column is a malformed row.
+   the kind does not use; an empty column is a malformed row. The cache prefix
+   names files on disk and is claimed with a `startsWith`, so it is letters,
+   digits and dashes, and no prefix may be another one plus a dash: a row
+   prefixed `live` would claim `live-team.html` from the source that fetched it.
 2. **A parser for it in `build.ts`**, dispatched on the key. A declared source
    the build cannot parse is a hard failure, not a skip.
 3. **A fixture page in `tests/alumni-roster.test.ts`**, so the test that runs
@@ -207,10 +209,17 @@ The fetcher caches one snapshot per *unique content digest* — the Wayback CDX
 index reports a digest per capture, and captures with the same digest are
 byte-identical. `/executives/` has 88 archived captures but only 56 distinct
 bodies, so this is 32 requests it does not make against a service that
-rate-limits. It is resumable, so a page already in the cache is not re-fetched,
-and a page that will not download costs that page and nothing else: the run
-carries on, lists the failures at the end, and exits non-zero. Re-run to fill
-them. An HTTP error is a failed download like any other — every request is made
+rate-limits. It is resumable, so a page already in the cache **and recorded in
+`manifest.tsv`** is left completely alone — not re-fetched, and its recorded
+provenance not re-stamped from the registry row this run happens to read, which
+would claim a retrieval that never happened. A cached page the manifest does not
+know about is fetched again rather than stamped with a guess, because that is
+exactly the page `build.ts` drops. That re-fetch downloads beside the cached file
+and replaces it only once bytes have arrived, so a rate-limited retry cannot
+destroy an archived capture the archive may never serve again. A page that will
+not download costs that page and nothing else: the run carries on, lists the
+failures at the end, and exits non-zero. Re-run to fill them. An HTTP error is a
+failed download like any other — every request is made
 with `curl -f`, so a 404 or a rate-limit response leaves no file in the cache
 rather than a cached error page that would never be re-fetched.
 
@@ -262,10 +271,14 @@ The list fails closed and stays honest:
 `.cache/alumni-roster/` is gitignored, and must stay that way: the raw pages
 carry the role email addresses, phone numbers and employer detail that this file
 exists to leave behind. Both scripts enforce it rather than trusting it — each
-asks git, and refuses to write to or read from a cache directory inside this
-repository that git does not ignore, before a page is fetched or parsed. Point
-the cache somewhere else with the first argument to either script, or add that
-path to `.gitignore`.
+asks git **about the cache path itself**, and refuses to write to or read from a
+cache directory in **any** repository that git does not ignore, before a page is
+fetched or parsed. Asking about the cache path rather than about the directory
+the script was started from is what makes a run launched outside a repository
+refuse too, and committing someone's phone number to a different repository is
+the same commit. Point the cache somewhere else with the first argument to either
+script — a relative path leading out of the repository is fine — or add that path
+to `.gitignore`.
 
 The build is deterministic apart from `captured_at`, which defaults to today. Set
 `ROSTER_CAPTURED_AT=YYYY-MM-DD` to reproduce an earlier build exactly.
@@ -463,8 +476,8 @@ The file ships with one row:
   The competition page spelled it both ways in different snapshots: the two-L
   spelling in the January 2026 capture, the one-L spelling in May 2026. The
   roster recorded both rather than guessing, which was right; a human then
-  settled it. The row that ships cites the earliest snapshot, as every merged row
-  does; the other snapshot is kept in `confirmed-spellings.tsv`, so neither
+  settled it. The merged roster row cites the earliest snapshot, as every merged
+  row does; the May 2026 one is the `source_url` of the row here, so neither
   page's evidence is lost.
 
 **Adding a row is a confirmation, not a tidy-up.** One character apart is

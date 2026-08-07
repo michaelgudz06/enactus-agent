@@ -991,6 +991,34 @@ describe("spellings a human has confirmed", () => {
     }
   });
 
+  test("the committed corrections hold a name, and nothing else about the person", () => {
+    // This file names a real person, so it lives under the same rule as the
+    // roster beside it: name, role and years, never an address, a phone number,
+    // an employer or anything from LinkedIn. The roster's own rows are guarded
+    // by the parsers; nothing guarded this one.
+    const committed = parseConfirmedSpellings(
+      readFileSync(fileURLToPath(new URL("../config/alumni/confirmed-spellings.tsv", import.meta.url)), "utf8"),
+    );
+
+    expect(committed.length).toBeGreaterThan(0);
+    for (const spelling of committed) {
+      for (const field of [spelling.published, spelling.confirmed, spelling.confirmedBy]) {
+        expect(carriesContactDetail(field)).toBe(false);
+      }
+      expect(isPlausiblePersonName(spelling.published)).toBe(true);
+      expect(isPlausiblePersonName(spelling.confirmed)).toBe(true);
+      // The evidence is a page the club itself published, or the archive's copy
+      // of one. LinkedIn is never fetched and may never be cited either.
+      expect([
+        "web.archive.org",
+        "enactussfu.ca",
+        "www.enactussfu.ca",
+        "enactussfu.com",
+        "www.enactussfu.com",
+      ]).toContain(new URL(spelling.sourceUrl).hostname);
+    }
+  });
+
   test("no row in the committed roster still carries a spelling that was corrected", () => {
     const committed = parseConfirmedSpellings(
       readFileSync(fileURLToPath(new URL("../config/alumni/confirmed-spellings.tsv", import.meta.url)), "utf8"),
