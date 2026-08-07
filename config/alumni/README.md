@@ -73,15 +73,24 @@ They can. There is no threshold to meet, no form, and no reason required.
    again. It is not an extra step, only a check on the two above.
 
    It also says — as a warning, never a refusal — when a name on the list is one
-   character from a name still in the file. **The club's pages spell some people
-   two ways, and a removal matches exactly**, so registering one spelling and
-   deleting both rows passes every check here and brings the person back at the
-   next rebuild under the spelling nobody registered. The warning names that
-   other spelling; add it to `removed.txt` too if it is them, and ignore it if
-   they are two people. It cannot refuse, because one character apart is
-   evidence and not proof, and nothing here may ever stop a removal. Where the
-   spelling has already been settled in `confirmed-spellings.tsv`, there is
-   nothing to notice: the request lands under either spelling.
+   character from a name **still in the file**. **The club's pages spell some
+   people two ways, and a removal matches exactly**, so registering one spelling
+   and deleting only that spelling's row leaves the other one behind. The
+   warning names it; add it to `removed.txt` too if it is them, and ignore it if
+   they are two people.
+
+   **Deleting both rows is the case this refresh cannot catch.** With neither
+   row left in the CSV there is nothing for the list to be one character away
+   from, so the refresh finds nothing and exits quietly — and the person comes
+   back at the next full rebuild under the spelling nobody registered. That
+   rebuild is where the warning finally appears, and step 3 above deliberately
+   does not ask you to run one. So a quiet refresh is not evidence that both
+   spellings were registered; if the club may have spelled the name two ways,
+   check the file for the other spelling yourself before you delete the rows.
+   Neither check can refuse, because one character apart is evidence and not
+   proof, and nothing here may ever stop a removal. Where the spelling has
+   already been settled in `confirmed-spellings.tsv`, there is nothing to
+   notice: the request lands under either spelling.
 4. **Reply to them and say it is done.** One line is enough. Do not ask why, do
    not ask them to reconsider, and do not offer to keep a reduced version of
    their entry.
@@ -259,7 +268,7 @@ Then six columns:
 | `name` | As the club published it. ALL CAPS is title-cased; nothing else is changed. |
 | `role` | The role label the page carried. Where one person held several, each is listed with its own years: `Director of Program Innovation (2015-16); President (2016-17)`. Empty means the source named the person but stated no role. |
 | `years_active` | Academic years, `2016-17`. Consecutive years collapse to a run (`2015-16..2017-18`); a break in service is kept (`2022-23;2025-26..2026-27`). A bare `1991` is a single calendar year, because that is all the source stated. Empty means the source stated no year. |
-| `source_url` | The archived (or live) URL the row was read from — one URL per role, in the same order as `role`, `\|`-separated. |
+| `source_url` | The archived (or live) URL the row was read from — one URL per role, in the same order as `role`, `\|`-separated. Where the club spelled a name two ways, this is the snapshot the merged row was built from; the snapshot carrying the superseded spelling is kept in `confirmed-spellings.tsv`, not here. |
 | `captured_at` | The date **we** fetched the page, one entry per role in the same order as `role` and `source_url`, `\|`-separated — repeated even where two roles came off the same page on the same day, so the three columns can always be split and zipped by index. The date the *Internet Archive* captured it is the 14-digit stamp inside `source_url`. |
 | `confidence` | How firmly the name was recovered. See below. |
 

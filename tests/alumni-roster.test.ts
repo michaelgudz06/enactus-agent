@@ -25,6 +25,7 @@ import {
   confirmedSpellingMap,
   coverageByYear,
   csvCell,
+  CSV_PREAMBLE,
   expandYears,
   findNearDuplicates,
   isPlausiblePersonName,
@@ -1292,6 +1293,21 @@ describe("the committed roster and the README that describes it", () => {
       expect(row.capturedAt.split(" | ")).toHaveLength(roles);
     }
   });
+
+  /**
+   * The comment block is generated output too, and it is the part of the file
+   * that travels: it carries the handling rules and the pointer to where a
+   * superseded spelling's snapshot is kept. A rebuild writes exactly these
+   * bytes, so editing one copy and not the other would put a claim in the
+   * shipped file that the generator does not make.
+   */
+  test("the committed roster opens with the preamble the build writes", () => {
+    const committed = readFileSync(repoFile("config/alumni/past-executives.csv"), "utf8");
+    expect(committed.startsWith(CSV_PREAMBLE)).toBe(true);
+    expect(committed.slice(CSV_PREAMBLE.length).split("\n")[0]).toBe(
+      "name,role,years_active,source_url,captured_at,confidence",
+    );
+  });
 });
 
 describe("the real snapshot cache, when there is one", () => {
@@ -1886,6 +1902,16 @@ esac
 exit 0
 `;
 
+  /**
+   * The same stub with the page request rate-limited: the archive still answers
+   * the CDX query, so the capture is enumerated and re-fetched, and the fetch
+   * itself comes back with nothing. `curl -f` writes no file in that case.
+   */
+  const STUB_CURL_PAGE_FAILS = STUB_CURL.replace(
+    `  *) [ -n "$out" ] && printf '<h3>a page</h3>' > "$out" ;;`,
+    "  *) exit 22 ;;",
+  );
+
   const liveRow = (url: string) => `team (live)\tlive\tlive-team\t-\t${url}\t-\n`;
   const archivedRow = (url: string) =>
     `executives\tarchived\texec\tenactussfu.com/executives/\t${url}\t-\n`;
@@ -1896,12 +1922,12 @@ exit 0
   function runFetch(
     cacheDir: string,
     url: string,
-    { row = liveRow, cwd = undefined as string | undefined } = {},
+    { row = liveRow, cwd = undefined as string | undefined, curl = STUB_CURL } = {},
   ) {
     const root = mkdtempSync(path.join(tmpdir(), "alumni-fetch-"));
     const bin = path.join(root, "bin");
     mkdirSync(bin);
-    writeFileSync(path.join(bin, "curl"), STUB_CURL, { mode: 0o755 });
+    writeFileSync(path.join(bin, "curl"), curl, { mode: 0o755 });
 
     const script = path.join(root, "fetch-snapshots.sh");
     copyFileSync(FETCH_SCRIPT, script);
@@ -1986,6 +2012,32 @@ exit 0
     writeFileSync(path.join(cacheDir, "manifest.tsv"), "");
     expect(runFetch(cacheDir, fetched, { row: archivedRow }).status).toBe(0);
     expect(recordedUrl(cacheDir, ARCHIVED_PAGE)).toBe(archivedUrl(fetched));
+  });
+
+  test("a cached page survives a re-fetch that fails, and is still reported", () => {
+    const cacheDir = mkdtempSync(path.join(tmpdir(), "alumni-cache-"));
+    const fetched = "http://enactussfu.com/executives/";
+    runFetch(cacheDir, fetched, { row: archivedRow });
+
+    const page = path.join(cacheDir, ARCHIVED_PAGE);
+    const before = readFileSync(page);
+
+    // The manifest was lost, so the page is re-fetched — and the archive is
+    // rate-limiting. A capture the archive may never serve again is the one
+    // thing here that cannot be re-created, so the bytes on disk must outlive
+    // the request that failed.
+    writeFileSync(path.join(cacheDir, "manifest.tsv"), "");
+    const second = runFetch(cacheDir, fetched, {
+      row: archivedRow,
+      curl: STUB_CURL_PAGE_FAILS,
+    });
+
+    expect(readFileSync(page)).toEqual(before);
+    expect(existsSync(`${page}.part`)).toBe(false);
+    // Still a gap: unrecorded, reported, and non-zero so re-running fills it.
+    expect(recordedUrl(cacheDir, ARCHIVED_PAGE)).toBeUndefined();
+    expect(second.stderr).toContain(`could not fetch ${ARCHIVED_PAGE}`);
+    expect(second.status).not.toBe(0);
   });
 
   test("a registry checked out with CRLF line endings is read, not reported twice", () => {

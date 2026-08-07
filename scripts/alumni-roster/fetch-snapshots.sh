@@ -132,21 +132,29 @@ cdx() { # cdx <url-pattern> -> "timestamp status digest" rows
 # Cached but unrecorded is the exception, and it is fetched again rather than
 # stamped with a guess: build.ts drops such a page and says to re-run this
 # script, so re-running has to genuinely record it.
+#
+# That re-fetch downloads beside the page and replaces it only once bytes
+# actually arrived. An archived capture is not re-creatable — the archive may
+# not serve it again — so a rate-limited retry that had first deleted the file
+# would destroy the only copy of the evidence a real person's row cites. A
+# request that returns nothing leaves the cached bytes exactly as they were and
+# still lands in $failures, so re-running fills the gap.
 grab() { # grab <local-name> <wayback-timestamp> <original-url>
-  local out="$cache/$1" url="https://web.archive.org/web/$2id_/$3"
+  local out="$cache/$1" part="$cache/$1.part" url="https://web.archive.org/web/$2id_/$3"
   if [ -s "$out" ] && recorded "$1"; then
     return 0
   fi
 
-  rm -f "$out"
+  rm -f "$part"
   curl -fsS --max-time 90 --retry 4 --retry-delay 5 --retry-connrefused -A "$ua" \
-    "$url" -o "$out" 2>/dev/null || rm -f "$out"
+    "$url" -o "$part" 2>/dev/null
   sleep 1
 
-  if [ -s "$out" ]; then
+  if [ -s "$part" ]; then
+    mv -f "$part" "$out"
     note_source "$1" "$url"
   else
-    rm -f "$out"
+    rm -f "$part"
     echo "  ! could not fetch $1" >&2
     echo "$url" >> "$failures"
   fi
