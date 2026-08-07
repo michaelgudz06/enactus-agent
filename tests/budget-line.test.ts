@@ -13,6 +13,7 @@ function status(over: Partial<Parameters<typeof budgetLine>[0]> = {}) {
     runsRemaining: 415,
     persisted: true,
     error: null,
+    ledgerWriteError: null,
     ...over,
   };
 }
@@ -41,5 +42,24 @@ describe("the budget is observable before a run", () => {
     expect(line).toContain("could not be read");
     expect(line).toContain("connection reset");
     expect(line).not.toContain("$0.00 of");
+  });
+
+  // Charges that never reach the table die with the process, so the figure on
+  // screen is not a cap being held. It must not read as one.
+  test("says when spend is not being recorded, alongside the figure it still has", () => {
+    const line = budgetLine(status({ ledgerWriteError: 'column "requests" does not exist', persisted: false }));
+
+    expect(line).toContain("$3.40 of $20.00 CAD used in August 2026");
+    expect(line).toContain("not being recorded");
+    expect(line).toContain('column "requests" does not exist');
+    expect(line).toContain("not being held across restarts");
+  });
+
+  test("does not run two sentences together when the run count is already a full stop", () => {
+    const line = budgetLine(status({ runsRemaining: 0, ledgerWriteError: "permission denied", persisted: false }));
+
+    expect(line).not.toContain("..");
+    expect(line).toContain("Not enough left for another run");
+    expect(line).toContain("permission denied");
   });
 });

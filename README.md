@@ -30,7 +30,7 @@ Credentials live in `.env.local`, which is gitignored. Never print, log or commi
 | `OPENROUTER_API_KEY` | yes | Model calls. Both pinned models are DeepSeek via OpenRouter. |
 | `EXA_API_KEY` | yes | Web search. The expensive half of the monthly budget. |
 | `SUPABASE_URL` | yes | The dedicated Supabase project. |
-| `SUPABASE_SERVICE_ROLE_KEY` | yes | Server-only. Without it the app runs but saves nothing, and the API budget cap is per-process rather than per-month. |
+| `SUPABASE_SERVICE_ROLE_KEY` | yes | Server-only. Without it the app runs but saves nothing, and the API budget cap is per-process rather than per-month (the UI marks it "not persisted"). With it set, `supabase-setup.sql` must have been run: if `enactus_api_spend` is missing the month's spend cannot be read, and the agent and drafting refuse to run at all rather than guessing. |
 | `APP_TEAM_PASSWORD` | yes | The single shared team password. |
 | `SESSION_SECRET` | yes | Signs the session and Gmail cookies. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` | for Gmail drafts | OAuth for creating drafts in a teammate's Gmail. |

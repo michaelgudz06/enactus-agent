@@ -24,6 +24,9 @@ export const SFU_EMAIL_DOMAIN = "sfu.ca";
 /** Bracketed so it reads as a blank to fill, exactly like `[Your Name]` did. */
 export const SENDER_PLACEHOLDER = `[your-sfu-id]@${SFU_EMAIL_DOMAIN}`;
 
+/** Which of the two problems it is, for callers that must phrase it their own way. */
+export type SenderProblem = "unset" | "not_sfu";
+
 export interface OutreachSender {
   /** The signed-in person's display name. */
   name: string;
@@ -33,6 +36,8 @@ export interface OutreachSender {
   configured: boolean;
   /** Why a configured value was refused, or why there is none. Null when fine. */
   problem: string | null;
+  /** The same thing as a tag, so the wording can change with the moment. Null when fine. */
+  reason: SenderProblem | null;
 }
 
 /** `sfu.ca` itself, or a department subdomain of it. Nothing else. */
@@ -52,6 +57,7 @@ export function outreachSender(userName: string): OutreachSender {
       name,
       email: SENDER_PLACEHOLDER,
       configured: false,
+      reason: "unset",
       problem:
         `No SFU sending address is configured, so this draft is signed with a placeholder. ` +
         `Set OUTREACH_FROM_EMAIL to the club's @${SFU_EMAIL_DOMAIN} inbox.`,
@@ -63,13 +69,37 @@ export function outreachSender(userName: string): OutreachSender {
       name,
       email: SENDER_PLACEHOLDER,
       configured: false,
+      reason: "not_sfu",
       problem:
         `OUTREACH_FROM_EMAIL is not an @${SFU_EMAIL_DOMAIN} address, so it was not used. ` +
         `Outreach sends from an SFU inbox; this draft is signed with a placeholder instead.`,
     };
   }
 
-  return { name, email: configured.toLowerCase(), configured: true, problem: null };
+  return { name, email: configured.toLowerCase(), configured: true, problem: null, reason: null };
+}
+
+/**
+ * The same problem said at the moment it actually bites: creating the Gmail
+ * draft. There is no From header to set, so Gmail will send from whichever
+ * Google account the student connected -- a different consequence from the
+ * placeholder sign-off the draft step warns about, and one that defeats the
+ * ruling silently if nobody says it here.
+ *
+ * Null on the healthy path. A configured SFU inbox is not something to nag
+ * about.
+ */
+export function gmailSenderWarning(sender: OutreachSender): string | null {
+  if (sender.configured || !sender.reason) return null;
+  const cause =
+    sender.reason === "unset"
+      ? `OUTREACH_FROM_EMAIL is not set`
+      : `OUTREACH_FROM_EMAIL is not an @${SFU_EMAIL_DOMAIN} address and was refused`;
+  return (
+    `${cause}, so this draft carries no From address: Gmail will send it from whichever Google account you ` +
+    `connected, not the club's @${SFU_EMAIL_DOMAIN} inbox. Set OUTREACH_FROM_EMAIL to the club's ` +
+    `@${SFU_EMAIL_DOMAIN} inbox and create the draft again.`
+  );
 }
 
 /**

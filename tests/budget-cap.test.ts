@@ -7,6 +7,9 @@ const db = vi.hoisted(() => ({
   rows: [] as { cost_usd: number }[],
   inserted: [] as Record<string, unknown>[],
   readFails: null as string | null,
+  // Supabase reports a rejected insert in `error` rather than by throwing, so
+  // this is the shape a real broken ledger write arrives in.
+  writeFails: null as string | null,
   hasKey: true,
 }));
 
@@ -15,6 +18,7 @@ vi.mock("@/lib/supabase", async (orig) => {
   const table = (name: string) => {
     const api = {
       insert(row: Record<string, unknown>) {
+        if (db.writeFails) return Promise.resolve({ data: null, error: { message: db.writeFails } });
         db.inserted.push({ table: name, ...row });
         return Promise.resolve({ data: null, error: null });
       },
@@ -40,6 +44,7 @@ beforeEach(() => {
   db.rows = [];
   db.inserted = [];
   db.readFails = null;
+  db.writeFails = null;
   db.hasKey = true;
   budget.resetSpendCacheForTests();
   vi.stubEnv("OPENROUTER_API_KEY", "test-key");
@@ -351,6 +356,52 @@ describe("the ledger", () => {
 
     expect(status.error).toContain("connection reset");
     expect(status.runsRemaining).toBe(0);
+  });
+});
+
+// A ledger that cannot be WRITTEN is the same unknown one step later: the money
+// went, the row did not, and the next cold start reads a month that is missing
+// it. Reads still working while writes fail is what would otherwise report
+// "$0.00 of $20.00 used" forever.
+describe("a ledger that cannot be written is not a silent one", () => {
+  test("keeps the charge against this process even when the row is rejected", async () => {
+    db.writeFails = 'column "requests" does not exist';
+
+    await budget.recordSpend({
+      provider: "exa",
+      model: "search",
+      operation: "search",
+      costUsd: budget.EXA_SEARCH_USD,
+    });
+
+    expect(db.inserted).toHaveLength(0);
+    expect(await budget.monthToDateUsd()).toBeCloseTo(budget.EXA_SEARCH_USD, 9);
+  });
+
+  test("stops claiming the spend is persisted, and says why", async () => {
+    db.writeFails = 'column "requests" does not exist';
+
+    await budget.recordSpend({ provider: "exa", model: "search", operation: "search", costUsd: 0.007 });
+    const status = await budget.budgetStatus(0.03);
+
+    expect(status.persisted).toBe(false);
+    expect(status.ledgerWriteError).toContain('column "requests" does not exist');
+  });
+
+  test("does not lose the run over a bookkeeping write", async () => {
+    db.writeFails = "permission denied for table enactus_api_spend";
+
+    await expect(
+      budget.recordSpend({ provider: "exa", model: "search", operation: "search", costUsd: 0.007 })
+    ).resolves.toBeUndefined();
+  });
+
+  test("a ledger that is writing fine is still reported as persisted", async () => {
+    await budget.recordSpend({ provider: "exa", model: "search", operation: "search", costUsd: 0.007 });
+    const status = await budget.budgetStatus(0.03);
+
+    expect(status.persisted).toBe(true);
+    expect(status.ledgerWriteError).toBeNull();
   });
 });
 

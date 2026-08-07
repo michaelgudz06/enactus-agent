@@ -41,6 +41,55 @@ describe("the Gmail draft carries the SFU sender", () => {
   });
 });
 
+// A MIME header ends at the first CRLF, so a newline in a value the request
+// body supplied is a header of its own -- and the human presses send on
+// whatever ends up in the draft.
+describe("a header value cannot become a header", () => {
+  function headerLines(): string[] {
+    const [headers] = sentMime().split("\r\n\r\n");
+    return headers.split("\r\n");
+  }
+
+  test("a recipient carrying a CRLF cannot add a Bcc", async () => {
+    await createDraft("token", {
+      to: "hello@example.ca\r\nBcc: someone@example.com",
+      subject: "Enactus SFU x you",
+      body: "Hi there.",
+      from: "enactus@sfu.ca",
+    });
+
+    // The injected text survives as part of the To value, which is inert. What
+    // must not exist is a header line of its own.
+    expect(headerLines().some((line) => /^bcc:/i.test(line))).toBe(false);
+    expect(headerLines()).toEqual([
+      "From: enactus@sfu.ca",
+      "To: hello@example.ca Bcc: someone@example.com",
+      "Subject: Enactus SFU x you",
+      'Content-Type: text/plain; charset="UTF-8"',
+      "MIME-Version: 1.0",
+    ]);
+  });
+
+  test("a subject carrying a CRLF cannot add a header either", async () => {
+    await createDraft("token", {
+      to: "hello@example.ca",
+      subject: "Hello\r\nBcc: someone@example.com",
+      body: "Hi there.",
+    });
+
+    expect(headerLines().some((line) => /^bcc:/i.test(line))).toBe(false);
+    expect(headerLines()).toHaveLength(4);
+  });
+
+  // The body is not a header and keeps its newlines: folding them would rewrite
+  // the email a student is about to send.
+  test("leaves the body's own line breaks alone", async () => {
+    await createDraft("token", { to: "hello@example.ca", subject: "S", body: "Hi there,\n\nNikita" });
+
+    expect(sentMime()).toContain("Hi there,\n\nNikita");
+  });
+});
+
 // The one rule this file exists under. A human presses send, which is where
 // CASL liability belongs.
 describe("still drafts, never sends", () => {

@@ -293,8 +293,12 @@ a row, and leave `value` blank with a note rather than asserting an unverified d
   still lost. The statements are listed at the top of the file for whoever
   deploys, and repeated with the other migrations. `enactus_api_spend` and
   `enactus_activity_log` are new tables rather than columns, so the file does
-  create them — but until it is run, the budget cap is per-process and nothing
-  is attributed. Both say so rather than implying otherwise.
+  create them — but until it is run against a project whose service key is set,
+  the month's spend cannot be read, and unknown spend is spent: **the agent and
+  the draft route refuse to run at all** rather than degrading. Nothing is
+  attributed either, and that one is reported rather than fatal. The cap is only
+  per-process in the other state — no service key set at all — and the UI marks
+  that "not persisted".
 - Credentials live in `.env.local`, which is gitignored. Never print, log, or
   commit a secret value. Variable names are documented in the README; add new
   ones there.

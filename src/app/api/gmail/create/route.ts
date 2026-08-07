@@ -3,7 +3,7 @@ import { getSession } from "@/lib/auth";
 import { createDraft, ensureAccessToken, hasGoogleConfig, readCookie, signCookie, GmailTokens, GMAIL_COOKIE } from "@/lib/gmail";
 import { supabaseAdmin, DRAFTS, hasServiceKey } from "@/lib/supabase";
 import { sanitizeEmail } from "@/lib/sanitize";
-import { outreachSender } from "@/lib/sender";
+import { gmailSenderWarning, outreachSender } from "@/lib/sender";
 import { logActivity } from "@/lib/activity";
 
 export const runtime = "nodejs";
@@ -34,6 +34,7 @@ export async function POST(req: Request) {
   // and nowhere to put it -- but the response says plainly which mailbox it is
   // about to send from, because that is the whole point of the ruling.
   const sender = outreachSender(session.name);
+  const senderWarning = gmailSenderWarning(sender);
 
   try {
     const fresh = await ensureAccessToken(tokens);
@@ -61,7 +62,7 @@ export async function POST(req: Request) {
     return Response.json({
       ok: true,
       draftId,
-      senderWarning: sender.problem,
+      senderWarning,
       ...(attribution.error ? { attributionError: attribution.error } : {}),
     });
   } catch (e) {

@@ -247,12 +247,25 @@ let cachedUsd = 0;
 let pendingMonth: string | null = null;
 let pendingUsd = 0;
 
+// A charge that could not be written to the ledger is spend nobody can account
+// for once this process ends: the next cold start re-reads a month that is
+// missing it. That is the same unknown as a ledger that cannot be read, so it
+// is reported the same way rather than swallowed -- a cap whose write can fail
+// while the UI still says "persisted" is not a cap.
+let ledgerWriteError: string | null = null;
+
 /** Test seam. Resets the cache so one test's spend never reaches another. */
 export function resetSpendCacheForTests(): void {
   cachedMonth = null;
   cachedUsd = 0;
   pendingMonth = null;
   pendingUsd = 0;
+  ledgerWriteError = null;
+}
+
+/** The message from the last charge that could not be written, if any. */
+export function ledgerWriteProblem(): string | null {
+  return ledgerWriteError;
 }
 
 // Charges belong to the month they happened in. A process alive across midnight
@@ -301,14 +314,24 @@ export async function monthToDateUsd(): Promise<number> {
   return cachedUsd + pending;
 }
 
-/** Writes one charge to the ledger and counts it against this month. */
+/**
+ * Writes one charge to the ledger and counts it against this month.
+ *
+ * Never throws: losing a run over a bookkeeping write would be the worse trade,
+ * and the charge is already counted in `pendingUsd` so this process still stops
+ * in the right place. It never pretends either. Supabase reports a rejected
+ * insert in `error` rather than by throwing, so both shapes of failure are
+ * caught and both are remembered for `budgetStatus` to report -- a row that was
+ * never written is spend that vanishes at the next cold start, which is exactly
+ * the state that must not read as a live cap.
+ */
 export async function recordSpend(entry: SpendEntry): Promise<void> {
   const month = billingMonth();
   pendingForMonth(month);
   pendingUsd += Math.max(0, entry.costUsd);
   if (!hasServiceKey()) return;
   try {
-    await supabaseAdmin.from(SPEND).insert({
+    const { error } = await supabaseAdmin.from(SPEND).insert({
       billing_month: month,
       provider: entry.provider,
       model: entry.model,
@@ -318,11 +341,9 @@ export async function recordSpend(entry: SpendEntry): Promise<void> {
       requests: entry.requests ?? 1,
       cost_usd: Number(entry.costUsd.toFixed(6)),
     });
-  } catch {
-    // The charge is already counted in `pendingUsd`, so this process still
-    // stops in the right place. A lost row understates next month's starting
-    // point rather than overstating it, and losing the run over a bookkeeping
-    // write would be the worse trade.
+    if (error) ledgerWriteError = error.message;
+  } catch (e) {
+    ledgerWriteError = (e as Error).message;
   }
 }
 
@@ -393,19 +414,27 @@ export interface BudgetStatus {
   remainingCad: number;
   /** Whole runs the remaining budget can still pay for, at worst case. */
   runsRemaining: number;
-  /** False when there is no service key, so the ledger is per-process only. */
+  /**
+   * False when the month's spend is not actually being kept: no service key, or
+   * a ledger write that failed. Either way the count on screen is this
+   * process's own and dies with it, so it must not be shown as a live cap.
+   */
   persisted: boolean;
   /** Set when the ledger could not be read; spend is unknown, not zero. */
   error: string | null;
+  /** Set when a charge could not be written; that spend is lost at restart. */
+  ledgerWriteError: string | null;
 }
 
 export async function budgetStatus(runCostUsd: number): Promise<BudgetStatus> {
   const cap = capCad();
+  const writeError = ledgerWriteProblem();
   const base = {
     month: billingMonth(),
     monthLabel: billingMonthLabel(),
     capCad: cap,
-    persisted: hasServiceKey(),
+    persisted: hasServiceKey() && writeError === null,
+    ledgerWriteError: writeError,
   };
   try {
     const spent = await monthToDateUsd();

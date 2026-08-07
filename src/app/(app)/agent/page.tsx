@@ -18,6 +18,7 @@ interface Budget {
   runsRemaining: number;
   persisted: boolean;
   error: string | null;
+  ledgerWriteError: string | null;
 }
 
 /**
@@ -28,14 +29,24 @@ interface Budget {
  * should act on, and the run button stays enabled either way -- the server holds
  * the cap, and a UI that blocks on its own guess would be a guard that fires
  * early.
+ *
+ * A ledger that cannot be written is the same unknown one step later: the spend
+ * happened, the row did not, and the number on screen is only what this server
+ * has counted since it started. Saying so is the point -- a figure that looks
+ * like a live cap and is not is the failure this file's rules exist to prevent.
  */
 export function budgetLine(budget: Budget): string {
   if (budget.error) return `Monthly API budget: could not be read. ${budget.error}`;
   const spend = `$${budget.spentCad.toFixed(2)} of $${budget.capCad.toFixed(2)} CAD used in ${budget.monthLabel}`;
-  if (budget.runsRemaining < 1) {
-    return `${spend}. Not enough left for another run. It resets at the start of next month.`;
-  }
-  return `${spend}, about ${budget.runsRemaining} run${budget.runsRemaining === 1 ? "" : "s"} left`;
+  const line =
+    budget.runsRemaining < 1
+      ? `${spend}. Not enough left for another run. It resets at the start of next month.`
+      : `${spend}, about ${budget.runsRemaining} run${budget.runsRemaining === 1 ? "" : "s"} left`;
+  if (!budget.ledgerWriteError) return line;
+  return (
+    `${line}${line.endsWith(".") ? "" : "."} Spend is not being recorded: ${budget.ledgerWriteError}. ` +
+    `This counts only what this server has spent since it started, so the cap is not being held across restarts.`
+  );
 }
 
 const EXAMPLES_SPONSOR = [
@@ -166,8 +177,17 @@ export default function AgentPage() {
             {budget && (
               <span
                 className="text-[11px] flex items-center gap-1 ml-auto mr-1 text-right"
-                title={budget.persisted ? undefined : "No database key is set, so this only counts what this server has spent since it started."}
-                style={{ color: budget.error || budget.runsRemaining < 1 ? "var(--accent)" : "var(--faint)" }}
+                title={
+                  budget.persisted
+                    ? undefined
+                    : budget.ledgerWriteError
+                      ? "Charges are not reaching the spend table, so this only counts what this server has spent since it started."
+                      : "No database key is set, so this only counts what this server has spent since it started."
+                }
+                style={{
+                  color:
+                    budget.error || budget.ledgerWriteError || budget.runsRemaining < 1 ? "var(--accent)" : "var(--faint)",
+                }}
               >
                 <Wallet size={12} className="shrink-0" />
                 {budgetLine(budget)}

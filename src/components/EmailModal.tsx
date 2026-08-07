@@ -46,6 +46,48 @@ export async function requestDraft(leadId: string): Promise<DraftResult> {
 }
 
 /**
+ * What creating the Gmail draft came back with. `connect` is not a failure: the
+ * Gmail account simply has not been linked yet, and the caller sends the student
+ * through OAuth.
+ */
+export type GmailDraftResult =
+  | { kind: "created"; message: string; senderWarning: string }
+  | { kind: "connect" }
+  | { kind: "failed"; message: string };
+
+/**
+ * The sender warning belongs here, at the step where it bites: this is the
+ * moment a draft with no From address is created, and a student who never read
+ * the note one screen earlier would otherwise send from their personal Gmail
+ * without being told. The route decides whether there is anything to say; the
+ * modal only carries it.
+ */
+export async function requestGmailDraft(input: {
+  to: string | null;
+  subject: string;
+  body: string;
+  leadId: string;
+}): Promise<GmailDraftResult> {
+  try {
+    const res = await fetch("/api/gmail/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    const data = await res.json();
+    if (res.status === 428) return { kind: "connect" };
+    if (!res.ok) throw new Error(data.error || "Failed");
+    return {
+      kind: "created",
+      message: "Draft created in your Gmail. Open Gmail to review and send.",
+      senderWarning: typeof data.senderWarning === "string" ? data.senderWarning : "",
+    };
+  } catch (e) {
+    return { kind: "failed", message: (e as Error).message };
+  }
+}
+
+/**
  * The modal is loading until the draft on screen is the one this lead asked
  * for, or while a regenerate is in flight. Deriving it from the lead the draft
  * belongs to is what the mount effect's `setLoading(true)` stood in for, and it
@@ -68,6 +110,9 @@ export default function EmailModal({ lead, onClose }: { lead: Lead; onClose: () 
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
   const [gmailMsg, setGmailMsg] = useState("");
+  // Which mailbox the Gmail draft will actually go out from, when it is not the
+  // club's. Shown as a warning rather than alongside the success line.
+  const [senderWarning, setSenderWarning] = useState("");
   // What the draft lost on the way here. A field the model sent in the wrong
   // type costs that field, and saying so beats a draft that is quietly thinner
   // than it looks.
@@ -116,23 +161,14 @@ export default function EmailModal({ lead, onClose }: { lead: Lead; onClose: () 
 
   async function createGmailDraft() {
     setGmailMsg("");
-    try {
-      const res = await fetch("/api/gmail/create", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to, subject, body, leadId: lead.id }),
-      });
-      const data = await res.json();
-      if (res.status === 428) {
-        // needs Gmail connection
-        window.location.href = "/api/gmail/auth";
-        return;
-      }
-      if (!res.ok) throw new Error(data.error || "Failed");
-      setGmailMsg("Draft created in your Gmail. Open Gmail to review and send.");
-    } catch (e) {
-      setGmailMsg((e as Error).message);
+    setSenderWarning("");
+    const result = await requestGmailDraft({ to, subject, body, leadId: lead.id });
+    if (result.kind === "connect") {
+      window.location.href = "/api/gmail/auth";
+      return;
     }
+    setGmailMsg(result.message);
+    if (result.kind === "created") setSenderWarning(result.senderWarning);
   }
 
   return (
@@ -214,6 +250,7 @@ export default function EmailModal({ lead, onClose }: { lead: Lead; onClose: () 
           )}
 
           {gmailMsg && <p className="text-xs" style={{ color: "var(--green)" }}>{gmailMsg}</p>}
+          {senderWarning && <p className="text-xs" style={{ color: "var(--accent)" }}>{senderWarning}</p>}
         </div>
 
         <div className="flex items-center gap-2 px-5 py-3.5 border-t flex-wrap" style={{ borderColor: "var(--border)" }}>

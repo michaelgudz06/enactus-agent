@@ -85,6 +85,15 @@ export async function ensureAccessToken(tokens: GmailTokens): Promise<GmailToken
   return { access_token: d.access_token, refresh_token: tokens.refresh_token, expiry: Date.now() + (d.expires_in ?? 3600) * 1000 };
 }
 
+// A MIME header ends at the first CRLF, so a newline inside a header value is a
+// new header: a recipient carrying "\r\nBcc: someone@example.com" would add a
+// recipient to a draft a human later presses send on. Every value interpolated
+// into a header is folded to spaces first, here rather than at the call sites,
+// because the builder is the one place all of them pass through.
+function headerValue(value: string): string {
+  return value.replace(/[\r\n]+/g, " ").trim();
+}
+
 /**
  * `from` is the club's @sfu.ca inbox, and it is only ever passed when one is
  * actually configured -- a placeholder in a MIME header would be a malformed
@@ -100,9 +109,9 @@ export async function createDraft(
 ): Promise<string> {
   const { to, subject, body, from } = message;
   const mime = [
-    ...(from ? [`From: ${from}`] : []),
-    `To: ${to}`,
-    `Subject: ${subject}`,
+    ...(from ? [`From: ${headerValue(from)}`] : []),
+    `To: ${headerValue(to)}`,
+    `Subject: ${headerValue(subject)}`,
     'Content-Type: text/plain; charset="UTF-8"',
     "MIME-Version: 1.0",
     "",

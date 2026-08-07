@@ -16,11 +16,16 @@
 -- them, so running this whole file is enough, but they must exist before either
 -- feature works:
 --
---   enactus_api_spend      the ledger behind the $20 CAD/month API cap. Until
---                          it exists the cap CANNOT be enforced across runs:
---                          each serverless invocation starts from zero and the
---                          month's real spend is unknown. The app reports that
---                          as "not persisted" rather than implying a live cap.
+--   enactus_api_spend      the ledger behind the $20 CAD/month API cap. With a
+--                          SUPABASE_SERVICE_ROLE_KEY set and this table absent,
+--                          the month's spend cannot be read, and unknown spend
+--                          is treated as spent: THE AGENT REFUSES TO RUN AT ALL
+--                          and every draft is refused too, with "Could not read
+--                          this month's API spend ... Nothing ran." That is not
+--                          a degraded mode, it is a full stop, and running this
+--                          file is what clears it. (Only with NO service key
+--                          set is the ledger per-process instead; the app
+--                          reports that as "not persisted".)
 --   enactus_activity_log   who was signed in for each action. Until it exists
 --                          nothing is attributed, and the app says so.
 -- ══════════════════════════════════════════════════════════════════
