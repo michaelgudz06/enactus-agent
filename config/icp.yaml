@@ -59,6 +59,116 @@ geography:
     unresolved: 0
 
 # ---------------------------------------------------------------------------
+# The SMB band — what "small-to-medium" means for this ICP.
+#
+# CAPTAIN'S RULING 2026-08-06 (key enactus-arch-decision-smb-size-thresholds): a company is
+# in-scope small-to-medium at 5 TO 250 EMPLOYEES, inclusive.
+#
+#   below min_headcount — too small to carry a sponsorship budget.
+#   above max_headcount — enterprise, where no single person can approve unilaterally. That is
+#                         the ENTIRE PREMISE of this ICP: the agent exists to find a
+#                         decision-maker who can say yes. Above the band a company is a
+#                         NON-MONETARY relationship (S15), not a donor — which is the rung the
+#                         report already had at 500. The captain moved the number; the rung and
+#                         its reasoning are unchanged. See ENTERPRISE FLOOR in src/lib/scoring.ts.
+#
+# ⚠ THE ABSENCE RULE GOVERNS THIS BLOCK. Headcount is frequently unknown or stale on a small
+# business — 24 of the 25 seeded rows record none (only Safe Software states a number, "200+
+# employees", and it is in band), and no free source publishes headcount for BC micro-businesses.
+# An UNKNOWN headcount is NEVER a kill and NEVER a penalty on its own: absence may only penalise
+# after a documented attempt to resolve it, never on a value that is merely missing. Getting this
+# wrong silently deletes exactly the small local businesses the club most wants.
+#
+# A RECORDED HEADCOUNT OF 0 OR LESS COUNTS AS UNKNOWN, not as a company below the floor. A real
+# one-person business is 1, not 0; 0 is what a scraper or a model emits for a field it could not
+# fill. A NON-FINITE value counts as unknown too — that is what a failed coercion leaves behind,
+# and the one seeded row that states a headcount states it as the prose "200+ employees". The
+# rewrite is never silent — the lead's size_band reason and its G_SIZE gate message both say the
+# value arrived and was read as unknown. `knownHeadcount` in src/lib/scoring.ts is the one place
+# that decides this, and every reader of these two numbers goes through it.
+#
+# The band is the DEFAULT ENVELOPE for the per-segment bands under `segments:`. It never applies
+# to a segment that makes no size judgement at all (S1 by design — see its block below — S8 scores
+# the local field-marketing territory, S10/S14/S16 are institutions, S15 is BY DEFINITION above
+# the band). That entry condition is stated once, in `smbBandApplies` in src/lib/scoring.ts.
+#
+# ⚠ A SEGMENT IS NEVER JUDGED OUT OF BAND FOR A HEADCOUNT ITS OWN DECLARED BAND REACHES.
+# CAPTAIN'S DECISION, applied as a general rule rather than an exception list. A segment that
+# declares it accepts companies smaller than the 5-person floor keeps that reach; a segment that
+# declares no bound of its own inherits the global one. So the floor a row is actually judged
+# against is min(min_headcount, that segment's ideal_low), and the ceiling is
+# min(max_headcount, that segment's headcount_ceiling) — the band only ever narrows a segment
+# from above and lowers it from below, never the reverse. See `effectiveSizeBounds` in
+# src/lib/scoring.ts.
+#
+# The clearest case is S6 ALUMNI_LED_COMPANY (ideal_low 1). An alum-led company's value to the
+# club is a former Enactus SFU executive who answers the phone, not its cheque size, so pricing a
+# solo founder on headcount contradicts the captain's own "a mentor is worth the same as money"
+# ruling — and neither premise of this band holds for a one-person alumni company. S12 family
+# office (2-20) is protected the same way: the report's words are "family offices are TINY, which
+# is exactly why the approach is short", and too-small-to-carry-a-budget is the one reason that
+# does not apply to a principal spending their own money.
+#
+# ⚠ WHICH SEGMENTS A KNOWN SUB-FLOOR HEADCOUNT STILL COSTS IS DERIVED FROM THIS FILE, NEVER
+# LISTED HERE. A hand-written enumeration in this block previously named four segments and missed
+# S6, which carries 13 of the 17 band-judged seeded rows — an enumeration that misses a case is
+# the defect class this repo has closed repeatedly. The set is computed from `segments:` and
+# proved by "derives from config which segments a KNOWN sub-floor headcount actually costs" in
+# tests/scoring.test.ts, so it cannot go stale when a segment band is retuned.
+# ---------------------------------------------------------------------------
+smb_band:
+  min_headcount: 5
+  max_headcount: 250
+
+# ---------------------------------------------------------------------------
+# Advisory capacity — a mentor, a project advisor, a judge.
+#
+# CAPTAIN'S RULING 2026-08-06 (key enactus-arch-decision-sponsorship-outcome-weighting):
+# A MENTOR OR PROJECT ADVISOR IS WORTH THE SAME AS MONEY. The club asked for advisors as an
+# explicit goal ALONGSIDE funding, so an advisory yes is not a consolation prize for a cash no.
+#
+# This is why advisory capacity is its OWN objective beside `deployable_cash`, and is deliberately
+# NOT a term in fit / affinity / access, NOT a trigger bonus, and NOT a tie-break. A weight, a
+# bonus or a tiebreaker would each encode "cash first, advisory if nothing better" — precisely
+# what the ruling forbids. THERE ARE THREE OBJECTIVES NOW AND THEY ARE STILL NEVER SUMMED:
+# `expected_cash` + `expected_value` is not a quantity the club has, because a mentor does not pay
+# a printer. Parity means a $375 advisory yes RANKS WITH a $375 cash yes, not that it spends like
+# one.
+# ---------------------------------------------------------------------------
+advisory:
+  # The ruling itself, machine-checked. `equal_to_cash` values an advisory commitment at the SAME
+  # ask-ladder rung the lead's own cash ask uses, so "worth the same as a cheque of comparable
+  # value" is arithmetic rather than sentiment and no second, lower ladder exists to discount it
+  # quietly. `loadIcpConfig()` rejects any other value: reintroducing a cash preference has to be
+  # a deliberate, visible edit here, not a drifting weight.
+  parity: equal_to_cash
+
+  # What the club actually offers, taken from its own published per-event engagement menu
+  # (enactus-org/report.md §5: "Event Sponsor · Judge · Team Mentor · Networker · Guest Speaker ·
+  # Workshop Leader · Talent Connector · Mentor"), plus `project_advisor` for the club's stated
+  # goal. A model may REPORT a commitment; code checks it against this list and REPORTS anything
+  # it does not recognise rather than scoring it. Nothing here is invented.
+  commitments:
+    [mentor, team_mentor, project_advisor, judge, guest_speaker, workshop_leader, talent_connector, networker]
+
+  # The rung an advisory commitment is valued at when the lead's OWN ask carries no cash amount —
+  # an in-kind or non-monetary ask. Without it, parity would evaluate to $0 for exactly the
+  # segments where advisory is the real product (report §5 S11: "The non-monetary yield is the
+  # real product here"), which is the cash preference the ruling forbids.
+  #
+  # ⚠ AN INTERNAL VALUATION FOR RANKING ONLY. It is never an ask, never appears in copy and never
+  # reaches a prospect — `ask_rules` still derives the ask. Anchored on the report naming a mentor
+  # or judge slot alongside a Silver cash ask in the same breath (§5 S9, §5 S11); Silver is the
+  # lower of the two rungs those sections name. A STARTING ESTIMATE like every weight in this
+  # file, and the VP External moves it. The `parity` above is the ruling and is NOT a tuning knob.
+  #
+  # `loadIcpConfig()` requires a rung with a NON-ZERO amount_high, so `in_kind` and `none` — both
+  # $0-$0 — are rejected here. Naming one would pass a plain membership check and then value every
+  # advisory commitment on a no-cash-ask lead at $0, which is the cash preference `parity` forbids
+  # arriving through the one advisory field that IS a knob.
+  parity_tier: silver
+
+# ---------------------------------------------------------------------------
 # The three scores. NEVER summed on the card — see report §6.1. Three different failures
 # produce the same low blended score and require three opposite actions.
 # ---------------------------------------------------------------------------
@@ -214,7 +324,12 @@ segments:
   S1:
     key: LAPSED_PARTNER_RENEWAL
     objective: cash_and_relationship
-    headcount_ceiling: null # inherited from underlying_segment; no independent gate
+    # NO SIZE JUDGEMENT AT ALL, BY DESIGN — and NOT inherited from underlying_segment: nothing
+    # reads that field for sizing. A lapsed partner has already sponsored, so size has been
+    # answered by evidence and prior sponsorship supersedes it. The consequence is deliberate: a
+    # lapsed partner with a known headcount of 3 keeps the size weight where an identical cold
+    # row does not.
+    headcount_ceiling: null
     ideal_low: null
     ideal_high: null
   S2:
@@ -299,6 +414,13 @@ segments:
     key: CORPORATE_TALENT_PARTNER
     objective: relationship_only # no ceiling, but NON-MONETARY ONLY
     headcount_ceiling: null
+    # `smb_band` is deliberately NOT applied here: S15 is BY DEFINITION the segment above the
+    # band, so bounding it by the band would penalise a row for the very fact that put it here.
+    # `ideal_low` stays at the report's own 500 rather than tracking `smb_band.max_headcount`:
+    # the captain ruled on where the ENTERPRISE line falls, not on which enterprises make the
+    # best mentor employers, and the report's archetype for this segment is a blue-chip with a
+    # large local office. A 300-person company now lands here and scores half the size weight,
+    # which is the honest reading of "a weaker S15", not an artefact to tune away.
     ideal_low: 500
     ideal_high: null
   S16:

@@ -195,9 +195,47 @@ Four invariants these modules exist to hold. Breaking one silently is the failur
    carrying the missing field names. Every rule also carries an explicit ENTRY CONDITION — "does
    this rule apply to this row at all?" — taken from its own definition row. An unproven condition
    on an entity the rule does not cover is a no-op, not a penalty.
-4. **Never blend the scores.** `fit` / `affinity` / `access` stay separate, and so do the two
-   objectives (`deployable_cash` vs `relationship_volume`). For Tier B segments the cash
-   objective is *not applicable*, not zero.
+4. **Never blend the scores.** `fit` / `affinity` / `access` stay separate, and so do the three
+   objectives (`deployable_cash`, `relationship_volume`, `advisory_capacity`). For Tier B
+   segments the cash objective is *not applicable*, not zero.
+
+## Two captain rulings the scorer encodes as parameters
+
+Both are product statements, both live in `config/icp.yaml`, and both are held by tests in
+`tests/scoring.test.ts` that compare against the pre-ruling behaviour rather than asserting the
+new number in isolation. Full record: `/Users/test/firstmate/data/decisions/captain-answers-2026-08-06-batch.md`.
+
+- **`smb_band` — small-to-medium is 5 to 250 employees.** It is the DEFAULT ENVELOPE for the
+  per-segment bands and supplies the enterprise line the §4 ladder used to carry as a literal 500.
+  **An unknown headcount is never a kill and never a penalty** — absence may only penalise after a
+  documented attempt to resolve it. 24 of the 25 seeded rows record no headcount, so a band that
+  fired on absence would empty the board. `knownHeadcount` is the ONE place that decides what
+  headcount the code knows, and every reader goes through it: a recorded 0 or less is filler and a
+  non-finite value is a failed coercion (`Number("200+ employees")`), not a company below the floor
+  or one the gate may pass, so both read as unknown and the rewrite is announced on the size_band
+  reason and the G_SIZE message rather than applied silently. Applicability is decided per SEGMENT before the
+  headcount is read (`smbBandApplies`): a credit union or a foundation makes no size judgement,
+  S1 makes none by design because prior sponsorship already answered it, and Vancity must survive
+  it. **A segment is never judged out of band for a headcount its own declared band reaches** —
+  `effectiveSizeBounds` takes `min` of the global bound and the segment's own at both ends, so a
+  segment declaring `ideal_low: 1` (S6 alum-led, S2, S5) keeps that reach and one declaring
+  nothing inherits the global bound. Which segments a known sub-floor headcount still costs is
+  derived from `config/icp.yaml` by a test, never enumerated in a comment.
+- **`advisory` — a mentor or project advisor is worth the same as money.** Advisory capacity is
+  its own objective, never a term, a bonus or a tie-break inside the cash score, and it is
+  applicable independently of whether funding evidence exists. `parity: equal_to_cash` is the
+  ruling and `loadIcpConfig()` rejects any other value, so a cash preference cannot drift back in
+  as a weight. `advisory.parity_tier` is the one tuning knob and must name an `ask_ladder` rung
+  with a non-zero `amount_high`: a $0 rung would value every advisory commitment on a
+  no-cash-ask lead at zero, which is the same preference arriving through the knob.
+
+**Known gap, upstream of this layer:** nothing can supply `advisory_commitments` yet, and **this is
+not a schema gap — do not write a migration for it.** `sponsorship_type` in `supabase-setup.sql` is
+an untyped `text[]` with no CHECK, enum or domain, so it could already hold a mentor. What blocks
+one is the leads prompt in `src/lib/agent.ts`, which asks for an array subset of
+`["monetary","in_kind"]`, and the fact that no code maps a stored lead onto
+`CompanyFacts.advisory_commitments` at all. So 0 of 25 seeded rows can record a mentor even though
+two describe one in prose; the fix is prompt vocabulary plus a field mapping.
 
 ## Policy lives in `config/`, not in code
 

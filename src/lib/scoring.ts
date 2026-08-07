@@ -14,17 +14,23 @@
 //     blended score and require three opposite actions. §6.1. There is deliberately no `total`
 //     field on ScoreResult.
 //
-//  3. TWO OBJECTIVES, NEVER ONE. The highest-converting ask does not pay any bills: 69 logos
+//  3. SEPARATE OBJECTIVES, NEVER ONE. The highest-converting ask does not pay any bills: 69 logos
 //     produced $3,200. A pipeline optimised purely for conversion rate reproduces exactly the
 //     outcome the club already has. So every lead carries a `deployable_cash` objective AND a
 //     `relationship_volume` objective, and they are never added together. §0.4, §8.
 //     For Tier B segments (S15, S16) the cash objective is NOT APPLICABLE, not zero — scoring
 //     them on dollars makes a successful relationship look like a failed sale. §11.
+//     CAPTAIN'S RULING 2026-08-06 added a THIRD: `advisory_capacity`, because a mentor or project
+//     advisor is worth THE SAME as money and the club asked for advisors as an explicit goal
+//     alongside funding. It is an objective rather than a weight for the same reason the other two
+//     are separate — a term inside the cash score would encode "cash first, advisory if nothing
+//     better". Three now, and still never summed.
 //
 // The weights live in config/icp.yaml, not here. A future VP External Relations must be able to
 // retune the ICP in September without a developer.
 
 import type {
+  AdvisoryParity,
   AlumniEvidence,
   AskClass,
   AskRule,
@@ -46,7 +52,7 @@ import {
   resolveLocationGeography,
 } from "./qualification-lists";
 
-export type { SegmentId, RelationshipTier, AlumniEvidence, AskClass, AskTier };
+export type { SegmentId, RelationshipTier, AlumniEvidence, AskClass, AskTier, AdvisoryParity };
 
 // ===========================================================================
 // §4 — segment assignment
@@ -107,7 +113,33 @@ export interface CompanyFacts {
   is_public_or_civic?: boolean;
   civic_ask_shape?: CivicAskShape | null;
   is_national_enterprise?: boolean;
+  /**
+   * Employees. Read against the captain's 5–250 SMB band in config/icp.yaml.
+   *
+   * ABSENT MEANS UNKNOWN, NEVER SMALL AND NEVER LARGE. No free source publishes headcount for BC
+   * micro-businesses and 24 of the 25 seeded rows carry none, so no reader of this field touches
+   * it directly: every one goes through `knownHeadcount`, which is the single place that decides
+   * what the code actually knows and reads 0, a negative and a non-finite value as unknown too.
+   * Absence may only penalise after a documented attempt to resolve it; a merely-missing headcount
+   * costs nothing anywhere.
+   */
   headcount?: number | null;
+  /**
+   * Advisory capacity this lead has been OBSERVED to offer — a mentor, a project advisor, a judge
+   * — named from the club's own published per-event engagement menu (`advisory.commitments` in
+   * config/icp.yaml).
+   *
+   * CAPTAIN'S RULING 2026-08-06: this is worth THE SAME as money, so it feeds its own objective
+   * beside `deployable_cash` and is deliberately absent from fit, affinity, access and the trigger
+   * bonus. It is not a bonus, not a modifier and not a tie-break.
+   *
+   * ABSENT MEANS NOT RESEARCHED, NEVER REFUSED. An unrecorded advisory capacity leaves the
+   * advisory objective NOT APPLICABLE and costs the lead nothing anywhere else.
+   *
+   * The model may REPORT entries here; code checks each against the menu and reports the ones it
+   * does not recognise rather than scoring them.
+   */
+  advisory_commitments?: string[] | null;
   alumni_evidence: AlumniEvidence;
   sells_to_club_or_student_orgs?: boolean;
   runs_campus_recruiting?: boolean;
@@ -178,6 +210,59 @@ export interface CompanyFacts {
   email_channel_open?: boolean;
 }
 
+/**
+ * WHAT HEADCOUNT DOES THE CODE ACTUALLY KNOW?
+ *
+ * Stated ONCE, here, and read by every consumer of `CompanyFacts.headcount` — the enterprise rung
+ * in the §4 ladder, G_SIZE, and `scoreFit`'s size_band term — so the ladder, the gate and the
+ * score can never disagree about what arrived. A second normalisation somewhere downstream is the
+ * failure shape this codebase has closed repeatedly, one level higher each time.
+ *
+ * A HEADCOUNT OF 0 OR LESS IS READ AS UNKNOWN, NOT AS A KNOWN SUB-FLOOR VALUE. A genuinely
+ * zero-employee company is barely a category — a sole proprietor is 1, not 0 — while 0 is exactly
+ * what scrapers and models emit for a field they could not fill, so almost all the probability
+ * mass sits on "unknown". Failing safe costs a weighting on a company that may not exist; failing
+ * unsafe silently deletes real small local businesses, which are the leads the captain most wants
+ * and the precise harm the absence rule was written to prevent.
+ *
+ * A NON-FINITE HEADCOUNT IS READ AS UNKNOWN FOR THE SAME REASON, and it is the likelier arrival:
+ * the one seeded row that states a headcount states it as the prose "200+ employees", so a
+ * research step doing `Number("200+")` produces NaN. Left as known, NaN loses every comparison —
+ * so it is neither below the floor nor above the ceiling, and G_SIZE returns `pass` asserting
+ * evidence nobody has. That is the failure this whole helper exists to close, so it is closed
+ * HERE and nowhere else.
+ *
+ * THE REWRITE IS NEVER SILENT. `received` carries the unusable number the field arrived with, so
+ * a row that was filled with filler stays distinguishable on the evidence trail from a row where
+ * nothing was ever recorded — the same reason every other model-output repair in this project is
+ * announced. It is carried in the strings that already answer "why is this score what it is" (the
+ * size_band `basis` and the G_SIZE `message`) rather than as a new field on `ScoreResult`,
+ * because a computed-then-discarded signal is its own defect class.
+ */
+export function knownHeadcount(c: Pick<CompanyFacts, "headcount">): {
+  /** The headcount the code knows, or `null` when nothing usable arrived. */
+  value: number | null;
+  /** The unusable value the field arrived carrying, or `null` when it was never set. */
+  received: number | null;
+} {
+  if (c.headcount == null) return { value: null, received: null };
+  if (!Number.isFinite(c.headcount) || c.headcount <= 0) {
+    return { value: null, received: c.headcount };
+  }
+  return { value: c.headcount, received: null };
+}
+
+/** The one sentence that explains a rewritten headcount, so the gate and the score say it alike. */
+function fillerNote(received: number | null): string {
+  if (received == null) return "";
+  const why = Number.isFinite(received)
+    ? `0 or less is filler from a scraper or a model, never a measurement — a sole proprietor is ` +
+      `1, not 0`
+    : `a non-finite value is not a measurement — it is what a failed coercion leaves behind, and ` +
+      `the one seeded row that states a headcount states it as the prose "200+ employees"`;
+  return `. A headcount of ${received} was RECEIVED and is read as UNKNOWN: ${why}`;
+}
+
 export interface SegmentResult {
   segment: SegmentAssignment;
   /** Populated whenever `segment === "S1"`: the segment that owns the ask, the tier and the copy. */
@@ -199,8 +284,37 @@ export interface SegmentResult {
  * does the opposite: `raised_institutional_capital < 36 months` is tested BEFORE
  * `consumer_packaged_goods`. §4 is the normative ladder the brief points at, so a funded CPG
  * brand lands in S11 here. Flagged rather than silently reconciled.
+ *
+ * ⚠️ ONE CAPTAIN SUPERSESSION OF THE REPORT, 2026-08-06 (ENTERPRISE FLOOR).
+ * §4's ladder reads `if headcount > 500 or is_national_enterprise: return S15`, and §5 S15's
+ * firmographics say "headcount 500+". The captain ruled that in-scope small-to-medium ends at
+ * 250, because above it no single person can approve unilaterally — which is verbatim the
+ * reasoning this rung already encodes ("a NON-MONETARY relationship, not a donor segment"). So
+ * the NUMBER now comes from `smb_band.max_headcount` in config/icp.yaml and the rung, its
+ * position in the ladder and its reasoning are untouched. A ruling supersedes the report exactly
+ * as the 2026-08-06 geography ruling does; the report's 500 is recorded here rather than deleted.
+ *
+ * The rung's position matters and was checked rather than assumed: every institutional segment
+ * (S17 individual, S14 grantmaker, S10 credit union, S12 family office, S16 civic) is decided
+ * ABOVE it, so a credit union with 2,000 staff is still S10 and a foundation is still S14.
+ *
+ * EVERY SEGMENT DECIDED BELOW THE RUNG IS NEWLY REACHED BY THE LOWER LINE — S6, S5, S7, S8, S11,
+ * S9, S4, S3, S2 and S13, in ladder order. A 300-person company that was S6 (a cash ask, the cash
+ * objective applicable) now lands in S15 (`non_monetary_time`, the cash objective NOT APPLICABLE),
+ * and the same holds for each of the others between 251 and 500. Most were already outside their
+ * own `headcount_ceiling` at that size and so already scored 0 for size_band; S8 is the only one
+ * whose null ceiling meant it was not already out of ceiling, because its relevant unit is the
+ * local field-marketing territory rather than national headcount. What is new for ALL of them is
+ * the SEGMENT, not just the size term. That is the ruling's own logic (above the band no single
+ * person can approve unilaterally, so the relationship is non-monetary) rather than an accident,
+ * but it is a real behaviour change across ten segments and is stated here rather than discovered
+ * later.
  */
-export function assignSegment(c: CompanyFacts, opts: { now?: Date } = {}): SegmentResult {
+export function assignSegment(
+  c: CompanyFacts,
+  config: IcpConfig,
+  opts: { now?: Date } = {},
+): SegmentResult {
   const now = opts.now ?? new Date();
 
   if (c.is_excluded) {
@@ -221,7 +335,7 @@ export function assignSegment(c: CompanyFacts, opts: { now?: Date } = {}): Segme
   // The renewal motion overrides everything — but the UNDERLYING segment still owns the ask,
   // the tier and the copy, so it is computed and kept. §4 ambiguity 3.
   if (c.relationship_tier !== "cold") {
-    const underlying = ladder({ ...c, relationship_tier: "cold" }, now);
+    const underlying = ladder({ ...c, relationship_tier: "cold" }, config, now);
     return {
       segment: "S1",
       underlying_segment: typeof underlying.segment === "string" && underlying.segment.startsWith("S")
@@ -231,10 +345,10 @@ export function assignSegment(c: CompanyFacts, opts: { now?: Date } = {}): Segme
     };
   }
 
-  return ladder(c, now);
+  return ladder(c, config, now);
 }
 
-function ladder(c: CompanyFacts, now: Date): SegmentResult {
+function ladder(c: CompanyFacts, config: IcpConfig, now: Date): SegmentResult {
   const out = (segment: SegmentId | "UNSEGMENTED", basis: string): SegmentResult => ({
     segment,
     underlying_segment: null,
@@ -262,10 +376,18 @@ function ladder(c: CompanyFacts, now: Date): SegmentResult {
     );
   }
 
-  if ((c.headcount != null && c.headcount > 500) || c.is_national_enterprise) {
+  // ENTERPRISE FLOOR. The number is `smb_band.max_headcount`, never a literal here — see the
+  // captain supersession noted on `assignSegment`. An UNKNOWN headcount cannot fire this rung, and
+  // what counts as known is `knownHeadcount`'s call rather than this rung's:
+  // `is_national_enterprise` is the only other way in, and it is an observation, not an absence.
+  const enterpriseFloor = config.smb_band.max_headcount;
+  const knownSize = knownHeadcount(c).value;
+  if ((knownSize != null && knownSize > enterpriseFloor) || c.is_national_enterprise) {
     return out(
       "S15",
-      "headcount above 500 or a national enterprise — a NON-MONETARY relationship, not a donor segment",
+      `headcount above ${enterpriseFloor} or a national enterprise — above the in-scope SMB band ` +
+        `no single person can approve unilaterally, so this is a NON-MONETARY relationship, not a ` +
+        `donor segment`,
     );
   }
 
@@ -340,6 +462,85 @@ export interface GateResult {
   /** What a failure does. `park` and `cap_affinity` are deliberately NOT kills. */
   effect: "block" | "reassign" | "park" | "cap_affinity" | "none";
   message: string;
+}
+
+/**
+ * SMB BAND ENTRY CONDITION — "does the captain's 5–250 band apply to this row at all?"
+ *
+ * Stated ONCE, here, and read by both G_SIZE and `scoreFit`'s size_band term, so the band cannot
+ * mean one thing to the gate and another to the score. It answers the question the disqualifier
+ * module asks of every rule: does this rule cover this entity? An unproven condition on an entity
+ * the rule does not cover is a no-op, never a penalty.
+ *
+ * The band applies to a segment when BOTH hold:
+ *
+ *  1. The segment serves the cash objective (`cash_and_relationship`). Tier B is measured in
+ *     relationships, never in dollars, and S15 is BY DEFINITION the segment above the band —
+ *     bounding it by the band would penalise a row for the very fact that put it there.
+ *  2. The segment declares a headcount band of its own. A `null` ceiling with `null` ideals is
+ *     the config saying size is not the unit for this segment: S1 makes NO SIZE JUDGEMENT BY
+ *     DESIGN — a lapsed partner has already sponsored, so size has been answered by evidence and
+ *     prior sponsorship supersedes it — S8 scores the local field-marketing territory rather than
+ *     national headcount, and S10 / S14 are institutions whose staff count says nothing about
+ *     whether they fund students. Vancity has thousands of employees and is one of the club's
+ *     best real prospects; a band applied there would delete it.
+ *
+ *     S1 is stated as a CHOICE, not as inheritance: nothing here reads `underlying_segment`, and
+ *     a doc comment describing a mechanism that does not exist is the defect class this module
+ *     has closed repeatedly. A lapsed partner with a known headcount of 3 keeps the size weight
+ *     where an otherwise identical cold row does not, and that divergence is deliberate.
+ *
+ * NOTE WHAT THIS FUNCTION DOES NOT LOOK AT: the headcount. Applicability is a property of the
+ * SEGMENT. Whether a headcount is present is the caller's separate, explicit test, so that
+ * "the band does not apply here" and "we do not know the headcount" can never be confused.
+ */
+export function smbBandApplies(segment: SegmentAssignment, config: IcpConfig): boolean {
+  const seg = typeof segment === "string" && segment.startsWith("S") ? (segment as SegmentId) : null;
+  if (!seg) return false;
+  const s = config.segments[seg];
+  if (!s || s.objective !== "cash_and_relationship") return false;
+  return s.headcount_ceiling != null || s.ideal_low != null || s.ideal_high != null;
+}
+
+/**
+ * The bounds a row is actually judged against.
+ *
+ * THE SMB BAND IS THE DEFAULT ENVELOPE. A SEGMENT IS NEVER JUDGED OUT OF BAND FOR A HEADCOUNT ITS
+ * OWN DECLARED BAND REACHES. A segment that declares it accepts companies smaller than the global
+ * floor keeps that reach; a segment that declares no bound of its own inherits the global one.
+ * Both bounds are therefore `Math.min` of the global value and the segment's own — the band only
+ * ever NARROWS a segment from above and LOWERS it from below, and it can never make a segment
+ * stricter than the segment declared itself to be. Stated once, here, so the next segment with its
+ * own floor needs no patch and no exception list can go stale.
+ *
+ * The floor is `min(smb_band.min_headcount, ideal_low)` and NOT `ideal_low` alone: reading a
+ * segment's `ideal_low` as a hard floor would newly zero every S7 row at 5–9 people, which scores
+ * half weight today and is correctly ranked. The min form lowers a floor where the segment reaches
+ * lower and never raises one.
+ *
+ * CAPTAIN'S RULING 2026-08-06 (S6). The clearest case the rule covers is S6 ALUMNI_LED_COMPANY,
+ * which declares `ideal_low: 1`. An alum-led company's value to the club is a former Enactus SFU
+ * executive who answers the phone, not its cheque size, so pricing a solo founder as if they were
+ * a cash prospect contradicts the captain's own advisory ruling; and neither premise of the 5–250
+ * band ("below 5 cannot carry a sponsorship budget", "above 250 nobody can approve unilaterally")
+ * holds for a one-person alumni company. It is a general rule rather than an S6 carve-out because
+ * an enumeration that misses a case is exactly the defect this closed.
+ *
+ * Returns `null` bounds where the band does not apply, which is how a caller distinguishes
+ * "no size judgement for this segment" from "in band".
+ */
+export function effectiveSizeBounds(
+  segment: SegmentAssignment,
+  config: IcpConfig,
+): { floor: number | null; ceiling: number | null } {
+  const seg = typeof segment === "string" && segment.startsWith("S") ? (segment as SegmentId) : null;
+  const declared = seg ? (config.segments[seg]?.headcount_ceiling ?? null) : null;
+  if (!smbBandApplies(segment, config)) return { floor: null, ceiling: declared };
+  const declaredLow = seg ? (config.segments[seg]?.ideal_low ?? null) : null;
+  return {
+    floor: Math.min(config.smb_band.min_headcount, declaredLow ?? config.smb_band.min_headcount),
+    ceiling: Math.min(declared ?? config.smb_band.max_headcount, config.smb_band.max_headcount),
+  };
 }
 
 const PLACEHOLDER_TITLE_RE =
@@ -425,7 +626,11 @@ const NON_CEM_CHANNELS: ReadonlySet<RequiredChannel> = new Set<RequiredChannel>(
  *                 fails; everywhere in Canada passes at a lower band per the 2026-08-06
  *                 supersession, and anything the module could not place is `cannot_evaluate`.
  *   G_EXISTS      contrary DNS fails; uncorroborated-but-unrecorded is `cannot_evaluate`.
- *   G_SIZE        no headcount is `cannot_evaluate`; §6 records that as a specification bug.
+ *   G_SIZE        no headcount is `cannot_evaluate`; §6 records that as a specification bug. The
+ *                 captain's 5–250 SMB band changed the BOUNDS, never this behaviour: the gate
+ *                 decides whether the band applies to the SEGMENT before it reads the headcount at
+ *                 all, so a missing headcount still returns `cannot_evaluate` with effect `none`
+ *                 and a below-floor row is a `reassign`, exactly as an above-ceiling one is.
  *   G_DELIVERABLE unchecked is `cannot_evaluate`.
  *   G_NO_SOLICIT  unscanned is `cannot_evaluate`.
  *   G_ELIGIBILITY unread eligibility page is `cannot_evaluate`.
@@ -553,31 +758,62 @@ export function evaluateGates(
     });
   }
 
-  // G_SIZE
-  const ceiling = seg ? config.segments[seg].headcount_ceiling : null;
-  if (ceiling == null) {
+  // G_SIZE. The bounds are `effectiveSizeBounds`, where the captain's 5–250 SMB band is the
+  // DEFAULT ENVELOPE and not an override: it narrows a segment from above and LOWERS it from
+  // below, so the floor is the band's EXCEPT where the segment declares it reaches lower, and a
+  // segment is never judged out of band for a headcount its own declared band reaches. The verdict
+  // order below is deliberate: applicability is decided BEFORE the headcount is read, so an absent
+  // headcount can never be mistaken for an out-of-band one. `reassign` is unchanged and still not
+  // `block`: this gate has never dropped a row.
+  const { floor, ceiling } = effectiveSizeBounds(segment, config);
+  const { value: headcount, received: fillerHeadcount } = knownHeadcount(c);
+  const bandNote = smbBandApplies(segment, config)
+    ? ` (the segment's own ceiling bounded by the captain's ${config.smb_band.min_headcount}-${config.smb_band.max_headcount} SMB band)`
+    : "";
+  if (ceiling == null && floor == null) {
     out.push({
       gate: "G_SIZE",
       verdict: "not_applicable",
       effect: "none",
-      message: seg ? `segment ${seg} has no headcount ceiling` : "no segment assigned",
+      message:
+        (seg
+          ? `segment ${seg} has no headcount ceiling, so the SMB band makes no size judgement here either`
+          : "no segment assigned") + fillerNote(fillerHeadcount),
     });
-  } else if (c.headcount == null) {
+  } else if (headcount == null) {
     out.push({
       gate: "G_SIZE",
       verdict: "cannot_evaluate",
       effect: "none",
-      message: `no headcount is available, and no free source publishes headcount for BC micro-businesses. The ${ceiling}-person ceiling for ${seg} cannot be tested; absence of evidence is never a kill`,
+      message:
+        `no headcount is available, and no free source publishes headcount for BC micro-businesses. ` +
+        `The ${ceiling}-person ceiling for ${seg}${bandNote} cannot be tested; absence of evidence ` +
+        `is never a kill and never a penalty${fillerNote(fillerHeadcount)}`,
+    });
+  } else if (floor != null && headcount < floor) {
+    out.push({
+      gate: "G_SIZE",
+      verdict: "fail",
+      effect: "reassign",
+      message:
+        `out_of_band: too_small — headcount ${headcount} is below the ${floor}-person floor ` +
+        `${seg} is judged against (the in-scope SMB band, lowered wherever the segment declares it ` +
+        `reaches lower), which is too small to carry a sponsorship budget (CAPTAIN'S RULING ` +
+        `2026-08-06). Reassign rather than drop`,
+    });
+  } else if (ceiling != null && headcount > ceiling) {
+    out.push({
+      gate: "G_SIZE",
+      verdict: "fail",
+      effect: "reassign",
+      message: `killed: too_big — headcount ${headcount} exceeds the ${ceiling}-person ceiling for ${seg}${bandNote}. Reassign rather than drop`,
     });
   } else {
     out.push({
       gate: "G_SIZE",
-      verdict: c.headcount <= ceiling ? "pass" : "fail",
+      verdict: "pass",
       effect: "reassign",
-      message:
-        c.headcount <= ceiling
-          ? `headcount ${c.headcount} is within the ${ceiling}-person ceiling for ${seg}`
-          : `killed: too_big — headcount ${c.headcount} exceeds the ${ceiling}-person ceiling for ${seg}. Reassign rather than drop`,
+      message: `headcount ${headcount} is within the ${ceiling}-person ceiling for ${seg}${bandNote}`,
     });
   }
 
@@ -865,31 +1101,60 @@ export function scoreFit(
     basis: seg ? `matched ${seg} cleanly` : `no segment predicate matched (${segment})`,
   });
 
-  // size_band: full weight INSIDE the ideal band, half inside the ceiling but outside it.
+  // size_band: full weight INSIDE the ideal band, half inside the bounds but outside it, zero
+  // outside the bounds.
+  //
+  // The bounds are `effectiveSizeBounds`, where the captain's 5–250 SMB band is the DEFAULT
+  // ENVELOPE rather than an override: it narrows a segment from above and LOWERS it from below,
+  // and a segment is never judged out of band for a headcount its own declared band reaches. So an
+  // S6 row at a headcount of 1 keeps the FULL size weight while sitting outside 5–250, because S6
+  // declares `ideal_low: 1` and the floor is the `min` of the two. Where the band does bind, below
+  // the floor is treated exactly as above the ceiling — "too small to carry a sponsorship budget"
+  // is a fit statement, and it is a PENALTY on a KNOWN value, never a kill and never reachable
+  // from an unknown one. What counts as known is `knownHeadcount`'s call, not this term's.
   const cfgSeg = seg ? config.segments[seg] : null;
-  if (c.headcount != null && cfgSeg) {
+  const { value: headcount, received: fillerHeadcount } = knownHeadcount(c);
+  if (headcount != null && cfgSeg) {
+    const bounds = effectiveSizeBounds(segment, config);
+    const belowFloor = bounds.floor != null && headcount < bounds.floor;
+    const aboveBandCeiling = bounds.ceiling != null && headcount > bounds.ceiling;
+    // Inside the bounds is the same statement as inside the segment's own ceiling: the bounds are
+    // never looser than the ceiling the segment declared, so there is no third state to narrate.
+    const inSmbBand = !belowFloor && !aboveBandCeiling;
     const inIdeal =
-      (cfgSeg.ideal_low == null || c.headcount >= cfgSeg.ideal_low) &&
-      (cfgSeg.ideal_high == null || c.headcount <= cfgSeg.ideal_high);
-    const inCeiling = cfgSeg.headcount_ceiling == null || c.headcount <= cfgSeg.headcount_ceiling;
+      inSmbBand &&
+      (cfgSeg.ideal_low == null || headcount >= cfgSeg.ideal_low) &&
+      (cfgSeg.ideal_high == null || headcount <= cfgSeg.ideal_high);
     terms.push({
       term: "size_band",
-      points: inIdeal ? w.size_band : inCeiling ? w.size_band / 2 : 0,
+      points: inIdeal ? w.size_band : inSmbBand ? w.size_band / 2 : 0,
       max: w.size_band,
-      basis: inIdeal
-        ? `headcount ${c.headcount} is inside ${seg}'s ideal band`
-        : inCeiling
-          ? `headcount ${c.headcount} is under ${seg}'s ceiling but outside its ideal band`
-          : `headcount ${c.headcount} is above ${seg}'s ceiling`,
+      basis: belowFloor
+        ? `headcount ${headcount} is below the ${bounds.floor}-person floor ${seg} is judged against — too small to carry a sponsorship budget`
+        : aboveBandCeiling
+          ? `headcount ${headcount} is above the ${bounds.ceiling}-person ceiling ${seg} is judged against`
+          : inIdeal
+            ? `headcount ${headcount} is inside ${seg}'s ideal band`
+            : `headcount ${headcount} is under ${seg}'s ceiling but outside its ideal band`,
     });
   } else if (c.orgbook_entity_type === "SP" || c.orgbook_entity_type === "GP") {
     // §6.6: entity_type SP/GP is direct machine evidence of an owner-operated micro-business,
     // which is the only headcount proxy the club can actually obtain for free.
+    //
+    // ⚠ A KNOWN TENSION WITH THE CAPTAIN'S 5-PERSON FLOOR, LEFT STANDING DELIBERATELY. A sole
+    // proprietorship is by definition at or below that floor, yet this branch awards the FULL
+    // size weight. It stands because of what it is: a positive signal read ONLY when the headcount
+    // is absent, and the absence rule forbids turning a missing value into a penalty. Deleting it
+    // would not enforce the floor — it would penalise every micro-business the club could not
+    // measure, which is the exact failure the ruling's absence clause exists to prevent. A row
+    // that actually RECORDS 3 employees is penalised above; a row that records nothing is not.
     terms.push({
       term: "size_band",
       points: w.size_band,
       max: w.size_band,
-      basis: `no headcount available, but OrgBook entity_type ${c.orgbook_entity_type} is direct evidence of an owner-operated micro-business`,
+      basis:
+        `no headcount available, but OrgBook entity_type ${c.orgbook_entity_type} is direct ` +
+        `evidence of an owner-operated micro-business${fillerNote(fillerHeadcount)}`,
     });
   } else {
     opts.missing?.push("headcount");
@@ -898,7 +1163,8 @@ export function scoreFit(
       points: 0,
       max: w.size_band,
       basis:
-        "NO HEADCOUNT AVAILABLE. This score is depressed by missing data, not by a bad fit — no free source publishes headcount for BC micro-businesses",
+        "NO HEADCOUNT AVAILABLE. This score is depressed by missing data, not by a bad fit — no " +
+        `free source publishes headcount for BC micro-businesses${fillerNote(fillerHeadcount)}`,
     });
   }
 
@@ -1162,7 +1428,8 @@ export function deriveAsk(
 }
 
 // ===========================================================================
-// The two objectives. NEVER SUMMED.
+// The objectives. NEVER SUMMED — and there are three of them since the captain's 2026-08-06
+// ruling that a mentor or project advisor is worth the same as money.
 // ===========================================================================
 
 export interface CashObjective {
@@ -1183,9 +1450,42 @@ export interface RelationshipObjective {
   note: string;
 }
 
+/**
+ * What a mentor, a project advisor or a judge from this lead is worth.
+ *
+ * CAPTAIN'S RULING 2026-08-06: THE SAME AS MONEY. The club asked for advisors as an explicit goal
+ * alongside funding, so this is an objective in its own right — never a term inside
+ * `deployable_cash`, never a bonus, never a tie-break, and never consulted only when funding
+ * evidence is absent.
+ *
+ * `expected_value` is denominated in dollars because that is what parity MEANS: an advisory yes is
+ * valued at the same ask-ladder rung a cheque from this lead would be. It is still never added to
+ * `expected_cash` — the sum is not a quantity the club has, because a mentor does not pay a
+ * printer. Parity says a $375 advisory yes RANKS WITH a $375 cash yes.
+ */
+export interface AdvisoryObjective {
+  applicable: boolean;
+  /** The ruling this objective was computed under. Read from config; never inferred. */
+  parity: AdvisoryParity;
+  p_yes?: number;
+  /** The commitments code recognised on the club's published menu. */
+  commitments?: string[];
+  /** Reported commitments that are NOT on the menu. Reported, never scored. */
+  unrecognised?: string[];
+  expected_advisors?: number;
+  advisors_per_hour?: number;
+  /** The parity valuation, on the SAME ladder as a cheque. */
+  expected_value?: number;
+  value_per_hour?: number;
+  /** The ask-ladder rung the valuation used. */
+  valued_at_tier?: AskTier;
+  note: string;
+}
+
 export interface Objectives {
   deployable_cash: CashObjective;
   relationship_volume: RelationshipObjective;
+  advisory_capacity: AdvisoryObjective;
 }
 
 /**
@@ -1214,18 +1514,139 @@ export function resolvePYes(
 
 const CASH_TIERS = new Set<AskTier>(["bronze", "silver", "gold", "diamond", "grant"]);
 
+/** Menu matching is case- and separator-insensitive; the menu itself still governs membership. */
+function normalizeCommitment(value: string): string {
+  return value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+}
+
+/**
+ * The advisory objective. CAPTAIN'S RULING 2026-08-06 — a mentor or project advisor is worth the
+ * same as money.
+ *
+ * FOUR PROPERTIES THIS FUNCTION EXISTS TO HOLD, each one a way the ruling could be quietly
+ * reversed:
+ *
+ *  1. NEVER GATED ON CASH. Applicability is decided by whether advisory capacity was observed,
+ *     full stop. It does not ask whether the cash objective applies, whether an ask carries a
+ *     dollar amount, or whether funding evidence is absent. Tier B, where cash is NOT APPLICABLE,
+ *     is exactly where advisory lives most.
+ *  2. NEVER A MODIFIER. Nothing in `fit`, `affinity`, `access` or `trigger_bonus` reads advisory
+ *     capacity. It moves its own objective and nothing else, so it cannot become a bonus.
+ *  3. VALUED ON THE SAME LADDER. `equal_to_cash` values the commitment at the rung this lead's
+ *     own cash ask uses, so parity is arithmetic. Where the lead's ask carries no cash amount at
+ *     all (an in-kind or non-monetary ask) it falls to `advisory.parity_tier` rather than to zero
+ *     — zero there would silently restore the cash preference in exactly the segments where the
+ *     report says the non-monetary yield IS the product.
+ *  4. CODE DECIDES WHAT COUNTS. A reported commitment is checked against the club's published
+ *     menu, and the valuation is the rung ONCE, not once per commitment: a model that lists all
+ *     eight menu items cannot inflate a lead eightfold. Unrecognised entries are reported — and
+ *     so is a non-string entry, stringified into the same `unrecognised` list rather than dropped,
+ *     because a silent repair teaches nobody that the model is misbehaving.
+ *
+ * ⚠ ONE HONEST UNDERSTATEMENT, RECORDED RATHER THAN PAPERED OVER. `p_yes` is the segment's own
+ * rate — the same one the cash objective uses. The report models the non-monetary ask converting
+ * FAR better (§5 S11: "4–8% for cash and 15–25% for a non-monetary ask"; §5 S15: 30–50% for time
+ * against ~5% for cash), so this valuation is conservative. No measured advisory rate exists for
+ * this club, and inventing seventeen of them would be worse than being conservative with the one
+ * rate on file. Replace with measured rates alongside the other `p_yes` values.
+ */
+function advisoryObjective(
+  seg: SegmentId | null,
+  segmentLabel: SegmentAssignment,
+  ask: DerivedAsk | null,
+  config: IcpConfig,
+  reported: readonly string[] | null | undefined,
+): AdvisoryObjective {
+  const parity = config.advisory.parity;
+  const menu = new Set(config.advisory.commitments.map(normalizeCommitment));
+  const listed = (reported ?? []).map((v) => (typeof v === "string" ? v : String(v)));
+  const commitments = listed.filter((v) => menu.has(normalizeCommitment(v)));
+  const unrecognised = listed.filter((v) => !menu.has(normalizeCommitment(v)));
+  const unrecognisedNote =
+    unrecognised.length > 0
+      ? ` Reported but not on the club's published engagement menu, so not scored: ${unrecognised.join(", ")}.`
+      : "";
+
+  if (!seg || config.segments[seg].objective === "excluded") {
+    return {
+      applicable: false,
+      parity,
+      ...(unrecognised.length > 0 ? { unrecognised } : {}),
+      note:
+        `segment is ${segmentLabel}: no objective applies, advisory included.` + unrecognisedNote,
+    };
+  }
+
+  if (commitments.length === 0) {
+    return {
+      applicable: false,
+      parity,
+      ...(unrecognised.length > 0 ? { unrecognised } : {}),
+      note:
+        `no advisory capacity has been researched for this lead. ABSENT IS NOT A REFUSAL: this ` +
+        `costs the lead nothing in any score or objective, and the moment a mentor, project ` +
+        `advisor or judge is observed it is valued at parity with a cheque.` + unrecognisedNote,
+    };
+  }
+
+  const pYes = resolvePYes(config, seg, ask?.class ?? null);
+  if (!pYes) {
+    return {
+      applicable: false,
+      parity,
+      commitments,
+      ...(unrecognised.length > 0 ? { unrecognised } : {}),
+      note: `advisory capacity is recorded (${commitments.join(", ")}) but no p_yes is configured for ${seg}, so it cannot be valued.` + unrecognisedNote,
+    };
+  }
+
+  const effort = config.effort_minutes[seg];
+  const leadRung = ask ? config.ask_ladder[ask.tier] : undefined;
+  const leadCarriesCash =
+    ask != null && CASH_TIERS.has(ask.tier) && (leadRung?.amount_high ?? 0) > 0;
+  const tier: AskTier = leadCarriesCash ? ask.tier : config.advisory.parity_tier;
+  const rung = config.ask_ladder[tier];
+  const value = pYes.value * midpoint(rung?.amount_low ?? 0, rung?.amount_high ?? 0);
+
+  return {
+    applicable: true,
+    parity,
+    p_yes: pYes.value,
+    commitments,
+    ...(unrecognised.length > 0 ? { unrecognised } : {}),
+    // One yes is one advisory relationship however many menu items were listed.
+    expected_advisors: pYes.value,
+    advisors_per_hour: effort > 0 ? (pYes.value / effort) * 60 : 0,
+    expected_value: value,
+    value_per_hour: effort > 0 ? (value / effort) * 60 : 0,
+    valued_at_tier: tier,
+    note:
+      `${commitments.join(", ")} valued at parity with money (${parity}) on the ${tier} rung ` +
+      `($${rung?.amount_low ?? 0}-${rung?.amount_high ?? 0})` +
+      (leadCarriesCash
+        ? `, the same rung this lead's own cash ask uses`
+        : `, because this lead's ask (${ask?.class ?? "none"} at tier ${ask?.tier ?? "none"}) ` +
+          `carries no cash amount — advisory.parity_tier, not zero`) +
+      `; p_yes from config key ${pYes.key}. NEVER ADDED TO expected_cash.` +
+      unrecognisedNote,
+  };
+}
+
 export function computeObjectives(
   segment: SegmentAssignment,
   ask: DerivedAsk | null,
   config: IcpConfig,
+  opts: { advisory_commitments?: readonly string[] | null } = {},
 ): Objectives {
   const seg = typeof segment === "string" && segment.startsWith("S") ? (segment as SegmentId) : null;
+  const advisory = advisoryObjective(seg, segment, ask, config, opts.advisory_commitments);
 
   if (!seg) {
-    const note = `segment is ${segment}: neither objective applies`;
+    const note = `segment is ${segment}: no objective applies`;
     return {
       deployable_cash: { applicable: false, note },
       relationship_volume: { applicable: false, note },
+      advisory_capacity: advisory,
     };
   }
 
@@ -1238,6 +1659,7 @@ export function computeObjectives(
     return {
       deployable_cash: { applicable: false, note },
       relationship_volume: { applicable: false, note },
+      advisory_capacity: advisory,
     };
   }
 
@@ -1267,6 +1689,10 @@ export function computeObjectives(
           `Roughly one in four entities on the club's own partner wall is one of these.`,
       },
       relationship_volume: relationship,
+      // Tier B is where advisory lives most — these ARE the mentor employers and judges. The
+      // advisory objective is applicable here on exactly the same terms as anywhere else, which
+      // is the point of it not being gated on the cash objective.
+      advisory_capacity: advisory,
     };
   }
 
@@ -1292,7 +1718,7 @@ export function computeObjectives(
             `pays nothing. Every in-kind yes must create a dated, owned cash-escalation candidate for next year`,
         };
 
-  return { deployable_cash: cash, relationship_volume: relationship };
+  return { deployable_cash: cash, relationship_volume: relationship, advisory_capacity: advisory };
 }
 
 function midpoint(low: number, high: number): number {
@@ -1339,7 +1765,7 @@ export function scoreCompany(
   opts: { lists: QualificationLists; now?: Date },
 ): ScoreResult {
   const now = opts.now ?? new Date();
-  const assignment = assignSegment(c, { now });
+  const assignment = assignSegment(c, config, { now });
   const gates = evaluateGates(c, assignment.segment, config, { lists: opts.lists, now });
 
   const affiliationGate = gates.find((g) => g.gate === "G_AFFILIATION_EVIDENCE");
@@ -1371,7 +1797,9 @@ export function scoreCompany(
     blocked: blocking.length > 0,
     blocking_gates: blocking,
     ask,
-    objectives: computeObjectives(assignment.segment, ask, config),
+    objectives: computeObjectives(assignment.segment, ask, config, {
+      advisory_commitments: c.advisory_commitments,
+    }),
     missing_inputs: [...new Set(missing)],
   };
 }
