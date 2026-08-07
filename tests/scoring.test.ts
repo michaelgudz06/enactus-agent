@@ -7,6 +7,7 @@ import {
   assignSegment,
   computeObjectives,
   deriveAsk,
+  effectiveSizeBounds,
   evaluateGates,
   gateInputsFromFilterResult,
   geographyBand,
@@ -2346,9 +2347,10 @@ describe("CAPTAIN'S RULING — small-to-medium is 5 to 250 employees", () => {
 
   // ── Below the floor ───────────────────────────────────────────────────────
   it("costs a KNOWN sub-floor headcount the size weight, and nothing more", () => {
+    // S13's own band starts at 5, so the global floor is the floor it is judged against.
     const tiny = company({
       legal_name: "Three People And A Van",
-      has_consumer_storefront: true,
+      is_b2b_trade: true,
       headcount: 3,
       municipality: "Burnaby",
       region: "BC",
@@ -2357,7 +2359,10 @@ describe("CAPTAIN'S RULING — small-to-medium is 5 to 250 employees", () => {
     const before = scoreCompany(tiny, PRE_RULING, { lists, now: NOW });
     const after = scoreCompany(tiny, config, { lists, now: NOW });
 
-    expect(sizePoints(before.fit)).toBe(config.fit_score.size_band);
+    expect(before.segment).toBe("S13");
+    // Under the pre-ruling band there was no effective floor, so 3 people sat under S13's
+    // 99-person ceiling and outside its 5-99 ideal band: half the weight. The floor takes the rest.
+    expect(sizePoints(before.fit)).toBe(config.fit_score.size_band / 2);
     expect(sizePoints(after.fit)).toBe(0);
     expect(after.fit.terms.find((t) => t.term === "size_band")?.basis).toContain(
       "too small to carry a sponsorship budget",
@@ -2371,6 +2376,78 @@ describe("CAPTAIN'S RULING — small-to-medium is 5 to 250 employees", () => {
     expect(after.gates.find((g) => g.gate === "G_SIZE")?.message).toContain("out_of_band: too_small");
     expect(after.affinity.score).toBe(before.affinity.score);
     expect(after.access.score).toBe(before.access.score);
+  });
+
+  // ── …but only where the segment's own band does not reach lower ───────────
+  it("leaves a sub-floor headcount alone in a segment that declares it reaches lower", () => {
+    // CAPTAIN'S DECISION: the band is the DEFAULT envelope, not an override. S6 (ideal_low 1)
+    // and S2 (ideal_low 1) both accept a 3-person company by their own declaration, so the
+    // 5-person global floor may not take their size weight — an alum-led startup's value to the
+    // club is the former exec who answers the phone, not its cheque size.
+    const three = (over: Partial<CompanyFacts>) =>
+      company({ legal_name: "Three People", headcount: 3, municipality: "Burnaby", region: "BC", country: "CA", ...over });
+
+    for (const [seg, over] of [
+      ["S6", { alumni_evidence: "sfu_alum_led" as const }],
+      ["S2", { has_consumer_storefront: true }],
+    ] as const) {
+      const r = scoreCompany(three(over), config, { lists, now: NOW });
+      expect(r.segment, seg).toBe(seg);
+      expect(sizePoints(r.fit), seg).toBe(config.fit_score.size_band);
+      expect(r.gates.find((g) => g.gate === "G_SIZE")?.verdict, seg).not.toBe("fail");
+      // …and identical to the pre-ruling behaviour: the rule only ever lowers a floor.
+      expect(sizePoints(r.fit), seg).toBe(
+        sizePoints(scoreCompany(three(over), PRE_RULING, { lists, now: NOW }).fit),
+      );
+    }
+
+    // A one-person alum-led company is the case the decision was made for.
+    const solo = scoreCompany(
+      three({ alumni_evidence: "sfu_alum_led", headcount: 1 }),
+      config,
+      { lists, now: NOW },
+    );
+    expect(solo.segment).toBe("S6");
+    expect(sizePoints(solo.fit)).toBe(config.fit_score.size_band);
+  });
+
+  it("derives from config which segments a KNOWN sub-floor headcount actually costs", () => {
+    // The config note in config/icp.yaml points here rather than enumerating segments by hand:
+    // a hand-written list previously named four and missed S6. Everything below is computed from
+    // `segments:` and `smb_band:`, so retuning a segment band cannot leave a stale claim behind.
+    const judged = SEGMENT_IDS.filter((s) => smbBandApplies(s, config));
+    expect(judged.length).toBeGreaterThan(0);
+
+    const at = (seg: (typeof judged)[number], headcount: number) =>
+      sizePoints(
+        scoreFit(company({ legal_name: `${seg} @ ${headcount}` , headcount }), seg, config, {
+          lists,
+          now: NOW,
+        }),
+      );
+
+    const costed: string[] = [];
+    const protectedByOwnReach: string[] = [];
+    for (const seg of judged) {
+      const { floor } = effectiveSizeBounds(seg, config);
+      expect(floor, seg).not.toBeNull();
+      // At its own floor a segment always keeps size weight; one person below it, the band bites.
+      expect(at(seg, floor as number), `${seg} at its floor ${floor}`).toBeGreaterThan(0);
+      if ((floor as number) > 1) {
+        expect(at(seg, (floor as number) - 1), `${seg} one below its floor`).toBe(0);
+        costed.push(seg);
+      }
+      if ((floor as number) < config.smb_band.min_headcount) protectedByOwnReach.push(seg);
+    }
+
+    // Both sides of the rule are real on the shipped config: some segments are bounded by the
+    // global floor, and some declare a reach below it and keep it.
+    expect(costed.length).toBeGreaterThan(0);
+    expect(protectedByOwnReach.length).toBeGreaterThan(0);
+    // S6 is the case the captain ruled on, and it is protected by the general rule, not by a
+    // special case.
+    expect(protectedByOwnReach).toContain("S6");
+    expect(costed).not.toContain("S6");
   });
 
   // ── Above the band ────────────────────────────────────────────────────────
@@ -2416,9 +2493,12 @@ describe("CAPTAIN'S RULING — small-to-medium is 5 to 250 employees", () => {
 
   // ── The parameter is live ─────────────────────────────────────────────────
   it("is READ, not baked in — retuning the band moves the outcome", () => {
-    const eight = company({ legal_name: "Eight People", has_consumer_storefront: true, headcount: 8 });
-    expect(sizePoints(scoreFit(eight, "S2", config, { lists, now: NOW }))).toBe(20);
-    expect(sizePoints(scoreFit(eight, "S2", withBand(10, 250), { lists, now: NOW }))).toBe(0);
+    // S7 declares no reach below the global floor (ideal_low 10), so `min_headcount` is what it is
+    // judged against and retuning it genuinely binds. An eight-person S7 sits under S7's ceiling
+    // today and earns half weight; lifting the floor to 10 takes it.
+    const eight = company({ legal_name: "Eight People", runs_campus_recruiting: true, headcount: 8 });
+    expect(sizePoints(scoreFit(eight, "S7", config, { lists, now: NOW }))).toBe(10);
+    expect(sizePoints(scoreFit(eight, "S7", withBand(10, 250), { lists, now: NOW }))).toBe(0);
 
     const ninety = company({ legal_name: "Ninety People", has_consumer_storefront: true, headcount: 90 });
     // S2's own ceiling is 99, so 90 is under it; a band of 5-50 bounds that ceiling down to 50.
@@ -2487,6 +2567,42 @@ describe("CAPTAIN'S RULING — a mentor or project advisor is worth the same as 
     expect(
       validateIcpConfig({ ...config, advisory: { ...config.advisory, parity_tier: "platinum" } }).join(" "),
     ).toContain("not a rung of ask_ladder");
+  });
+
+  it("REJECTS a parity_tier that carries no cash, which would zero the objective it configures", () => {
+    // `in_kind` and `none` are real rungs, so plain membership accepts them — and then values
+    // every advisory commitment on a no-cash-ask lead at $0, i.e. all of Tier B and every in-kind
+    // segment. That is the cash preference `parity` exists to forbid, arriving through the knob.
+    const zeroRungs = Object.entries(config.ask_ladder)
+      .filter(([, rung]) => (rung.amount_high ?? 0) <= 0)
+      .map(([tier]) => tier);
+    expect(zeroRungs.length).toBeGreaterThan(0);
+
+    for (const tier of zeroRungs) {
+      const problems = validateIcpConfig({
+        ...config,
+        advisory: { ...config.advisory, parity_tier: tier },
+      }).join(" ");
+      expect(problems, tier).toContain("carrying no cash amount");
+      expect(problems, tier).toContain("worth the same as money");
+    }
+
+    // The shipped value survives, and so does any other rung that actually carries cash.
+    expect(validateIcpConfig(config)).toEqual([]);
+    expect((config.ask_ladder[config.advisory.parity_tier]?.amount_high ?? 0) > 0).toBe(true);
+  });
+
+  it("REPORTS a non-string commitment rather than absorbing it — a silent repair teaches nobody", () => {
+    // The model proposes; code decides. A number or an object where a menu string belongs is
+    // misbehaviour, and every other malformed-output path in this repo announces the repair.
+    const o = objectivesFor("S7", ["team_mentor", 7, { kind: "mentor" }] as unknown as string[]);
+    expect(o.advisory_capacity.commitments).toEqual(["team_mentor"]);
+    expect(o.advisory_capacity.unrecognised).toEqual(["7", "[object Object]"]);
+    expect(o.advisory_capacity.note).toContain("not on the club's published engagement menu");
+    // …and it costs the recognised commitment nothing: the valuation is unchanged.
+    expect(o.advisory_capacity.expected_value).toBe(
+      objectivesFor("S7", ["team_mentor"]).advisory_capacity.expected_value,
+    );
   });
 
   // ── The ruling itself ─────────────────────────────────────────────────────
@@ -2732,17 +2848,40 @@ describe("the corpus proof — the SMB band on the club's own 25 seeded rows", (
   });
 
   // ── Where the parameter DOES reach the decision on these rows ─────────────
-  it("moves all 17 judged rows once a sub-floor headcount is actually known", () => {
+  it("moves exactly the judged rows whose own segment band does not reach 3", () => {
+    const HEADCOUNT = 3;
+
+    // Derived from config, never listed: a row moves iff its segment is band-judged AND the floor
+    // that segment is actually judged against is above the headcount. The expectation cannot go
+    // stale when a segment band is retuned.
+    const expected = SEEDED.filter((name) => {
+      const seg = scoreCompany(seedRow(name, { headcount: HEADCOUNT }), config, { lists, now: NOW })
+        .segment;
+      if (!smbBandApplies(seg, config)) return false;
+      const { floor } = effectiveSizeBounds(seg, config);
+      return floor != null && HEADCOUNT < floor;
+    });
+
     const moved: string[] = [];
     for (const name of SEEDED) {
-      const row = seedRow(name, { headcount: 3 });
+      const row = seedRow(name, { headcount: HEADCOUNT });
       const after = scoreCompany(row, config, { lists, now: NOW });
       const before = scoreCompany(row, PRE_RULING, { lists, now: NOW });
       if (sizePoints(after.fit) < sizePoints(before.fit)) moved.push(name);
     }
-    expect(moved).toHaveLength(17);
+    expect(moved).toEqual(expected);
+
+    // MEASURED CORPUS EFFECT. Four B2B/trade rows move, not seventeen: S13 declares a 5-99 band
+    // and so is judged against the global floor.
+    expect(moved).toHaveLength(4);
     expect(moved).toContain("Window Wizards");
-    expect(moved).toContain("Superpilot");
+
+    // The thirteen alum-led rows are PROTECTED — S6 declares it reaches to 1, which is the whole
+    // point of the captain's decision. They are the club's warmest prospects.
+    const alumLed = SEED_FACTS.filter(([, f]) => f.alumni_evidence === "sfu_alum_led").map(([n]) => n);
+    expect(alumLed).toHaveLength(13);
+    for (const name of alumLed) expect(moved, name).not.toContain(name);
+
     // The institutions are untouched at the same headcount — this is the guard that matters.
     expect(moved).not.toContain("Vancity Credit Union");
     expect(moved).not.toContain("Dobson Foundation");
@@ -2792,11 +2931,33 @@ describe("the corpus proof — advisory parity on the club's own 25 seeded rows"
   });
 
   it("and it costs those rows nothing — absence is not a refusal", () => {
+    // The two sides MUST differ in the one input under test. Scoring the same row twice would
+    // only re-prove determinism and would pass even if advisory capacity penalised a lead.
     for (const name of SEEDED) {
-      const r = scoreCompany(seedRow(name), config, { lists, now: NOW });
-      const asIfNever = scoreCompany(seedRow(name), config, { lists, now: NOW });
-      expect(r.fit.score, name).toBe(asIfNever.fit.score);
-      expect(r.objectives.deployable_cash, name).toEqual(asIfNever.objectives.deployable_cash);
+      const absent = scoreCompany(seedRow(name), config, { lists, now: NOW });
+      const recorded = scoreCompany(
+        seedRow(name, { advisory_commitments: ["team_mentor"] }),
+        config,
+        { lists, now: NOW },
+      );
+
+      // Recording a mentor moves the advisory objective and NOTHING else.
+      expect(recorded.segment, name).toBe(absent.segment);
+      expect(recorded.fit, name).toEqual(absent.fit);
+      expect(recorded.affinity, name).toEqual(absent.affinity);
+      expect(recorded.access, name).toEqual(absent.access);
+      expect(recorded.objectives.deployable_cash, name).toEqual(absent.objectives.deployable_cash);
+      expect(recorded.objectives.relationship_volume, name).toEqual(
+        absent.objectives.relationship_volume,
+      );
+
+      // …and the advisory objective is the one thing that DOES move, so the comparison is real.
+      const reachable = !String(absent.segment).startsWith("EXCLUDED");
+      expect(absent.objectives.advisory_capacity.applicable, name).toBe(false);
+      expect(recorded.objectives.advisory_capacity.applicable, name).toBe(reachable);
+      if (reachable) {
+        expect(recorded.objectives.advisory_capacity.expected_value, name).toBeGreaterThan(0);
+      }
     }
   });
 

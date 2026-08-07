@@ -197,18 +197,25 @@ Both are product statements, both live in `config/icp.yaml`, and both are held b
 `tests/scoring.test.ts` that compare against the pre-ruling behaviour rather than asserting the
 new number in isolation. Full record: `/Users/test/firstmate/data/decisions/captain-answers-2026-08-06-batch.md`.
 
-- **`smb_band` — small-to-medium is 5 to 250 employees.** It bounds the per-segment bands and
-  supplies the enterprise line the §4 ladder used to carry as a literal 500. **An unknown
-  headcount is never a kill and never a penalty** — absence may only penalise after a documented
-  attempt to resolve it. 24 of the 25 seeded rows record no headcount, so a band that fired on
-  absence would empty the board. Applicability is decided per SEGMENT before the headcount is
-  read (`smbBandApplies`): a credit union or a foundation makes no size judgement, and Vancity
-  must survive it.
+- **`smb_band` — small-to-medium is 5 to 250 employees.** It is the DEFAULT ENVELOPE for the
+  per-segment bands and supplies the enterprise line the §4 ladder used to carry as a literal 500.
+  **An unknown headcount is never a kill and never a penalty** — absence may only penalise after a
+  documented attempt to resolve it. 24 of the 25 seeded rows record no headcount, so a band that
+  fired on absence would empty the board. Applicability is decided per SEGMENT before the
+  headcount is read (`smbBandApplies`): a credit union or a foundation makes no size judgement,
+  S1 makes none by design because prior sponsorship already answered it, and Vancity must survive
+  it. **A segment is never judged out of band for a headcount its own declared band reaches** —
+  `effectiveSizeBounds` takes `min` of the global bound and the segment's own at both ends, so a
+  segment declaring `ideal_low: 1` (S6 alum-led, S2, S5) keeps that reach and one declaring
+  nothing inherits the global bound. Which segments a known sub-floor headcount still costs is
+  derived from `config/icp.yaml` by a test, never enumerated in a comment.
 - **`advisory` — a mentor or project advisor is worth the same as money.** Advisory capacity is
   its own objective, never a term, a bonus or a tie-break inside the cash score, and it is
   applicable independently of whether funding evidence exists. `parity: equal_to_cash` is the
   ruling and `loadIcpConfig()` rejects any other value, so a cash preference cannot drift back in
-  as a weight.
+  as a weight. `advisory.parity_tier` is the one tuning knob and must name an `ask_ladder` rung
+  with a non-zero `amount_high`: a $0 rung would value every advisory commitment on a
+  no-cash-ask lead at zero, which is the same preference arriving through the knob.
 
 **Known gap, upstream of this layer:** nothing can supply `advisory_commitments` yet. The
 `sponsorship_type` column in `supabase-setup.sql` carries only `monetary` and `in_kind`, so 0 of

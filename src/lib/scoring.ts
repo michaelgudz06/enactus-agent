@@ -241,12 +241,19 @@ export interface SegmentResult {
  *
  * The rung's position matters and was checked rather than assumed: every institutional segment
  * (S17 individual, S14 grantmaker, S10 credit union, S12 family office, S16 civic) is decided
- * ABOVE it, so a credit union with 2,000 staff is still S10 and a foundation is still S14. The
- * one segment the lower floor newly reaches is S8, whose relevant unit is the local
- * field-marketing territory rather than national headcount: a 250–500-person company with a
- * structured brand programme now lands in S15 instead. That is the ruling's own logic (no
- * unilateral approver) rather than an accident, but it is a real behaviour change and is stated
- * here rather than discovered later.
+ * ABOVE it, so a credit union with 2,000 staff is still S10 and a foundation is still S14.
+ *
+ * EVERY SEGMENT DECIDED BELOW THE RUNG IS NEWLY REACHED BY THE LOWER LINE — S6, S5, S7, S8, S11,
+ * S9, S4, S3, S2 and S13, in ladder order. A 300-person company that was S6 (a cash ask, the cash
+ * objective applicable) now lands in S15 (`non_monetary_time`, the cash objective NOT APPLICABLE),
+ * and the same holds for each of the others between 251 and 500. Most were already outside their
+ * own `headcount_ceiling` at that size and so already scored 0 for size_band; S8 is the only one
+ * whose null ceiling meant it was not already out of ceiling, because its relevant unit is the
+ * local field-marketing territory rather than national headcount. What is new for ALL of them is
+ * the SEGMENT, not just the size term. That is the ruling's own logic (above the band no single
+ * person can approve unilaterally, so the relationship is non-monetary) rather than an accident,
+ * but it is a real behaviour change across ten segments and is stated here rather than discovered
+ * later.
  */
 export function assignSegment(
   c: CompanyFacts,
@@ -414,11 +421,17 @@ export interface GateResult {
  *     relationships, never in dollars, and S15 is BY DEFINITION the segment above the band —
  *     bounding it by the band would penalise a row for the very fact that put it there.
  *  2. The segment declares a headcount band of its own. A `null` ceiling with `null` ideals is
- *     the config saying size is not the unit for this segment: S1 inherits its band from the
- *     underlying segment, S8 scores the local field-marketing territory rather than national
- *     headcount, and S10 / S14 are institutions whose staff count says nothing about whether
- *     they fund students. Vancity has thousands of employees and is one of the club's best real
- *     prospects; a band applied there would delete it.
+ *     the config saying size is not the unit for this segment: S1 makes NO SIZE JUDGEMENT BY
+ *     DESIGN — a lapsed partner has already sponsored, so size has been answered by evidence and
+ *     prior sponsorship supersedes it — S8 scores the local field-marketing territory rather than
+ *     national headcount, and S10 / S14 are institutions whose staff count says nothing about
+ *     whether they fund students. Vancity has thousands of employees and is one of the club's
+ *     best real prospects; a band applied there would delete it.
+ *
+ *     S1 is stated as a CHOICE, not as inheritance: nothing here reads `underlying_segment`, and
+ *     a doc comment describing a mechanism that does not exist is the defect class this module
+ *     has closed repeatedly. A lapsed partner with a known headcount of 3 keeps the size weight
+ *     where an otherwise identical cold row does not, and that divergence is deliberate.
  *
  * NOTE WHAT THIS FUNCTION DOES NOT LOOK AT: the headcount. Applicability is a property of the
  * SEGMENT. Whether a headcount is present is the caller's separate, explicit test, so that
@@ -433,9 +446,28 @@ export function smbBandApplies(segment: SegmentAssignment, config: IcpConfig): b
 }
 
 /**
- * The bounds a row is actually judged against: the segment's own band, BOUNDED by the captain's
- * SMB band. The band never widens a segment — `Math.min` on the ceiling — and it contributes the
- * floor, which no segment declares independently.
+ * The bounds a row is actually judged against.
+ *
+ * THE SMB BAND IS THE DEFAULT ENVELOPE. A SEGMENT IS NEVER JUDGED OUT OF BAND FOR A HEADCOUNT ITS
+ * OWN DECLARED BAND REACHES. A segment that declares it accepts companies smaller than the global
+ * floor keeps that reach; a segment that declares no bound of its own inherits the global one.
+ * Both bounds are therefore `Math.min` of the global value and the segment's own — the band only
+ * ever NARROWS a segment from above and LOWERS it from below, and it can never make a segment
+ * stricter than the segment declared itself to be. Stated once, here, so the next segment with its
+ * own floor needs no patch and no exception list can go stale.
+ *
+ * The floor is `min(smb_band.min_headcount, ideal_low)` and NOT `ideal_low` alone: reading a
+ * segment's `ideal_low` as a hard floor would newly zero every S7 row at 5–9 people, which scores
+ * half weight today and is correctly ranked. The min form lowers a floor where the segment reaches
+ * lower and never raises one.
+ *
+ * CAPTAIN'S RULING 2026-08-06 (S6). The clearest case the rule covers is S6 ALUMNI_LED_COMPANY,
+ * which declares `ideal_low: 1`. An alum-led company's value to the club is a former Enactus SFU
+ * executive who answers the phone, not its cheque size, so pricing a solo founder as if they were
+ * a cash prospect contradicts the captain's own advisory ruling; and neither premise of the 5–250
+ * band ("below 5 cannot carry a sponsorship budget", "above 250 nobody can approve unilaterally")
+ * holds for a one-person alumni company. It is a general rule rather than an S6 carve-out because
+ * an enumeration that misses a case is exactly the defect this closed.
  *
  * Returns `null` bounds where the band does not apply, which is how a caller distinguishes
  * "no size judgement for this segment" from "in band".
@@ -447,9 +479,10 @@ export function effectiveSizeBounds(
   const seg = typeof segment === "string" && segment.startsWith("S") ? (segment as SegmentId) : null;
   const declared = seg ? (config.segments[seg]?.headcount_ceiling ?? null) : null;
   if (!smbBandApplies(segment, config)) return { floor: null, ceiling: declared };
+  const declaredLow = seg ? (config.segments[seg]?.ideal_low ?? null) : null;
   return {
-    floor: config.smb_band.min_headcount,
-    ceiling: Math.min(declared ?? Number.POSITIVE_INFINITY, config.smb_band.max_headcount),
+    floor: Math.min(config.smb_band.min_headcount, declaredLow ?? config.smb_band.min_headcount),
+    ceiling: Math.min(declared ?? config.smb_band.max_headcount, config.smb_band.max_headcount),
   };
 }
 
@@ -701,8 +734,9 @@ export function evaluateGates(
       verdict: "fail",
       effect: "reassign",
       message:
-        `out_of_band: too_small — headcount ${c.headcount} is below the ${floor}-person floor of ` +
-        `the in-scope SMB band, which is too small to carry a sponsorship budget (CAPTAIN'S RULING ` +
+        `out_of_band: too_small — headcount ${c.headcount} is below the ${floor}-person floor ` +
+        `${seg} is judged against (the in-scope SMB band, lowered wherever the segment declares it ` +
+        `reaches lower), which is too small to carry a sponsorship budget (CAPTAIN'S RULING ` +
         `2026-08-06). Reassign rather than drop`,
     });
   } else if (ceiling != null && c.headcount > ceiling) {
@@ -1029,7 +1063,7 @@ export function scoreFit(
       points: inIdeal ? w.size_band : inCeiling ? w.size_band / 2 : 0,
       max: w.size_band,
       basis: belowFloor
-        ? `headcount ${c.headcount} is below the ${bounds.floor}-person floor of the in-scope SMB band — too small to carry a sponsorship budget`
+        ? `headcount ${c.headcount} is below the ${bounds.floor}-person floor ${seg} is judged against — too small to carry a sponsorship budget`
         : aboveBandCeiling
           ? `headcount ${c.headcount} is above the ${bounds.ceiling}-person ceiling ${seg} is judged against`
           : inIdeal
@@ -1437,7 +1471,9 @@ function normalizeCommitment(value: string): string {
  *     report says the non-monetary yield IS the product.
  *  4. CODE DECIDES WHAT COUNTS. A reported commitment is checked against the club's published
  *     menu, and the valuation is the rung ONCE, not once per commitment: a model that lists all
- *     eight menu items cannot inflate a lead eightfold. Unrecognised entries are reported.
+ *     eight menu items cannot inflate a lead eightfold. Unrecognised entries are reported — and
+ *     so is a non-string entry, stringified into the same `unrecognised` list rather than dropped,
+ *     because a silent repair teaches nobody that the model is misbehaving.
  *
  * ⚠ ONE HONEST UNDERSTATEMENT, RECORDED RATHER THAN PAPERED OVER. `p_yes` is the segment's own
  * rate — the same one the cash objective uses. The report models the non-monetary ask converting
@@ -1455,7 +1491,7 @@ function advisoryObjective(
 ): AdvisoryObjective {
   const parity = config.advisory.parity;
   const menu = new Set(config.advisory.commitments.map(normalizeCommitment));
-  const listed = (reported ?? []).filter((v) => typeof v === "string");
+  const listed = (reported ?? []).map((v) => (typeof v === "string" ? v : String(v)));
   const commitments = listed.filter((v) => menu.has(normalizeCommitment(v)));
   const unrecognised = listed.filter((v) => !menu.has(normalizeCommitment(v)));
   const unrecognisedNote =

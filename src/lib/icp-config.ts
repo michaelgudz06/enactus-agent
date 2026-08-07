@@ -383,12 +383,27 @@ export function validateIcpConfig(raw: unknown): string[] {
     const ladderTiers = cfg.ask_ladder as Record<string, unknown> | undefined;
     if (typeof tier !== "string" || tier.trim() === "") {
       problems.push("advisory.parity_tier is missing or not a string");
-    } else if (
-      typeof ladderTiers === "object" &&
-      ladderTiers !== null &&
-      ladderTiers[tier] === undefined
-    ) {
-      problems.push(`advisory.parity_tier is "${tier}", which is not a rung of ask_ladder`);
+    } else if (typeof ladderTiers === "object" && ladderTiers !== null) {
+      const rung = ladderTiers[tier] as Record<string, unknown> | undefined;
+      if (rung === undefined) {
+        problems.push(`advisory.parity_tier is "${tier}", which is not a rung of ask_ladder`);
+      } else if (typeof rung !== "object" || rung === null) {
+        problems.push(`advisory.parity_tier is "${tier}", whose ask_ladder rung is not a mapping`);
+      } else if (typeof rung.amount_high !== "number" || rung.amount_high <= 0) {
+        // `in_kind` and `none` both carry amount_low: 0, amount_high: 0. Naming one here would
+        // pass a membership check and then value EVERY advisory commitment on a lead whose own
+        // ask carries no cash amount at $0 — all of Tier B and every in-kind segment, which is
+        // exactly where the report says the non-monetary yield IS the product. That is the cash
+        // preference `advisory.parity` exists to prevent, arriving through the tuning knob.
+        problems.push(
+          `advisory.parity_tier is "${tier}", an ask_ladder rung carrying no cash amount ` +
+            `(amount_high ${String(rung.amount_high)}). It is the rung an advisory commitment is ` +
+            `valued at when the lead's OWN ask carries no cash amount, so a zero rung values every ` +
+            `such commitment at $0 — silently restoring the cash preference the captain's ` +
+            `"worth the same as money" ruling forbids, in exactly the segments where advisory is ` +
+            `the real product. Name a rung with a non-zero amount_high`,
+        );
+      }
     }
   }
 
