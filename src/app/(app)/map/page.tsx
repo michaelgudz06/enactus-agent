@@ -6,7 +6,7 @@ import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { Check, Crosshair, ExternalLink, MapPin, RefreshCw, TriangleAlert } from "lucide-react";
 import type {
-  CircleMarkerProps, CircleProps, MapContainerProps, PopupProps, TileLayerProps,
+  CircleMarkerProps, MapContainerProps, PopupProps, TileLayerProps,
 } from "react-leaflet";
 import { Lead, STATUS_COLUMNS } from "@/lib/types";
 // Type-only: geocode.ts also holds the Nominatim client, which has no business
@@ -25,8 +25,6 @@ const TileLayer = dynamic<TileLayerProps>(() => import("react-leaflet").then((m)
 const Popup = dynamic<PopupProps>(() => import("react-leaflet").then((m) => m.Popup), { ssr: false });
 const CircleMarker = dynamic<CircleMarkerProps & { children?: ReactNode }>(
   () => import("react-leaflet").then((m) => m.CircleMarker), { ssr: false });
-const Circle = dynamic<CircleProps & { children?: ReactNode }>(
-  () => import("react-leaflet").then((m) => m.Circle), { ssr: false });
 
 // Plain SVG circles instead of Leaflet's default pin. The default icon is a PNG
 // resolved by a bundler-relative URL that breaks under Turbopack and needs its
@@ -180,33 +178,11 @@ export default function MapPage() {
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
           />
 
-          {territories.map((t) => {
-            const swept = Boolean(t.swept_at);
-            return (
-              <Circle
-                key={t.id}
-                center={[t.lat, t.lng]}
-                radius={t.radius_m}
-                pathOptions={{
-                  color: swept ? "#34d399" : "#F5C842",
-                  weight: swept ? 1 : 2,
-                  opacity: swept ? 0.5 : 0.9,
-                  fillColor: swept ? "#34d399" : "#F5C842",
-                  fillOpacity: swept ? 0.06 : 0.12,
-                  dashArray: swept ? undefined : "5 6",
-                }}
-              >
-                <Popup>
-                  <div className="text-xs">
-                    <div className="font-semibold">{t.name}</div>
-                    <div style={{ color: "var(--muted)" }}>
-                      {swept ? `Swept by ${t.swept_by_name ?? "—"} · ${t.lead_count} leads` : "Not swept yet"}
-                    </div>
-                  </div>
-                </Popup>
-              </Circle>
-            );
-          })}
+          {/* The gold territory radii used to draw here. Each one is a whole
+              municipality wide, so at this zoom they covered the pins they were
+              meant to give context to. The territories themselves are untouched
+              -- they still drive the Areas list in the sidebar -- so bringing
+              the overlay back is re-adding a <Circle> over `territories`. */}
 
           {placed.map((l) => {
             const c = STATUS_COLOR[l.status] ?? "#9aa1ac";
