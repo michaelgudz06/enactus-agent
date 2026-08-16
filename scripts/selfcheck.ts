@@ -145,17 +145,17 @@ eq(disqualify(org({ employees: 240, state: "British Columbia", industry: "enviro
 // The one that protects the club's name: nothing about a PERSON survives
 // unless the fetched page actually said it.
 const EV =
-  "Microserve is a Burnaby IT provider. Media contact: Dana Whitfield, Director of Marketing. " +
-  "Reach the team at dana.whitfield@microserve.ca or visit our careers page. " +
-  "Microserve has supported Simon Fraser University student programs since 2019.";
+  "Westbridge Systems is a Burnaby IT provider. Media contact: Robin Alcott, Director of Marketing. " +
+  "Reach the team at robin.alcott@westbridgesystems.ca or visit our careers page. " +
+  "Westbridge Systems has supported Simon Fraser University student programs since 2019.";
 
-const g = (over: Record<string, unknown>, ev = EV, dom: string | null = "microserve.ca") =>
+const g = (over: Record<string, unknown>, ev = EV, dom: string | null = "westbridgesystems.ca") =>
   grounded({ contact_name: null, contact_role: null, contact_email: null, connection_type: "none", connection_note: null, ...over }, ev, dom);
 
 // Real, present-in-evidence data survives untouched.
-eq(g({ contact_name: "Dana Whitfield" }).contact_name, "Dana Whitfield", "real name kept");
-eq(g({ contact_name: "Dana Whitfield", contact_role: "Director of Marketing" }).contact_role, "Director of Marketing", "real role kept");
-eq(g({ contact_email: "dana.whitfield@microserve.ca" }).contact_email, "dana.whitfield@microserve.ca", "real email kept");
+eq(g({ contact_name: "Robin Alcott" }).contact_name, "Robin Alcott", "real name kept");
+eq(g({ contact_name: "Robin Alcott", contact_role: "Director of Marketing" }).contact_role, "Director of Marketing", "real role kept");
+eq(g({ contact_email: "robin.alcott@westbridgesystems.ca" }).contact_email, "robin.alcott@westbridgesystems.ca", "real email kept");
 
 // Invention is destroyed. These are the exact shapes an LLM produces.
 eq(g({ contact_name: "Sarah Chen" }).contact_name, null, "invented person nulled");
@@ -165,7 +165,7 @@ eq(g({ contact_email: "not-an-email" }).contact_email, null, "malformed email nu
 
 // An email at someone else's domain is a mis-targeted send even if it appears.
 eq(
-  g({ contact_email: "hello@gmail.com" }, EV + " hello@gmail.com", "microserve.ca").contact_email,
+  g({ contact_email: "hello@gmail.com" }, EV + " hello@gmail.com", "westbridgesystems.ca").contact_email,
   null,
   "off-domain email nulled even when present in evidence"
 );
@@ -581,7 +581,7 @@ const G = (h: string) => `https://www.google.com/s2/favicons?domain=${h}&sz=128`
 eq(logoUrl("https://vancity.com"), G("vancity.com"), "bare host");
 eq(logoUrl("https://www.rbs.ca/about-us/corporate-social-responsibility/"), G("rbs.ca"), "deep URL keeps only the host");
 eq(logoUrl("https://csr.saveonfoods.com"), G("csr.saveonfoods.com"), "subdomain kept -- still their own site");
-eq(logoUrl("microserve.ca/"), G("microserve.ca"), "scheme-less value from a manually added lead");
+eq(logoUrl("westbridgesystems.ca/"), G("westbridgesystems.ca"), "scheme-less value from a manually added lead");
 eq(logoUrl(null), null, "null website -> monogram, which is 25% of the board");
 eq(logoUrl(""), null, "empty website -> monogram");
 eq(logoUrl("not a url"), null, "unparseable -> monogram, never a broken request");
@@ -727,13 +727,13 @@ eq(
   "Purdys: the fundraising desk, not customer service"
 );
 eq(
-  pickEmail(["customersupport@trailappliances.com", "ebarney@trailappliances.com", "careers@trailappliances.com"]),
-  "ebarney@trailappliances.com",
+  pickEmail(["customersupport@trailappliances.com", "jmarchetti@trailappliances.com", "careers@trailappliances.com"]),
+  "jmarchetti@trailappliances.com",
   "Trail: a person, not the support queue"
 );
 eq(
-  pickEmail(["consumerservices@naturespath.com", "asell@naturespath.com", "dvartanian@naturespath.com", "sfalk@naturespath.com", "wholesale@naturespath.com"]),
-  "asell@naturespath.com",
+  pickEmail(["consumerservices@naturespath.com", "rkovacs@naturespath.com", "tlindqvist@naturespath.com", "mokafor@naturespath.com", "wholesale@naturespath.com"]),
+  "rkovacs@naturespath.com",
   "Nature's Path: a person, not consumer services"
 );
 // A complaint desk is still better than nothing.
@@ -743,7 +743,7 @@ for (const e of ["customerservice@purdys.com", "customersupport@trailappliances.
   eq(isComplaintInbox(e), true, `${e} is a complaint desk`);
 }
 // The addresses actually worth writing to must not be caught by the demotion.
-for (const e of ["sponsorship@bctransit.com", "donations.canadaeast@mowi.com", "info@herbaland.ca", "fundraising@purdys.com", "hello@focaleng.com", "asell@naturespath.com"]) {
+for (const e of ["sponsorship@bctransit.com", "donations.canadaeast@mowi.com", "info@herbaland.ca", "fundraising@purdys.com", "hello@focaleng.com", "rkovacs@naturespath.com"]) {
   eq(isComplaintInbox(e), false, `${e} is a real target`);
 }
 
@@ -772,7 +772,7 @@ const ROWS = [
     contact_name: null, contact_email: "fundraising@purdys.com", owner_name: "Michael", created_by_name: "Michael",
     connection_type: "none", amount: null, created_at: "2026-08-01T00:00:00Z", why_fit: "gift boxes for the auction" },
   { id: "2", company: "Trail Appliances", status: "prospects", industry: "Retail", location: "Richmond, BC",
-    contact_name: "E Barney", contact_email: "ebarney@trailappliances.com", owner_name: null, created_by_name: "michael",
+    contact_name: "J Marchetti", contact_email: "jmarchetti@trailappliances.com", owner_name: null, created_by_name: "michael",
     connection_type: "past_sponsor", amount: 4000, created_at: "2026-08-05T00:00:00Z", why_fit: "sponsored us in 2024" },
   { id: "3", company: "Nature's Path", status: "closed_won", industry: "Food Manufacturing", location: "Richmond, BC",
     contact_name: null, contact_email: null, owner_name: "Priya", created_by_name: "Priya",

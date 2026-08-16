@@ -149,8 +149,8 @@ export function pickEmail(emails: string[]): string | null {
   // This fallback took usable[0], which is first-INSERTED, and /contact pages
   // list the customer-service address first -- so all three lookups this app has
   // ever run picked a complaint desk while holding a better address in the same
-  // array (Purdys had fundraising@, Trail had ebarney@, Nature's Path had
-  // asell@). First-found is also permanent downstream, because the write path
+  // array (a fundraising desk in one case, a named person in the other two).
+  // First-found is also permanent downstream, because the write path
   // coalesces, so the wrong pick here is a wrong pick forever.
   const usable = emails.filter((e) => !/^(no-?reply|donotreply|postmaster|abuse|privacy)@/.test(e));
   return usable.find((e) => !isComplaintInbox(e)) ?? usable[0] ?? emails[0] ?? null;
