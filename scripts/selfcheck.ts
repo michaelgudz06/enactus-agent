@@ -10,12 +10,15 @@ import { requestedCount, DEFAULT_COUNT, MAX_COUNT } from "../src/lib/count.ts";
 import { disqualify, provinceFromRequest, grounded, type ApolloOrg } from "../src/lib/apollo.ts";
 import { salvageObjects, pluck } from "../src/lib/llm.ts";
 import { nameMatchesDomain, companyKey } from "../src/lib/apollo.ts";
-import { baseName, companyEmails, extractPeople, isBannedHost, pickEmail, rankUrls } from "../src/lib/firecrawl.ts";
+import { baseName, companyEmails, emailBelongsTo, extractPeople, isBannedHost, isComplaintInbox, pickEmail, rankUrls } from "../src/lib/firecrawl.ts";
 import { classifyLocation, normalizeLocation } from "../src/lib/geocode.ts";
-import { greet, lint, projectNames } from "../src/lib/email-lint.ts";
+import { greet, isRoleInbox, lint, projectNames } from "../src/lib/email-lint.ts";
 import { ENACTUS_ORG, ENACTUS_PROJECTS } from "../src/lib/enactus.ts";
 import { logoUrl, monogram } from "../src/lib/logo.ts";
 import { setClause } from "../src/lib/db.ts";
+import { applyEvent, newTurn, takeLines, type RunTurn } from "../src/lib/run-events.ts";
+import { nextAction, quietDaysFor } from "../src/lib/next-action.ts";
+import { csvCell, toCsv } from "../src/lib/csv.ts";
 
 let checks = 0;
 const eq = (actual: unknown, expected: unknown, msg: string) => {
@@ -510,6 +513,39 @@ eq(greet("Hi Coca-Cola Canada Bottling Ltd.,\n\nWe loved your work.", "Jason Pot
 eq(greet("We loved your work.", ""), "Hi there,\n\nWe loved your work.", "no contact falls back to there");
 eq(greet("Dear Sir or Madam,\nWe loved your work.", "  Sarah  Chen "), "Hi Sarah,\n\nWe loved your work.", "Dear-form cut, name trimmed");
 
+// The Purdys case, shipped live: contact_name is the founder off a company
+// history page (the company was founded in 1907) against a service queue.
+eq(
+  greet("We loved your work.", "Richard Carmon Purdy", "customerservice@purdys.com"),
+  "Hi there,\n\nWe loved your work.",
+  "a shared inbox is never greeted by name, however confident the name looks"
+);
+eq(greet("We loved your work.", "Jason Potter", "jason.potter@acme.com", true), "Hi Jason,\n\nWe loved your work.", "a personal address gets the name once ownership is shown");
+// The regression this argument exists to stop: fundraising@ is the RIGHT desk
+// to write to and is not in ROLE_INBOX, so the old isRoleInbox gate would have
+// handed it "Hi Richard," the moment pickEmail started preferring it.
+eq(greet("We loved your work.", "Richard Carmon Purdy", "fundraising@purdys.com"), "Hi there,\n\nWe loved your work.", "a shared desk outside ROLE_INBOX still gets no first name");
+eq(greet("We loved your work.", "Jason Potter", "jason.potter@acme.com"), "Hi there,\n\nWe loved your work.", "an unproven address is treated as shared");
+eq(greet("We loved your work.", "Jason Potter", null), "Hi Jason,\n\nWe loved your work.", "no address on file behaves as before");
+for (const e of ["customerservice@purdys.com", "consumerservices@naturespath.com", "customersupport@trailappliances.com", "freshslicecares@freshslice.com", "info@herbaland.ca", "hello@focaleng.com", "No-Reply@x.com"]) {
+  eq(isRoleInbox(e), true, `${e} is a shared inbox`);
+}
+// Both real, and both worth greeting by name if a name ever lands: these are
+// the addresses a sponsorship ask is SUPPOSED to reach.
+for (const e of ["sponsorship@bctransit.com", "donations.canadaeast@mowi.com", "j.potter@acme.com", "", null]) {
+  eq(isRoleInbox(e), false, `${JSON.stringify(e)} is not a shared inbox`);
+}
+eq(
+  lc("We would love to partner.", [], "none").filter((x) => x.includes("shared inbox")),
+  [],
+  "no address on file adds no inbox warning"
+);
+eq(
+  lint("We would love to partner.", { facts: FACTS, goal: GOAL, connection: "none", recentProjects: [], projectNames: PROJECT_NAMES, email: "customerservice@purdys.com" }),
+  ["customerservice@purdys.com is a shared inbox, not a person. Worth finding a named contact first."],
+  "a shared inbox warns Michael before he sends"
+);
+
 // ── logo tile ─────────────────────────────────────────────────────────────
 // 27 of the 110 real leads have website: null -- nameMatchesDomain nulls it
 // whenever the model attached someone else's domain -- so the monogram is a
@@ -564,5 +600,143 @@ eq(monogram(""), "?", "no name still renders a tile, never an empty box");
   eq(empty.sets, ["updated_at = now()"], "a body of nothing editable still writes a valid SET");
   eq(empty.values, [], "and binds nothing");
 }
+
+
+// ── agent run transcript ──────────────────────────────────────────────────
+// The fold that used to live inside the agent page. It moved so a run could be
+// owned by the (app) layout and survive navigating to the board; these pin the
+// behaviour that move must not change.
+type T = RunTurn<{ id: string }>;
+const t0 = (): T[] => [newTurn<{ id: string }>("find sponsors in Burnaby")];
+const last = (ts: T[]) => ts[ts.length - 1];
+
+eq(last(applyEvent(t0(), { type: "status", step: "search", message: "Searching" })).steps,
+   [{ step: "search", message: "Searching" }], "status appends a step");
+eq(last(applyEvent(applyEvent(t0(), { type: "reasoning", text: "Look" }), { type: "reasoning", text: "ing" })).reasoning,
+   "Looking", "reasoning tokens concatenate, never replace");
+eq(last(applyEvent(t0(), { type: "lead", lead: { id: "a" } })).leads, [{ id: "a" }], "lead appends");
+eq(last(applyEvent(t0(), { type: "done" })).done, true, "done marks the turn finished");
+eq(last(applyEvent(t0(), { type: "clarify", questions: ["Which industry?"] })).clarify, ["Which industry?"], "clarify carries the questions");
+
+// An error must annotate the turn, not empty it: those leads are rows the agent
+// already wrote to the board, so discarding them would show fewer leads than
+// the board actually holds.
+const withLead = applyEvent(t0(), { type: "lead", lead: { id: "a" } });
+const errored = applyEvent(withLead, { type: "error", message: "Request failed (500)" });
+eq(last(errored).leads, [{ id: "a" }], "an error keeps the leads already streamed");
+eq(last(errored).error, "Request failed (500)", "and records the message");
+
+// Only the newest turn is ever touched, so scrolling back shows each answer
+// with the material it was built from.
+const two = [...t0(), newTurn<{ id: string }>("second run")];
+eq(applyEvent(two, { type: "lead", lead: { id: "b" } })[0].leads, [], "an earlier turn is never modified");
+
+// Total by construction: the server is mid-run and cannot be recalled, so an
+// unknown event or a lost transcript must not throw.
+eq(applyEvent(t0(), { type: "nope" } as never), t0(), "an unknown event costs nothing");
+eq(applyEvent([], { type: "done" }), [], "an event with no turn to land on is dropped, not thrown");
+
+// The chunk boundary case. A reader that parsed everything it had and dropped
+// the tail lost roughly one lead per run.
+eq(takeLines('{"a":1}\n{"b":2}\n{"c":'), { lines: ['{"a":1}', '{"b":2}'], rest: '{"c":' }, "a split line is carried over, not parsed");
+eq(takeLines('{"a":1}\n'), { lines: ['{"a":1}'], rest: "" }, "a clean boundary leaves no remainder");
+eq(takeLines('{"a":1}\n\n\n{"b":2}\n'), { lines: ['{"a":1}', '{"b":2}'], rest: "" }, "blank keepalive lines are skipped");
+eq(takeLines(""), { lines: [], rest: "" }, "an empty chunk is not a line");
+
+// ── nextAction ────────────────────────────────────────────────────────────
+// The follow-up nag is derived from stage + silence, so these thresholds are
+// the whole rule set. NOW is fixed so the assertions do not drift with the day.
+const NOW = Date.parse("2026-08-16T12:00:00Z");
+const daysAgo = (n: number) => new Date(NOW - n * 86_400_000).toISOString();
+
+eq(quietDaysFor({ status: "outreach_sent", last_activity_at: daysAgo(9) }, NOW), 9, "silence measured from last_activity_at");
+eq(quietDaysFor({ status: "outreach_sent", updated_at: daysAgo(3) }, NOW), 3, "falls back to updated_at");
+eq(quietDaysFor({ status: "outreach_sent", last_activity_at: daysAgo(9), updated_at: daysAgo(1) }, NOW), 9, "activity wins over updated_at when both are present");
+// A lead that arrived from anywhere but the board GET has neither stamp. It
+// must read as fresh, not as infinitely stale nagging on every card.
+eq(quietDaysFor({ status: "outreach_sent" }, NOW), 0, "no timestamp reads as no silence");
+eq(quietDaysFor({ status: "outreach_sent", updated_at: "not a date" }, NOW), 0, "an unparseable stamp reads as no silence");
+
+eq(nextAction({ status: "outreach_sent", last_activity_at: daysAgo(8) }, NOW)?.kind, "followup", "outreach quiet 8d is due");
+eq(nextAction({ status: "outreach_sent", last_activity_at: daysAgo(7) }, NOW)?.kind, "followup", "the threshold day itself is due");
+eq(nextAction({ status: "outreach_sent", last_activity_at: daysAgo(2) }, NOW), null, "outreach quiet 2d is not");
+eq(nextAction({ status: "in_conversation", last_activity_at: daysAgo(6) }, NOW)?.kind, "followup", "a live conversation goes stale sooner");
+eq(nextAction({ status: "in_conversation", last_activity_at: daysAgo(4) }, NOW), null, "but not on day four");
+eq(nextAction({ status: "closed_won", amount: null, last_activity_at: daysAgo(1) }, NOW)?.kind, "amount", "a win with no number is the one thing left to do");
+eq(nextAction({ status: "closed_won", amount: 0, last_activity_at: daysAgo(400) }, NOW), null, "zero is a recorded amount, not a missing one");
+eq(nextAction({ status: "closed_won", amount: 2500, last_activity_at: daysAgo(400) }, NOW), null, "a valued win is never nagged, however old");
+// The 107 prospects are why: a chip on every card teaches the team to ignore
+// chips, and their next action is already a button on the card.
+eq(nextAction({ status: "prospects", last_activity_at: daysAgo(300) }, NOW), null, "prospects are never nagged");
+eq(nextAction({ status: "researched", last_activity_at: daysAgo(300) }, NOW), null, "researched is never nagged");
+eq(nextAction({ status: "closed_lost", last_activity_at: daysAgo(300) }, NOW), null, "a no is terminal");
+eq(nextAction({ status: "outreach_sent", last_activity_at: daysAgo(11) }, NOW)?.label, "Follow up · quiet 11d", "the label carries the number");
+
+// ── csv ───────────────────────────────────────────────────────────────────
+// The export is the only copy of this board that survives the account it lives
+// on, so the three characters that corrupt a sheet are the ones to pin.
+eq(csvCell("Purdys"), "Purdys", "a plain value is not quoted");
+eq(csvCell("Vancouver, BC"), '"Vancouver, BC"', "a comma forces quotes");
+eq(csvCell('He said "yes"'), '"He said ""yes"""', "a quote is doubled and the field quoted");
+eq(csvCell("line one\nline two"), '"line one\nline two"', "a newline forces quotes");
+eq(csvCell(null), "", "null is an empty field, not the text null");
+eq(csvCell(undefined), "", "so is undefined");
+eq(csvCell(0), "0", "zero is a value, not a blank");
+eq(csvCell(["food", "cash"]), "food; cash", "an array joins rather than becoming JSON");
+eq(csvCell({ url: "https://x.dev" }), '"{""url"":""https://x.dev""}"', "an object falls back to quoted JSON");
+
+eq(toCsv([{ a: 1, b: 2 }]), "a,b\r\n1,2\r\n", "header then row, CRLF per RFC 4180");
+// A row missing an optional field must not drop that column for everybody.
+eq(toCsv([{ a: 1 }, { a: 2, b: 3 }]), "a,b\r\n1,\r\n2,3\r\n", "columns are the union of all rows, not the first row");
+eq(toCsv([{ a: 1, b: 2 }], ["b"]), "b\r\n2\r\n", "an explicit column list wins");
+eq(toCsv([]), "\r\n", "no rows is a header-only document, not a crash");
+
+// ── pickEmail: the complaint-desk demotion ────────────────────────────────
+// These three arrays are verbatim what this app actually scraped, pulled from
+// enactus_lead_activity meta. Every one of them picked the complaint desk while
+// holding a better address, and the write path coalesces, so each wrong pick
+// was permanent.
+eq(
+  pickEmail(["customerservice@purdys.com", "group@purdys.com", "groupsavings@purdys.com", "resumes@purdys.com", "sales@purdys.com", "fundraising@purdys.com", "business@purdys.com"]),
+  "fundraising@purdys.com",
+  "Purdys: the fundraising desk, not customer service"
+);
+eq(
+  pickEmail(["customersupport@trailappliances.com", "ebarney@trailappliances.com", "careers@trailappliances.com"]),
+  "ebarney@trailappliances.com",
+  "Trail: a person, not the support queue"
+);
+eq(
+  pickEmail(["consumerservices@naturespath.com", "asell@naturespath.com", "dvartanian@naturespath.com", "sfalk@naturespath.com", "wholesale@naturespath.com"]),
+  "asell@naturespath.com",
+  "Nature's Path: a person, not consumer services"
+);
+// A complaint desk is still better than nothing.
+eq(pickEmail(["customerservice@x.com"]), "customerservice@x.com", "the only address wins even if it is a complaint desk");
+
+for (const e of ["customerservice@purdys.com", "customersupport@trailappliances.com", "consumerservices@naturespath.com", "freshslicecares@freshslice.com", "careers@x.com", "warranty@x.com"]) {
+  eq(isComplaintInbox(e), true, `${e} is a complaint desk`);
+}
+// The addresses actually worth writing to must not be caught by the demotion.
+for (const e of ["sponsorship@bctransit.com", "donations.canadaeast@mowi.com", "info@herbaland.ca", "fundraising@purdys.com", "hello@focaleng.com", "asell@naturespath.com"]) {
+  eq(isComplaintInbox(e), false, `${e} is a real target`);
+}
+
+// ── extractPeople: the dead-founder guard ─────────────────────────────────
+// How "Richard Carmon Purdy, founder" got onto a card for a company founded in
+// 1907, and from there onto a draft.
+eq(extractPeople("Richard Carmon Purdy, founder, opened the first shop in 1907.", "purdys.com", "https://purdys.com/about"), [], "a name paired with an 1800s/1900s year is history, not staff");
+eq(
+  extractPeople("Maria Lopez, Owner since 2019", "acme.com", "https://acme.com/team").map((p) => p.name),
+  ["Maria Lopez"],
+  "a 2000s year is not company history"
+);
+
+// emailBelongsTo is what the greeting now trusts, so the forms it accepts are
+// the forms that earn a first name.
+eq(emailBelongsTo("jason.potter@acme.com", "Jason Potter"), true, "first.last");
+eq(emailBelongsTo("jpotter@acme.com", "Jason Potter"), true, "flast");
+eq(emailBelongsTo("customerservice@purdys.com", "Richard Carmon Purdy"), false, "a complaint desk belongs to nobody");
+eq(emailBelongsTo("fundraising@purdys.com", "Richard Carmon Purdy"), false, "neither does a fundraising desk");
 
 console.log(`selfcheck: ${checks} assertions passed`);

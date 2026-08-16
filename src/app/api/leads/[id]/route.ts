@@ -2,6 +2,7 @@ import { after } from "next/server";
 import { route } from "@/lib/auth";
 import { db, setClause } from "@/lib/db";
 import { findContactFor } from "@/lib/contact";
+import { STATUS_COLUMNS } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,14 +13,40 @@ export const maxDuration = 30;
 const EDITABLE = new Set([
   "company", "website", "industry", "description", "contact_name", "contact_role",
   "contact_email", "location", "connection_type", "connection_note", "sponsorship_type",
-  "why_fit", "status", "board_order",
+  "why_fit", "status", "board_order", "amount", "owner_name",
 ]);
+
+// closed_at and owner_name are deliberately absent from EDITABLE above: both are
+// stamped by this route from the stage move and the session, never accepted from
+// a request body. owner_name is the one exception -- the Claim button sets it
+// explicitly -- which is why it appears there but closed_at does not.
+const CLOSED = new Set(["closed_won", "closed_lost"]);
+
+// setClause only decides WHICH columns may be written, never what may go in
+// them, so status took any string at all. The board renders a lead by looking
+// its status up in a column map and falling back to prospects, so an unknown
+// value does not error -- it files the lead under Prospects and leaves no way
+// to move it back. The activity log already carries two rows written with a
+// status of "contacted", which is not in the union.
+const STATUSES = new Set<string>(STATUS_COLUMNS.map((c) => c.id));
 
 type Ctx = { params: Promise<{ id: string }> };
 
 export const PATCH = route(async (session, req: Request, { params }: Ctx) => {
   const { id } = await params;
   const b = await req.json().catch(() => ({}));
+  if ("status" in b && !STATUSES.has(b.status)) {
+    return Response.json({ error: `Unknown status "${b.status}"` }, { status: 400 });
+  }
+  // The board sends whatever prompt() returned, so this is a trust boundary:
+  // null clears the amount, anything that is not a whole non-negative number of
+  // dollars is a typo and must not reach a column the totals are summed from.
+  if ("amount" in b && b.amount !== null && !(Number.isInteger(b.amount) && b.amount >= 0)) {
+    return Response.json(
+      { error: "amount must be a whole number of dollars, or null" },
+      { status: 400 }
+    );
+  }
   const { sets, values } = setClause(b, EDITABLE, { sponsorship_type: "::text[]" });
   values.push(id);
 
@@ -45,6 +72,29 @@ export const PATCH = route(async (session, req: Request, { params }: Ctx) => {
                 ${JSON.stringify({ from, to: rows[0].status })}::jsonb, ${session.name})`;
     } catch (e) {
       console.error("activity persist failed:", (e as Error).message);
+    }
+
+    // Outcome and ownership, stamped from the move itself rather than typed.
+    //
+    // closed_at is set on entering a closed stage and cleared otherwise, which
+    // also covers dragging a card back out of Closed -- a date that survived
+    // that would put a lead in "what we closed this term" forever. Won -> Lost
+    // restamps, which is right: the outcome changed today.
+    //
+    // owner_name is coalesced, so it records whoever first moved the card off
+    // Prospects and is never overwritten by the next person to touch it. The
+    // Claim button changes it deliberately through EDITABLE.
+    const entering = CLOSED.has(rows[0].status);
+    try {
+      const [stamped] = await db()`
+        update enactus_leads
+           set closed_at  = ${entering ? new Date().toISOString() : null},
+               owner_name = coalesce(owner_name, ${from === "prospects" ? session.name : null})
+         where id = ${id}
+         returning *`;
+      if (stamped) rows[0] = stamped;
+    } catch (e) {
+      console.error("stage stamp failed:", (e as Error).message);
     }
 
     // Moving a lead off the prospects column is the moment someone decided to

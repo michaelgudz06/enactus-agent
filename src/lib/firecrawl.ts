@@ -111,10 +111,26 @@ export function companyEmails(text: string, siteHost: string): string[] {
 // legitimate target here -- the club is cold-emailing either way, and a
 // published address is likelier to be read than a guessed personal one.
 const PREFERRED = [
-  /^(sponsorships?|sponsor|partnerships?|partner|community|giving|donations?)$/,
+  // `fundraising` earns its place the hard way: fundraising@purdys.com was
+  // scraped, ranked below customerservice@, and thrown away.
+  /^(sponsorships?|sponsor|partnerships?|partner|community|giving|donations?|fundraising)$/,
   /^(marketing|communications?|comms|media|pr)$/,
   /^(info|hello|contact|inquiries|enquiries|general)$/,
 ];
+
+// Desks that exist to handle unhappy customers, warranty claims and job
+// applications. A sponsorship ask sent here is filed by someone whose job is to
+// close tickets, and it is the wrong first impression besides.
+// Two tests rather than one alternation: the prefixes anchor at the start of
+// the mailbox head, while `cares` anchors at its end -- Fresh Slice publishes
+// freshslicecares@, where the tell is the suffix.
+export function isComplaintInbox(email: string): boolean {
+  const head = localHead(email);
+  return (
+    /^(customer|consumer|support|help|complaint|warranty|return|refund|billing|order|career|resume|job)/.test(head) ||
+    /cares?$/.test(head)
+  );
+}
 
 // Match the first segment of the mailbox, not the whole thing: Mowi publishes
 // donations.canadaeast@ and media@, and anchoring on the full local part picked
@@ -127,9 +143,17 @@ export function pickEmail(emails: string[]): string | null {
     const hit = emails.find((e) => re.test(localHead(e)));
     if (hit) return hit;
   }
-  // No recognised mailbox: prefer a personal-looking address over noreply.
+  // No recognised mailbox: prefer a personal-looking address over noreply, and
+  // a complaint desk only when it is the only thing on offer.
+  //
+  // This fallback took usable[0], which is first-INSERTED, and /contact pages
+  // list the customer-service address first -- so all three lookups this app has
+  // ever run picked a complaint desk while holding a better address in the same
+  // array (Purdys had fundraising@, Trail had ebarney@, Nature's Path had
+  // asell@). First-found is also permanent downstream, because the write path
+  // coalesces, so the wrong pick here is a wrong pick forever.
   const usable = emails.filter((e) => !/^(no-?reply|donotreply|postmaster|abuse|privacy)@/.test(e));
-  return usable[0] ?? emails[0] ?? null;
+  return usable.find((e) => !isComplaintInbox(e)) ?? usable[0] ?? emails[0] ?? null;
 }
 
 /** Pages worth reading for a contact, best first. */
@@ -334,7 +358,7 @@ function nameCard(line: string | undefined, siteLabel: string): NameHit | undefi
  * Only the forms a company actually uses. An address that does not encode the
  * name is left as a company address, never attributed to them.
  */
-function emailBelongsTo(email: string, name: string): boolean {
+export function emailBelongsTo(email: string, name: string): boolean {
   const local = email.split("@")[0].toLowerCase().replace(/[^a-z]/g, "");
   const parts = name.toLowerCase().split(/\s+/).map((t) => t.replace(/[^a-z]/g, "")).filter((t) => t.length > 1);
   if (!local || parts.length < 2) return false;
@@ -384,6 +408,16 @@ export function extractPeople(md: string, siteHost: string, sourceUrl: string): 
             ? (nameCard(lines[i - 1], siteLabel) ?? nameCard(lines[i + 1], siteLabel))
             : undefined);
         if (!hit) continue;
+        // A name and a title sharing a line with an 1800s or 1900s year is the
+        // company's history, not its staff. This is how "Richard Carmon Purdy,
+        // founder" got onto a card for a company founded in 1907, and how his
+        // name ended up on a draft addressed to customerservice@.
+        //
+        // ponytail: misses a living founder introduced with e.g. "since 1998",
+        // but they almost always appear on /team without a year too. Wrong in
+        // the safe direction -- a missing name costs a lookup, a dead one costs
+        // the email.
+        if (/\b1[89]\d\d\b/.test(line)) continue;
         // Prefer the published title verbatim; fall back to the matched phrase
         // when the line holds several people or a paragraph, so the card never
         // shows someone else's title or a whole sentence. Addresses come out

@@ -1,9 +1,10 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { Mail, ChevronDown, ExternalLink, Brain, AtSign, X } from "lucide-react";
+import { Mail, ChevronDown, ExternalLink, Brain, AtSign, X, Clock } from "lucide-react";
 import { Lead } from "@/lib/types";
 import { logoUrl, monogram } from "@/lib/logo";
+import { nextAction } from "@/lib/next-action";
 import ConnectionChip from "./ConnectionChip";
 
 export default function LeadCard({
@@ -12,8 +13,18 @@ export default function LeadCard({
   onDelete,
   draggable,
   onDragStart,
+  now,
 }: {
   lead: Lead;
+  /**
+   * When "now" is, stamped by the board when it loaded these leads. A prop
+   * rather than Date.now() in here because reading the clock during render is
+   * impure: it makes the card render differently on the server than on the
+   * client, and React has no reason not to re-render it at any moment. Omitted
+   * on the agent page, where every lead is a brand-new prospect and no
+   * follow-up chip could apply anyway.
+   */
+  now?: number;
   onEmail?: (lead: Lead) => void;
   // One handler: both pages hard-DELETE the same row and differ only in how
   // they bookkeep it afterwards, which is the page's business, not the card's.
@@ -38,6 +49,7 @@ export default function LeadCard({
   // and still bills its mt-2, which is the gap it exists to remove.
   const hasChips =
     (lead.connection_type && lead.connection_type !== "none") || lead.sponsorship_type?.length > 0;
+  const due = now ? nextAction(lead, now) : null;
 
   // A press that drifts a few pixels off a button starts a card drag, so the
   // lead changes column and the click never fires. draggable={false} on the
@@ -170,6 +182,28 @@ export default function LeadCard({
 
       {findError && (
         <p className="mt-2 text-[11px]" style={{ color: "var(--faint)" }}>{findError}</p>
+      )}
+
+      {/* Derived every render from the stage and the silence, so it clears
+          itself the moment someone logs a call or drags the card -- there is no
+          "done" to remember to tick. Prospects never get one: their next action
+          is already the buttons below. */}
+      {due && (
+        <div
+          className="mt-2 inline-flex items-center gap-1 text-[11px] font-semibold rounded-md px-1.5 py-0.5"
+          style={{ background: "rgba(245,158,11,.12)", color: "#f59e0b" }}
+        >
+          <Clock size={11} /> {due.label}
+        </div>
+      )}
+
+      {lead.amount != null && (
+        <div className="mt-2 text-xs font-semibold" style={{ color: "#4ade80" }}>
+          ${lead.amount.toLocaleString()}
+          {lead.owner_name && (
+            <span className="font-normal" style={{ color: "var(--faint)" }}> · {lead.owner_name}</span>
+          )}
+        </div>
       )}
 
       {/* Not trimmed to its first sentence. The stored rows run

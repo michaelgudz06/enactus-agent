@@ -3,30 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Sparkles, ArrowUp, Brain, History, Lightbulb, CircleDashed, CheckCircle2, AlertTriangle, ChevronDown } from "lucide-react";
 import { useApp } from "@/components/AppShell";
-import { AgentEvent, Lead, SearchRow } from "@/lib/types";
+import { useRun, Turn } from "@/components/RunProvider";
+import { Lead, SearchRow } from "@/lib/types";
 import LeadCard from "@/components/LeadCard";
 import EmailModal from "@/components/EmailModal";
-
-interface Step { step: string; message: string; }
-
-// One run of the agent, rendered as one message in the transcript. Everything
-// the run streams -- activity, reasoning, leads, errors -- belongs to the turn
-// that produced it, so scrolling back shows what each answer was built from.
-interface Turn {
-  prompt: string;
-  steps: Step[];
-  reasoning: string;
-  similar: { message: string; suggestion: string } | null;
-  clarify: string[] | null;
-  leads: Lead[];
-  dismissed: string[];
-  error: string;
-  done: boolean;
-}
-
-const newTurn = (prompt: string): Turn => ({
-  prompt, steps: [], reasoning: "", similar: null, clarify: null, leads: [], dismissed: [], error: "", done: false,
-});
 
 const EXAMPLES_SPONSOR = [
   "Catering & food companies in Burnaby that could sponsor student events",
@@ -41,15 +21,12 @@ const EXAMPLES_SALES = [
 
 export default function AgentPage() {
   const { mode } = useApp();
-  const [turns, setTurns] = useState<Turn[]>([]);
-  const [prompt, setPrompt] = useState("");
-  const [running, setRunning] = useState(false);
+  // The run itself lives in RunProvider, mounted by the (app) layout, so that
+  // navigating to the board does not unmount it and kill the stream.
+  const { turns, setTurns, prompt, setPrompt, running, send: startRun } = useRun();
   const [history, setHistory] = useState<SearchRow[]>([]);
   const [emailLead, setEmailLead] = useState<Lead | null>(null);
 
-  // The search the agent is working on. Clarifying answers are a reply in the
-  // transcript, but the API still needs the question they answer.
-  const askedRef = useRef("");
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
 
@@ -68,64 +45,8 @@ export default function AgentPage() {
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [turns]);
 
-  const patch = (fn: (t: Turn) => Turn) =>
-    setTurns((ts) => ts.map((t, i) => (i === ts.length - 1 ? fn(t) : t)));
-
   function send() {
-    const text = prompt.trim();
-    if (!text || running) return;
-    setPrompt("");
-    if (awaitingAnswers) run(text, text);
-    else { askedRef.current = text; run(text); }
-  }
-
-  async function run(bubble: string, answers?: string) {
-    setRunning(true);
-    setTurns((ts) => [...ts, newTurn(bubble)]);
-
-    try {
-      const res = await fetch("/api/agent/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: askedRef.current, mode, answers, skipClarify: Boolean(answers) }),
-      });
-      if (!res.ok || !res.body) {
-        const d = await res.json().catch(() => ({}));
-        throw new Error(d.error || `Request failed (${res.status})`);
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      while (true) {
-        const { done: rdone, value } = await reader.read();
-        if (rdone) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split("\n");
-        buf = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          let ev: AgentEvent;
-          try { ev = JSON.parse(line); } catch { continue; }
-          handleEvent(ev);
-        }
-      }
-    } catch (e) {
-      patch((t) => ({ ...t, error: (e as Error).message }));
-    } finally {
-      setRunning(false);
-    }
-  }
-
-  function handleEvent(ev: AgentEvent) {
-    switch (ev.type) {
-      case "status": patch((t) => ({ ...t, steps: [...t.steps, { step: ev.step, message: ev.message }] })); break;
-      case "reasoning": patch((t) => ({ ...t, reasoning: t.reasoning + ev.text })); break;
-      case "similar": patch((t) => ({ ...t, similar: { message: ev.message, suggestion: ev.suggestion } })); break;
-      case "clarify": patch((t) => ({ ...t, clarify: ev.questions })); break;
-      case "lead": patch((t) => ({ ...t, leads: [...t.leads, ev.lead] })); break;
-      case "done": patch((t) => ({ ...t, done: true })); break;
-      case "error": patch((t) => ({ ...t, error: ev.message })); break;
-    }
+    startRun(prompt, mode, awaitingAnswers);
   }
 
   // A rejected lead is deleted, not hidden: the agent saves every lead to the

@@ -62,6 +62,17 @@ create table if not exists enactus_email_drafts (
 -- reads the 40 most recent searches for a mode.
 create index if not exists enactus_leads_board_idx
   on enactus_leads (mode, board_order, created_at desc);
+
+-- The one thing stopping the same sponsor appearing twice. `insert ... on
+-- conflict do nothing` in agent.ts is what keeps a re-run of "10 leads from
+-- Burnaby" from duplicating the board, and on conflict needs THIS index to have
+-- something to conflict against -- without it the clause is a no-op that fails
+-- open. It was created by hand on the live database and never written down, so
+-- a rebuild from this file came up silently missing it. lower(btrim(...)) so
+-- "Purdys Chocolatier " and "purdys chocolatier" are one company. Per mode,
+-- because sponsor mode and sales mode are separate boards.
+create unique index if not exists enactus_leads_company_uniq
+  on enactus_leads (mode, lower(btrim(company)));
 create index if not exists enactus_searches_recent_idx
   on enactus_searches (mode, created_at desc);
 create index if not exists enactus_email_drafts_lead_idx
@@ -133,6 +144,41 @@ alter table enactus_leads add column if not exists geocoded_at timestamptz;
 
 alter table enactus_email_drafts add column if not exists template_id uuid;
 alter table enactus_email_drafts add column if not exists sender_id uuid;
+
+-- ══════════════════════════════════════════════════════════════════
+-- Pipeline value, ownership, and outcome. Between them these four
+-- columns answer the questions a VP External actually gets asked:
+-- what is the pipeline worth, what closed this term, who owns what.
+-- ══════════════════════════════════════════════════════════════════
+
+-- Whole CAD dollars, and the ONLY hand-typed field of the set: the board asks
+-- for it once, natively, when a card is dropped into Closed / Won. Integer
+-- rather than numeric because Neon returns numeric as a string and this column
+-- exists to be summed.
+alter table enactus_leads add column if not exists amount integer check (amount >= 0);
+
+-- Stamped by PATCH /api/leads/[id] when a card enters a closed stage, and
+-- nulled when it is dragged back out. Never typed. "What did we close this
+-- term" is this column and nothing else.
+alter table enactus_leads add column if not exists closed_at timestamptz;
+
+-- Filled by code: coalesced to the session name of whoever first drags the card
+-- out of Prospects, overridable through the same PATCH (the Claim button).
+alter table enactus_leads add column if not exists owner_name text;
+
+-- The recipient of record. POST /api/gmail/create has always received `to` and
+-- thrown it away, so a draft could never say where it went.
+alter table enactus_email_drafts add column if not exists to_email text;
+
+-- The stage vocabulary, enforced by the database rather than by remembering to
+-- guard every write path -- POST /api/leads still interpolates b.status raw, so
+-- a typo could file a card under a stage no column renders and leave no way to
+-- drag it back. ADD CONSTRAINT has no IF NOT EXISTS, hence the DO block, which
+-- is what keeps this file rerunnable against a live database.
+do $$ begin
+  alter table enactus_leads add constraint enactus_leads_status_chk
+    check (status in ('prospects','researched','outreach_sent','in_conversation','closed_won','closed_lost'));
+exception when duplicate_object then null; end $$;
 
 -- The timeline is always read newest-first for one lead; the geocode queue is
 -- always "located but not yet placed".

@@ -3,7 +3,7 @@
 import { createContext, useContext } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Sparkles, LayoutGrid, LogOut } from "lucide-react";
+import { Sparkles, LayoutGrid, LogOut, Map, Settings } from "lucide-react";
 import { Mode } from "@/lib/types";
 
 interface Ctx {
@@ -28,6 +28,14 @@ export default function AppShell({ name, children }: { name: string; children: R
   const tabs = [
     { href: "/agent", label: "Agent", icon: Sparkles },
     { href: "/board", label: "Board", icon: LayoutGrid },
+    // Both pages were finished and inside the authed layout, but were missing
+    // here -- so they were reachable only by typing the URL, and the numbers
+    // say nobody ever did: 0 of 108 locatable leads geocoded, 0 senders, 0
+    // templates. Until a sender exists the From and Template pickers stay
+    // hidden (EmailModal.tsx:229) and outreach is signed with whatever name was
+    // typed at the login box.
+    { href: "/map", label: "Map", icon: Map },
+    { href: "/settings", label: "Settings", icon: Settings },
   ];
 
   return (

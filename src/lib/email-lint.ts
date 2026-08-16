@@ -15,13 +15,46 @@ export const projectNames = (projects: string) =>
 
 const NUMBER = /\$?\d[\d,.]*%?/g;
 
+// Shared inboxes: mail here is read by whoever is on rota, so no first name is
+// ever correct. 4 of the 9 addresses on the board are customer-service queues
+// (customerservice@purdys.com, consumerservices@naturespath.com,
+// customersupport@trailappliances.com, freshslicecares@freshslice.com) and two
+// of those are already sitting in outreach_sent.
+const ROLE_INBOX =
+  /^(info|hello|contact|admin|office|general|enquiries|inquiries|support|help|customer\w*|consumer\w*|\w*cares|service\w*|sales|marketing|media|press|hr|careers|jobs|noreply|no-reply|donotreply)@/i;
+
+export const isRoleInbox = (email: string | null | undefined): boolean =>
+  ROLE_INBOX.test((email ?? "").trim());
+
 // The greeting is a fact, so it is built here rather than asked for. Models
 // write one anyway, so the model's is cut first, exactly like the sign-off.
 // All ten sampled drafts opened with a legal entity ("Hi Coca-Cola Canada
 // Bottling Ltd.,"), truncated differently each time.
-export function greet(body: string, contact: string): string {
-  const first = contact.trim().split(/\s+/)[0] || "there";
-  return `Hi ${first},\n\n${body.replace(/^\s*(hi|hello|hey|dear)\b[^\n]*\n+/i, "").trimStart()}`;
+//
+// A name is used ONLY when the address provably belongs to that person. Purdys
+// shipped with contact_name "Richard Carmon Purdy" -- the founder, who founded
+// the company in 1907 -- against customerservice@purdys.com, so the draft opened
+// "Hi Richard,". The name came off a company-history page, and no lint on the
+// body could catch it: the greeting was the only wrong part, and it was true to
+// its input.
+//
+// The gate is ownAddress, NOT isRoleInbox. A blocklist of role mailboxes only
+// ever closes the instances someone thought of: it does not match fundraising@,
+// so the moment pickEmail started preferring fundraising@purdys.com the draft
+// went straight back to greeting a man who has been dead for decades. Asking
+// instead whether the address encodes the name closes the whole class, and
+// leaves "Hi there," as the answer whenever the caller cannot show it does.
+//
+// ownAddress arrives as an argument rather than being computed here because
+// this file has no imports -- see the header.
+export function greet(
+  body: string,
+  contact: string,
+  email?: string | null,
+  ownAddress = false
+): string {
+  const named = !email || ownAddress ? contact.trim().split(/\s+/)[0] : "";
+  return `Hi ${named || "there"},\n\n${body.replace(/^\s*(hi|hello|hey|dear)\b[^\n]*\n+/i, "").trimStart()}`;
 }
 
 /**
@@ -48,10 +81,18 @@ export function lint(
     connection: string | null | undefined;
     recentProjects: string[];
     projectNames: string[];
+    email?: string | null;
   }
 ): string[] {
   const w: string[] = [];
   const known = `${opts.facts}\n${opts.goal}`;
+
+  // Not a fabrication, so it cannot be caught by reading the body -- but it is
+  // the likeliest reason a good email gets no reply, and the fix (find a named
+  // person) is Michael's, not the model's.
+  if (isRoleInbox(opts.email)) {
+    w.push(`${opts.email?.trim()} is a shared inbox, not a person. Worth finding a named contact first.`);
+  }
 
   // Compared as whole tokens, not substrings: `known.includes("3")` is true for
   // any facts mentioning 1936, which quietly excused every small number. The

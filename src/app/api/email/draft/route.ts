@@ -5,6 +5,7 @@ import { stripEmDashes } from "@/lib/sanitize";
 import { Lead } from "@/lib/types";
 import { ENACTUS_ORG, ENACTUS_PROJECTS, ENACTUS_VENTURES } from "@/lib/enactus";
 import { greet, lint, projectNames } from "@/lib/email-lint";
+import { emailBelongsTo } from "@/lib/firecrawl";
 import type { NeonQueryFunction } from "@neondatabase/serverless";
 
 export const runtime = "nodejs";
@@ -238,7 +239,7 @@ export const POST = route(async (session, req: Request) => {
         draftId: cached.id,
         subject: cached.subject ?? "",
         body: cached.body ?? "",
-        warnings: lint(cached.body ?? "", { facts, goal, connection: l.connection_type, recentProjects, projectNames: PROJECT_NAMES }),
+        warnings: lint(cached.body ?? "", { facts, goal, connection: l.connection_type, recentProjects, projectNames: PROJECT_NAMES, email: l.contact_email }),
       });
     });
   }
@@ -299,8 +300,15 @@ export const POST = route(async (session, req: Request) => {
       subject = stripEmDashes(subject) || `Enactus SFU sponsorship request for ${l.company}`;
       // `done` carries the whole body, so the client's streamed copy is replaced
       // by this one and never keeps a model-written sign-off.
-      body = signOff(greet(tidy(stripEmDashes(body)), l.contact_name ?? ""), senderName, senderTitle);
-      warnings = lint(body, { facts, goal, connection: l.connection_type, recentProjects, projectNames: PROJECT_NAMES });
+      // emailBelongsTo already encodes the address forms the contact lookup
+      // trusts when it attributes a personal address, so reusing it here means
+      // the greeting and the attribution can never disagree about whether this
+      // mailbox belongs to this person.
+      const ownAddress = Boolean(
+        l.contact_email && l.contact_name && emailBelongsTo(l.contact_email, l.contact_name)
+      );
+      body = signOff(greet(tidy(stripEmDashes(body)), l.contact_name ?? "", l.contact_email, ownAddress), senderName, senderTitle);
+      warnings = lint(body, { facts, goal, connection: l.connection_type, recentProjects, projectNames: PROJECT_NAMES, email: l.contact_email });
     }
 
     const draftId = await saveDraft(sql, {

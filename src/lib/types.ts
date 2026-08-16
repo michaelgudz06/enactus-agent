@@ -5,7 +5,8 @@ export type Status =
   | "researched"
   | "outreach_sent"
   | "in_conversation"
-  | "closed_won";
+  | "closed_won"
+  | "closed_lost";
 
 export type ConnectionType = "alum" | "past_sponsor" | "ecosystem" | "none";
 
@@ -29,6 +30,17 @@ export interface Lead {
   status: Status;
   mode: Mode;
   board_order: number;
+  /** Confirmed value in whole CAD. The only field a volunteer types by hand. */
+  amount: number | null;
+  /** Stamped by the PATCH route on entering a closed stage, nulled on leaving. */
+  closed_at: string | null;
+  owner_name: string | null;
+  /**
+   * Not a column: greatest(updated_at, newest activity) computed by the leads
+   * GET. Absent on a lead that arrived any other way, which is why the
+   * follow-up rules fall back to updated_at.
+   */
+  last_activity_at?: string | null;
   created_by_name: string | null;
   created_at: string;
   updated_at: string;
@@ -50,6 +62,7 @@ export interface EmailDraft {
   subject: string | null;
   body: string | null;
   gmail_draft_id: string | null;
+  to_email: string | null;
   status: "draft" | "created_in_gmail" | "sent";
   created_by_name: string | null;
   created_at: string;
@@ -60,7 +73,11 @@ export const STATUS_COLUMNS: { id: Status; label: string; color: string }[] = [
   { id: "researched", label: "Researched", color: "#f59e0b" },
   { id: "outreach_sent", label: "Outreach Sent", color: "#38bdf8" },
   { id: "in_conversation", label: "In Conversation", color: "#34d399" },
-  { id: "closed_won", label: "Closed / Won", color: "#f87171" },
+  // Won was red, which is the one colour a board should never give its win
+  // column. Lost is grey rather than red on purpose: a sponsor who said no is a
+  // fact to record, not an alarm to look at every day.
+  { id: "closed_won", label: "Closed / Won", color: "#4ade80" },
+  { id: "closed_lost", label: "Closed / Lost", color: "#9aa1ac" },
 ];
 
 export const CONNECTION_META: Record<ConnectionType, { label: string; color: string }> = {

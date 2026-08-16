@@ -590,6 +590,34 @@ export default function SettingsPage() {
             </div>
           </div>
         </section>
+
+        {/* The escape hatch, deliberately the last thing on the page and
+            deliberately spelled out. This board lives in one Neon project on
+            one student's personal account, and the two Supabase projects behind
+            earlier versions of this app both vanished without warning. A CSV in
+            a Drive folder is the copy that survives a handover. */}
+        <section className="rounded-2xl border p-4" style={{ background: "var(--surface)", borderColor: "var(--border)" }}>
+          <h2 className="text-sm font-semibold">Data</h2>
+          <p className="mt-1 text-xs" style={{ color: "var(--muted)" }}>
+            Every lead, with its stage, amount, owner and contact, as a spreadsheet. Take one before you hand the
+            club over — this database sits on a personal account and nothing else has a copy.
+          </p>
+          <a
+            href="/api/export"
+            download
+            className="mt-3 inline-flex items-center gap-2 text-xs font-semibold rounded-lg px-3 py-2"
+            style={{ background: "var(--gold)", color: "#1a1a1a" }}
+          >
+            Download CSV backup
+          </a>
+          <p className="mt-3 text-[11px]" style={{ color: "var(--faint)" }}>
+            To take one automatically, set a <code>BACKUP_TOKEN</code> environment variable and run this on a
+            schedule:
+          </p>
+          <pre className="mt-1 text-[11px] leading-relaxed whitespace-pre-wrap break-all font-mono" style={{ color: "var(--muted)" }}>
+            {`curl -H "Authorization: Bearer $BACKUP_TOKEN" \\\n  https://enactus-agent-mocha.vercel.app/api/export \\\n  -o ~/Backups/enactus-$(date +%F).csv`}
+          </pre>
+        </section>
       </div>
     </div>
   );

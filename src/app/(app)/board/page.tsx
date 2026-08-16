@@ -3,7 +3,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Search, RefreshCw } from "lucide-react";
 import { useApp } from "@/components/AppShell";
+import { useRun } from "@/components/RunProvider";
 import { Lead, Status, STATUS_COLUMNS } from "@/lib/types";
+import { nextAction } from "@/lib/next-action";
 import LeadCard from "@/components/LeadCard";
 import EmailModal from "@/components/EmailModal";
 import LeadDetail from "@/components/LeadDetail";
@@ -18,19 +20,51 @@ export default function BoardPage() {
   const [emailLead, setEmailLead] = useState<Lead | null>(null);
   const [detailLead, setDetailLead] = useState<Lead | null>(null);
   const [warning, setWarning] = useState("");
+  // Read once per load rather than during render: the follow-up thresholds are
+  // whole days, so re-reading the clock on every render would change nothing
+  // except make the render impure. 0 until the first load, which is what keeps
+  // the server-rendered markup free of a time-dependent chip.
+  const [now, setNow] = useState(0);
   const pressAt = useRef({ x: 0, y: 0 });
+  // The agent may be running on the other tab; leadSignal ticks when it has
+  // written one.
+  const { leadSignal } = useRun();
 
   async function load() {
     setLoading(true);
     const res = await fetch(`/api/leads?mode=${mode}`);
     const data = await res.json();
     setLeads(data.leads || []);
+    setNow(Date.now());
     if (data.warning) setWarning(data.warning);
     setLoading(false);
   }
 
+  // The mid-run re-read. Deliberately not load(): the board is already on
+  // screen, and swapping it for the skeleton on every arriving lead is worse
+  // than the row showing up a moment late. Touching no state before its first
+  // await is also what keeps the effect below clear of the synchronous-setState
+  // rule.
+  async function refresh() {
+    const res = await fetch(`/api/leads?mode=${mode}`);
+    const data = await res.json();
+    setLeads(data.leads || []);
+    setNow(Date.now());
+  }
+
   // eslint-disable-next-line react-hooks/exhaustive-deps -- load() is stable enough; mode is the only real trigger
   useEffect(() => { load(); }, [mode]);
+
+  // A run started on the agent tab keeps going now that it is owned by the
+  // layout, so its leads land in the database while this board is on screen.
+  // Skips the first render, where the effect above is already loading.
+  //
+  // The set-state rule counts any call to a function that sets state, without
+  // looking at whether it does so before its first await -- refresh() does not,
+  // so there is no synchronous render cascade here. Fetching in response to a
+  // counter is the intended shape; the rule cannot see the difference.
+  /* eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect -- leadSignal is the trigger; refresh() sets state only after its await */
+  useEffect(() => { if (leadSignal) void refresh(); }, [leadSignal]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -40,21 +74,58 @@ export default function BoardPage() {
     );
   }, [leads, query]);
 
+  // Built from STATUS_COLUMNS rather than a hand-written record, so adding a
+  // stage to types.ts is the whole change -- the previous literal silently
+  // dropped any lead whose stage was not one of its five keys into Prospects.
   const byStatus = useMemo(() => {
-    const map: Record<Status, Lead[]> = { prospects: [], researched: [], outreach_sent: [], in_conversation: [], closed_won: [] };
+    const map = Object.fromEntries(STATUS_COLUMNS.map((c) => [c.id, [] as Lead[]])) as Record<Status, Lead[]>;
     for (const l of filtered) (map[l.status] ?? map.prospects).push(l);
     return map;
   }, [filtered]);
 
+  // The three numbers a VP External gets asked for, computed in code from
+  // stored integers -- never a figure a model wrote. `unvalued` is shown rather
+  // than hidden because a total that quietly omits four wins is worse than one
+  // that admits it is incomplete.
+  const stats = useMemo(() => {
+    const won = leads.filter((l) => l.status === "closed_won");
+    return {
+      wonTotal: won.reduce((s, l) => s + (l.amount ?? 0), 0),
+      wonCount: won.length,
+      unvalued: won.filter((l) => l.amount == null).length,
+      due: now ? leads.filter((l) => nextAction(l, now)?.kind === "followup").length : 0,
+    };
+  }, [leads, now]);
+
   async function moveTo(id: string, status: Status) {
     const prev = leads;
-    setLeads((ls) => ls.map((l) => (l.id === id ? { ...l, status } : l)));
+    const lead = leads.find((l) => l.id === id);
+    const body: { status: Status; amount?: number } = { status };
+
+    // The only hand-typed value in the app, asked at the one moment it is known
+    // and the volunteer's hand is already on the card. A cancel, a blank, or
+    // anything that is not a whole dollar amount leaves it unset and the card
+    // still moves -- a drag must never be held hostage to a number.
+    if (status === "closed_won" && lead && lead.amount == null) {
+      const raw = window.prompt(
+        `What is ${lead.company} worth in CAD? Whole dollars — leave blank if it is in-kind or not settled yet.`
+      );
+      const cleaned = (raw ?? "").replace(/[$,\s]/g, "");
+      const n = Number(cleaned);
+      if (cleaned !== "" && Number.isInteger(n) && n >= 0) body.amount = n;
+    }
+
+    setLeads((ls) => ls.map((l) => (l.id === id ? { ...l, ...body } : l)));
     const res = await fetch(`/api/leads/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status }),
+      body: JSON.stringify(body),
     });
-    if (!res.ok) setLeads(prev);
+    if (!res.ok) return setLeads(prev);
+    // closed_at and owner_name are stamped by the route, so the row it returns
+    // is the only one that knows them.
+    const data = await res.json().catch(() => ({}));
+    if (data.lead) setLeads((ls) => ls.map((l) => (l.id === id ? data.lead : l)));
   }
 
   async function del(id: string) {
@@ -73,7 +144,22 @@ export default function BoardPage() {
         </div>
         <div className="flex items-center gap-3">
           <span className="text-xs" style={{ color: "var(--faint)" }}>{filtered.length} {filtered.length === 1 ? "lead" : "leads"}</span>
-          <button onClick={load} className="p-1.5 rounded-lg hover:bg-[var(--surface3)]" style={{ color: "var(--muted)" }} title="Refresh">
+          {stats.wonCount > 0 && (
+            <span className="text-xs font-semibold" style={{ color: "#4ade80" }}>
+              ${stats.wonTotal.toLocaleString()} won
+              {stats.unvalued > 0 && (
+                <span className="font-normal" style={{ color: "var(--faint)" }}>
+                  {" "}· {stats.unvalued} unvalued
+                </span>
+              )}
+            </span>
+          )}
+          {stats.due > 0 && (
+            <span className="text-xs font-semibold" style={{ color: "#f59e0b" }}>
+              {stats.due} need follow-up
+            </span>
+          )}
+          <button onClick={() => load()} className="p-1.5 rounded-lg hover:bg-[var(--surface3)]" style={{ color: "var(--muted)" }} title="Refresh">
             <RefreshCw size={15} className={loading ? "animate-spin" : ""} />
           </button>
         </div>
@@ -147,6 +233,7 @@ export default function BoardPage() {
                       >
                         <LeadCard
                           lead={l}
+                          now={now}
                           draggable
                           onDragStart={() => setDragId(l.id)}
                           onEmail={setEmailLead}
@@ -163,7 +250,16 @@ export default function BoardPage() {
       </div>
 
       {emailLead && <EmailModal lead={emailLead} onClose={() => setEmailLead(null)} />}
-      {detailLead && <LeadDetail lead={detailLead} onClose={() => setDetailLead(null)} />}
+      {detailLead && (
+        <LeadDetail
+          lead={detailLead}
+          onClose={() => setDetailLead(null)}
+          onUpdated={(l) => {
+            setLeads((ls) => ls.map((x) => (x.id === l.id ? l : x)));
+            setDetailLead(l);
+          }}
+        />
+      )}
     </div>
   );
 }
