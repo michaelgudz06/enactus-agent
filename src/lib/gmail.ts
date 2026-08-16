@@ -3,7 +3,7 @@
 // signCookie/readCookie pair the session cookie uses, in auth.ts.
 
 export const GMAIL_COOKIE = "gmail_tokens";
-export const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.compose";
+const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.compose";
 
 export interface GmailTokens {
   access_token: string;

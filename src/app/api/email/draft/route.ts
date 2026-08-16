@@ -199,7 +199,7 @@ export const POST = route(async (session, req: Request) => {
   // A grant-receiving nonprofit asked for cash reads as nobody having looked past
   // the industry label: Burnaby Arts Council is quoted in its own draft as
   // "grant-receiving and grant-giving" and then asked for money.
-  // ponytail: name/industry regex, the real fix is disqualifying these upstream
+  // Known limit: name/industry regex, the real fix is disqualifying these upstream
   // in apollo.ts MEMBERSHIP_NAME.
   const raisesOwnFunds = /non-?profit|society|council|association|foundation|charit/i.test(`${l.company} ${l.industry ?? ""}`);
   // Telling the model "do not ask for money" while still handing it

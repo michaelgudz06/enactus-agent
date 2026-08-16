@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "check": "node --experimental-strip-types scripts/selfcheck.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

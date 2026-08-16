@@ -14,8 +14,7 @@
 
 export type GeoPrecision = "address" | "city" | "region" | "none";
 
-// Lives here rather than in types.ts because the schema agent owns that file.
-// ponytail: move to src/lib/types.ts once the territories migration lands.
+// Known limit: move to src/lib/types.ts once the territories migration lands.
 export interface Territory {
   id: string;
   name: string;
@@ -34,7 +33,7 @@ export interface Territory {
 // Lower Mainland first, then every out-of-region municipality that actually
 // appears in the column. A name missing from this map classifies as 'region'
 // and lands in the unplaceable list -- visibly absent beats silently mis-pinned.
-// ponytail: hand-maintained list; swap for a gazetteer if the club expands
+// Known limit: hand-maintained list; swap for a gazetteer if the club expands
 // outreach past BC.
 const MUNICIPALITIES: Record<string, string> = {
   vancouver: "BC", burnaby: "BC", surrey: "BC", richmond: "BC", coquitlam: "BC",

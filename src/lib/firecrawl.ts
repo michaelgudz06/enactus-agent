@@ -28,7 +28,7 @@ import { exaSearch, hasExaKey } from "./exa.ts";
 
 const BASE = "https://api.firecrawl.dev/v2";
 
-export function hasFirecrawlKey(): boolean {
+function hasFirecrawlKey(): boolean {
   const k = process.env.FIRECRAWL_API_KEY;
   return Boolean(k && !k.startsWith("REPLACE"));
 }
@@ -268,7 +268,7 @@ const PROSE_TOKENS = new Set([
 // Applied where pages are fetched rather than inside extractPeople(), which
 // stays a pure text-to-people function: the URL is evidence about the page, not
 // about the text on it.
-export function isPeoplePage(url: string): boolean {
+function isPeoplePage(url: string): boolean {
   const tokens = url
     .split(/[?#]/)[0]
     .split("/")
@@ -413,7 +413,7 @@ export function extractPeople(md: string, siteHost: string, sourceUrl: string): 
         // founder" got onto a card for a company founded in 1907, and how his
         // name ended up on a draft addressed to customerservice@.
         //
-        // ponytail: misses a living founder introduced with e.g. "since 1998",
+        // Known limit: misses a living founder introduced with e.g. "since 1998",
         // but they almost always appear on /team without a year too. Wrong in
         // the safe direction -- a missing name costs a lookup, a dead one costs
         // the email.
@@ -446,7 +446,7 @@ export function extractPeople(md: string, siteHost: string, sourceUrl: string): 
 }
 
 /** Best first, one entry per person. */
-export function rankPeople(people: ContactPerson[]): ContactPerson[] {
+function rankPeople(people: ContactPerson[]): ContactPerson[] {
   const best = new Map<string, ContactPerson>();
   for (const p of people) {
     const key = p.name.toLowerCase();

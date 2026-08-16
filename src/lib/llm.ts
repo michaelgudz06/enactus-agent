@@ -2,7 +2,7 @@
 const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
 
 export const REASONER = "deepseek/deepseek-r1";
-export const CHAT = "deepseek/deepseek-chat";
+const CHAT = "deepseek/deepseek-chat";
 
 // Structuring model. Re-benchmarked 2026-08-15 on the real payload (15
 // candidates in, 10 leads out, 3 rounds per model). Numbers are wall-clock ms
@@ -62,26 +62,6 @@ function headers() {
     "HTTP-Referer": "https://enactus-agent.local",
     "X-Title": "Enactus SFU Lead Agent",
   };
-}
-
-// Non-streaming plain-text completion (used for email drafting).
-export async function chatText(
-  messages: Msg[],
-  opts: { model?: string; maxTokens?: number; temperature?: number } = {}
-): Promise<string> {
-  const res = await fetch(OR_URL, {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify({
-      model: opts.model ?? CHAT,
-      messages,
-      max_tokens: opts.maxTokens ?? 900,
-      temperature: opts.temperature ?? 0.6,
-    }),
-  });
-  if (!res.ok) throw new Error(`OpenRouter ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  const data = await res.json();
-  return data?.choices?.[0]?.message?.content ?? "";
 }
 
 // Non-streaming JSON completion (used for planning + scoring synthesis when we

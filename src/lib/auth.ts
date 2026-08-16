@@ -38,7 +38,7 @@ export function readCookie<T>(value: string | undefined): T | null {
 
 export const makeToken = (name: string): string => signCookie({ name, t: Date.now() });
 
-export function verifyToken(token: string | undefined): Session | null {
+function verifyToken(token: string | undefined): Session | null {
   const data = readCookie<{ name?: unknown }>(token);
   return typeof data?.name === "string" ? { name: data.name } : null;
 }

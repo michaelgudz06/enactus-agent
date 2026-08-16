@@ -2,8 +2,7 @@
 // page so the email agent fills exactly the same {{tokens}} the preview showed.
 // A preview that can drift from what actually sends is worse than no preview.
 //
-// Row shapes live here rather than in types.ts because that file belongs to the
-// schema agent; fold them in there and delete these once it lands.
+// Known limit: these row shapes belong in types.ts; fold them in there.
 
 export interface Sender {
   id: string;

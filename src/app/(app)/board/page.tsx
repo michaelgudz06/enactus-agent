@@ -5,6 +5,7 @@ import { Search, RefreshCw } from "lucide-react";
 import { useApp } from "@/components/AppShell";
 import { useRun } from "@/components/RunProvider";
 import { Lead, Status, STATUS_COLUMNS } from "@/lib/types";
+import { amountQuestion, parseAmount } from "@/lib/amount";
 import { nextAction } from "@/lib/next-action";
 import LeadCard from "@/components/LeadCard";
 import EmailModal from "@/components/EmailModal";
@@ -52,7 +53,9 @@ export default function BoardPage() {
     setNow(Date.now());
   }
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- load() is stable enough; mode is the only real trigger
+  /* eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect --
+     mode is the only real trigger, and load()'s one synchronous setState sets
+     `loading` to the value it already holds on mount. */
   useEffect(() => { load(); }, [mode]);
 
   // A run started on the agent tab keeps going now that it is owned by the
@@ -107,12 +110,8 @@ export default function BoardPage() {
     // anything that is not a whole dollar amount leaves it unset and the card
     // still moves -- a drag must never be held hostage to a number.
     if (status === "closed_won" && lead && lead.amount == null) {
-      const raw = window.prompt(
-        `What is ${lead.company} worth in CAD? Whole dollars — leave blank if it is in-kind or not settled yet.`
-      );
-      const cleaned = (raw ?? "").replace(/[$,\s]/g, "");
-      const n = Number(cleaned);
-      if (cleaned !== "" && Number.isInteger(n) && n >= 0) body.amount = n;
+      const n = parseAmount(window.prompt(amountQuestion(lead.company)));
+      if (n !== null) body.amount = n;
     }
 
     setLeads((ls) => ls.map((l) => (l.id === id ? { ...l, ...body } : l)));

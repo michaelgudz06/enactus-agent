@@ -18,6 +18,7 @@ import { logoUrl, monogram } from "../src/lib/logo.ts";
 import { setClause } from "../src/lib/db.ts";
 import { applyEvent, newTurn, takeLines, type RunTurn } from "../src/lib/run-events.ts";
 import { nextAction, quietDaysFor } from "../src/lib/next-action.ts";
+import { amountQuestion, parseAmount } from "../src/lib/amount.ts";
 import { csvCell, toCsv } from "../src/lib/csv.ts";
 import { facets, filterLeads, industryFacets, industryMatches, matchesQuery, personKey, sortLeads } from "../src/lib/table.ts";
 
@@ -875,5 +876,29 @@ eq(matchesQuery({ industry: "Coffee Roaster" }, "coffee"), true, "search box sti
 // Whole word, not substring: "cat" must not select "Catering".
 eq(industryMatches({ industry: "Food Service, Contract Catering" }, "cat"), false, "no partial-word matches");
 eq(industryMatches({ industry: "Food Service, Contract Catering" }, "catering"), true, "the whole word does match");
+
+
+// ── parseAmount ───────────────────────────────────────────────────────────
+// Money path, so it gets its own pins. The rule that matters: null means "not
+// recorded" and must never become 0, or an unvalued win books as a $0 win and
+// the pipeline total silently under-reports.
+eq(parseAmount("1200"), 1200, "plain digits");
+eq(parseAmount("$1,200"), 1200, "currency and thousands separators stripped");
+eq(parseAmount("  1200 "), 1200, "surrounding space");
+eq(parseAmount("0"), 0, "zero is a real answer when typed");
+eq(parseAmount(""), null, "blank means not recorded");
+eq(parseAmount("   "), null, "whitespace-only is blank, not Number(' ') === 0");
+eq(parseAmount(null), null, "cancelled prompt");
+eq(parseAmount(undefined), null, "no answer at all");
+eq(parseAmount("$"), null, "a currency sign alone is not 0");
+eq(parseAmount("1200.50"), null, "whole dollars only");
+eq(parseAmount("-500"), null, "negative rejected");
+eq(parseAmount("12ab"), null, "junk rejected");
+// Inherited quirk, pinned rather than fixed: Number("1e3") is 1000 and both
+// pages already accepted it. Changing it here would be a behaviour change
+// smuggled into a de-duplication.
+eq(parseAmount("1e3"), 1000, "exponent notation parses, as it always did");
+eq(parseAmount("Infinity"), null, "...but Infinity is not an integer, so it still fails");
+eq(amountQuestion("Purdys").includes("Purdys"), true, "the question names the company");
 
 console.log(`selfcheck: ${checks} assertions passed`);

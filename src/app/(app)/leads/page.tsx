@@ -8,6 +8,7 @@ import { useApp } from "@/components/AppShell";
 import { useRun } from "@/components/RunProvider";
 import { CONNECTION_META, Lead, STATUS_COLUMNS, Status } from "@/lib/types";
 import { nextAction } from "@/lib/next-action";
+import { amountQuestion, parseAmount } from "@/lib/amount";
 import { facets, filterLeads, industryFacets, sortLeads } from "@/lib/table";
 import { logoUrl, monogram } from "@/lib/logo";
 import { toCsv } from "@/lib/csv";
@@ -189,12 +190,8 @@ export default function LeadsPage() {
     // Same one question the board asks, at the same moment and with the same
     // escape: cancel or blank still moves the lead.
     if (status === "closed_won" && lead.amount == null) {
-      const raw = window.prompt(
-        `What is ${lead.company} worth in CAD? Whole dollars — leave blank if it is in-kind or not settled yet.`
-      );
-      const cleaned = (raw ?? "").replace(/[$,\s]/g, "");
-      const n = Number(cleaned);
-      if (cleaned !== "" && Number.isInteger(n) && n >= 0) body.amount = n;
+      const n = parseAmount(window.prompt(amountQuestion(lead.company)));
+      if (n !== null) body.amount = n;
     }
     const prev = lead;
     apply({ ...lead, ...body });

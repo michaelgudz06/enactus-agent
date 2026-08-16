@@ -14,7 +14,10 @@ type DraftEvent =
 
 export default function EmailModal({ lead, onClose }: { lead: Lead; onClose: () => void }) {
   const [loading, setLoading] = useState(true);
-  const [streaming, setStreaming] = useState(false);
+  // The modal drafts as soon as it opens, so this is true from the first frame
+  // -- starting false meant a flash of the non-streaming layout, and made run()'s
+  // setStreaming(true) a real state change during the mount effect.
+  const [streaming, setStreaming] = useState(true);
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [to, setTo] = useState<string | null>(lead.contact_email);
@@ -36,7 +39,7 @@ export default function EmailModal({ lead, onClose }: { lead: Lead; onClose: () 
   // handler can act on the value it just set instead of the previous render's.
   const run = useCallback(async (force: boolean, tpl: EmailTemplate | null, snd: Sender | null) => {
     setError("");
-    setWarnings([]);
+    setWarnings((w) => (w.length ? [] : w));
     setStreaming(true);
     // Same fillTemplate the settings preview uses, and the same rule about only
     // passing values that exist: a lead with no industry has to keep showing
@@ -127,6 +130,10 @@ export default function EmailModal({ lead, onClose }: { lead: Lead; onClose: () 
   }, [lead]);
 
   useEffect(() => {
+    // run() resets error/warnings/streaming up front for the retry path. On
+    // mount each of those writes the value the state already holds, so nothing
+    // cascades -- but the rule is syntactic and cannot check that.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     run(false, null, null);
   }, [run]);
 

@@ -103,7 +103,7 @@ export default function LeadCard({
             // the image URL instead of the card.
             draggable={false}
             onError={() => setNoLogo(true)}
-            // ponytail: Google answers an unknown domain with HTTP 404 that
+            // Known limit: Google answers an unknown domain with HTTP 404 that
             // still carries a decodable 16x16 globe, so onError never fires --
             // the decoded size is the only tell. Costs the six real hosts that
             // publish nothing bigger than 16px; upscaled they were mush anyway.

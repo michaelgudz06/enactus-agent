@@ -34,9 +34,8 @@ const STATUS_COLOR: Record<string, string> = Object.fromEntries(
   STATUS_COLUMNS.map((s) => [s.id, s.color])
 );
 
-// lat/lng/geo_precision come back from `select *` but are not on Lead yet, since
-// src/lib/types.ts belongs to the schema agent.
-// ponytail: fold into Lead once the geocoding migration lands.
+// lat/lng/geo_precision come back from `select *` but are not on Lead yet.
+// Known limit: fold into Lead once the geocoding migration lands.
 type MapLead = Lead & {
   lat: number | null;
   lng: number | null;
@@ -134,9 +133,8 @@ export default function MapPage() {
     setTerritories((ts) => ts.map((x) => (x.id === t.id ? d.territory : x)));
   }
 
-  // The agent page owns its own composer state and is another agent's file, so
-  // the prompt travels by clipboard rather than by a search param this page
-  // cannot teach it to read. See the report for the one-line follow-up.
+  // The agent page owns its composer state and does not read a search param,
+  // so the prompt travels by clipboard.
   async function sweepArea(t: Territory) {
     const prompt = `find sponsors in ${t.name}`;
     try {

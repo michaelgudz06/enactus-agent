@@ -60,39 +60,6 @@ function toOrg(raw: Record<string, unknown>): ApolloOrg | null {
   };
 }
 
-// Why a domain came back without a record.
-//
-// disqualify() treats "no record" as "unverified" and lets the candidate
-// through, which is right when Apollo genuinely has nothing on a corner store
-// and wrong when the call 429'd. Failures were indistinguishable from empties,
-// so a bad Apollo day switched the wrong_region and defunct checks off in
-// silence while the run still reported full confidence. Filled in place because
-// the return type is a Map every caller already destructures.
-export interface EnrichStatus {
-  asked: number;
-  /** Domains whose call failed, so their record is unknown rather than absent. */
-  failed: number;
-  /** HTTP statuses seen, deduped. 0 is a network error, timeout or abort. */
-  codes: number[];
-  /** One line to show the user, or null when every call succeeded. */
-  message: string | null;
-}
-
-export function newEnrichStatus(): EnrichStatus {
-  return { asked: 0, failed: 0, codes: [], message: null };
-}
-
-// Measured on this account: bulk_enrich returns 422 once the monthly export
-// credits are gone, and 429 above 20 calls/minute.
-const FAIL_REASON: Record<number, string> = {
-  0: "Apollo did not respond",
-  401: "Apollo key rejected",
-  403: "Apollo enrichment is not on this plan",
-  402: "Apollo credits exhausted",
-  422: "Apollo credits exhausted",
-  429: "Apollo rate limit hit (20 calls/min)",
-};
-
 /**
  * Enrich up to any number of domains, 10 per Apollo call, all chunks in
  * parallel. Returns a map keyed by the domain that was ASKED for, so callers
@@ -100,34 +67,19 @@ const FAIL_REASON: Record<number, string> = {
  *
  * Enrichment is an optimisation, never a gate on the run itself: any failure
  * degrades to an empty map so a bad Apollo day cannot break lead generation.
- * Pass opts.status to find out that it happened.
  */
 export async function enrichDomains(
   domains: string[],
-  opts: { signal?: AbortSignal; status?: EnrichStatus } = {}
+  opts: { signal?: AbortSignal } = {}
 ): Promise<Map<string, ApolloOrg | null>> {
   const out = new Map<string, ApolloOrg | null>();
   const key = process.env.APOLLO_API_KEY;
   const wanted = [...new Set(domains.map((d) => d.toLowerCase()).filter(Boolean))];
-  const status = opts.status;
-  if (status) status.asked = wanted.length;
-  if (!key || !wanted.length) {
-    if (status && wanted.length) {
-      status.failed = wanted.length;
-      status.message = `APOLLO_API_KEY is not set — region and defunct checks disabled for all ${wanted.length} companies.`;
-    }
-    return out;
-  }
+  if (!key || !wanted.length) return out;
   for (const d of wanted) out.set(d, null);
 
   const chunks: string[][] = [];
   for (let i = 0; i < wanted.length; i += MAX_PER_CALL) chunks.push(wanted.slice(i, i + MAX_PER_CALL));
-
-  const fail = (chunk: string[], code: number) => {
-    if (!status) return;
-    status.failed += chunk.length;
-    if (!status.codes.includes(code)) status.codes.push(code);
-  };
 
   await Promise.all(
     chunks.map(async (chunk) => {
@@ -143,7 +95,7 @@ export async function enrichDomains(
           signal: opts.signal,
           cache: "no-store",
         });
-        if (!res.ok) return fail(chunk, res.status);
+        if (!res.ok) return;
         const data = (await res.json()) as { organizations?: unknown[] };
         for (const raw of data.organizations ?? []) {
           if (!raw || typeof raw !== "object") continue;
@@ -155,16 +107,10 @@ export async function enrichDomains(
         }
       } catch {
         // Leave this chunk's domains as null (unverified) and carry on.
-        fail(chunk, 0);
       }
     })
   );
 
-  if (status?.failed) {
-    const code = status.codes[0] ?? 0;
-    const why = FAIL_REASON[code] ?? `Apollo enrichment failed (HTTP ${code})`;
-    status.message = `${why} — region and defunct checks disabled for ${status.failed} of ${status.asked} companies.`;
-  }
   return out;
 }
 
