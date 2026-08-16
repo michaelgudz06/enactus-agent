@@ -6,7 +6,7 @@
 // No test framework on purpose: these are asserts over pure functions.
 
 import assert from "node:assert/strict";
-import { requestedCount, DEFAULT_COUNT, MAX_COUNT } from "../src/lib/count.ts";
+import { parsedCount, requestedCount, DEFAULT_COUNT, MAX_COUNT } from "../src/lib/count.ts";
 import { disqualify, provinceFromRequest, grounded, type ApolloOrg } from "../src/lib/apollo.ts";
 import { salvageObjects, pluck } from "../src/lib/llm.ts";
 import { nameMatchesDomain, companyKey } from "../src/lib/apollo.ts";
@@ -19,6 +19,7 @@ import { setClause } from "../src/lib/db.ts";
 import { applyEvent, newTurn, takeLines, type RunTurn } from "../src/lib/run-events.ts";
 import { nextAction, quietDaysFor } from "../src/lib/next-action.ts";
 import { csvCell, toCsv } from "../src/lib/csv.ts";
+import { facets, filterLeads, industryFacets, industryMatches, matchesQuery, personKey, sortLeads } from "../src/lib/table.ts";
 
 let checks = 0;
 const eq = (actual: unknown, expected: unknown, msg: string) => {
@@ -73,6 +74,29 @@ eq(requestedCount("find 10 companies with 50 employees"), 10, "unit later in sen
 // Clamped both ends so one typo cannot fan out into a 500-lead run.
 eq(requestedCount("give me 900 leads"), MAX_COUNT, "clamped to max");
 eq(requestedCount("give me 0 leads"), 1, "clamped to min");
+
+// parsedCount is the UNCLAMPED ask, and exists so the clamp can be reported.
+// A real prompt ("find me 50 leads in burnaby") used to come back through
+// requestedCount as 25, and the shortfall line then told the volunteer they had
+// asked for 25 -- the cap quoting itself as the request.
+eq(parsedCount("find me 50 leads in burnaby"), 50, "parsedCount does not clamp");
+eq(parsedCount("give me 900 leads"), 900, "parsedCount keeps an absurd ask intact");
+eq(parsedCount("find sponsors in Burnaby"), null, "no number means null, not a default");
+eq(parsedCount("sponsors open until 10 pm"), null, "unit rejection still applies");
+// The two must never disagree below the cap, or the run and the message would
+// describe different requests.
+// Real prompts from enactus_searches that lost their count to a missing noun.
+eq(requestedCount("find 3 bakeries in Burnaby that could donate food for student events"), 3, "bakeries is a count noun");
+eq(requestedCount("find me 10 local print and coffee shops near SFU Burnaby"), 10, "coffee shops still parses");
+eq(requestedCount("get us 4 restaurants to cater the showcase"), 4, "restaurants");
+eq(requestedCount("find 5 foundations that fund student entrepreneurship"), 5, "foundations");
+// ...without the noun list swallowing things we do not deliver.
+eq(requestedCount("we have 3 events this term, find sponsors"), DEFAULT_COUNT, "events is not a count noun");
+eq(requestedCount("find sponsors for our 2 campus projects"), DEFAULT_COUNT, "projects is not a count noun");
+
+for (const p of ["give me 10 leads from Burnaby", "find 3 bakeries in Burnaby", "get me five marketing agencies downtown"]) {
+  eq(parsedCount(p), requestedCount(p), `parsed and requested agree under the cap: ${p}`);
+}
 
 // ── provinceFromRequest ───────────────────────────────────────────────────
 eq(provinceFromRequest("sponsors in Burnaby"), "British Columbia", "Burnaby implies BC");
@@ -738,5 +762,118 @@ eq(emailBelongsTo("jason.potter@acme.com", "Jason Potter"), true, "first.last");
 eq(emailBelongsTo("jpotter@acme.com", "Jason Potter"), true, "flast");
 eq(emailBelongsTo("customerservice@purdys.com", "Richard Carmon Purdy"), false, "a complaint desk belongs to nobody");
 eq(emailBelongsTo("fundraising@purdys.com", "Richard Carmon Purdy"), false, "neither does a fundraising desk");
+
+// ── table: the list view's filtering, sorting and facets ──────────────────
+// Every row below is shaped like a real one off this board, including the two
+// spellings of the same volunteer and the 92%-empty contact columns.
+const ROWS = [
+  { id: "1", company: "Purdys Chocolatier", status: "outreach_sent", industry: "Confectionery", location: "Vancouver, BC",
+    contact_name: null, contact_email: "fundraising@purdys.com", owner_name: "Michael", created_by_name: "Michael",
+    connection_type: "none", amount: null, created_at: "2026-08-01T00:00:00Z", why_fit: "gift boxes for the auction" },
+  { id: "2", company: "Trail Appliances", status: "prospects", industry: "Retail", location: "Richmond, BC",
+    contact_name: "E Barney", contact_email: "ebarney@trailappliances.com", owner_name: null, created_by_name: "michael",
+    connection_type: "past_sponsor", amount: 4000, created_at: "2026-08-05T00:00:00Z", why_fit: "sponsored us in 2024" },
+  { id: "3", company: "Nature's Path", status: "closed_won", industry: "Food Manufacturing", location: "Richmond, BC",
+    contact_name: null, contact_email: null, owner_name: "Priya", created_by_name: "Priya",
+    connection_type: "alum", amount: 900, created_at: "2026-08-03T00:00:00Z", why_fit: "SFU alum on the exec" },
+];
+
+// An empty selection is the filter being OFF. Read the other way round, clearing
+// the last checkbox empties the table and looks like a database with no rows.
+eq(filterLeads(ROWS, {}).length, 3, "no filters keeps everything");
+eq(filterLeads(ROWS, { status: [] }).length, 3, "an empty status array is not a filter");
+eq(filterLeads(ROWS, { status: ["prospects", "closed_won"] }).map((r) => r.id), ["2", "3"], "status is an OR across the selection");
+
+// The reason personKey exists: 79 rows say "Michael" and 31 say "michael".
+eq(personKey("  Michael "), "michael", "trimmed and folded");
+eq(filterLeads(ROWS, { createdBy: ["michael"] }).map((r) => r.id), ["1", "2"], "one volunteer, two spellings, one filter");
+eq(filterLeads(ROWS, { owner: [""] }).map((r) => r.id), ["2"], "the blank owner bucket is selectable");
+
+// "No email yet" is the most useful filter on this board -- 101 of 110 rows.
+eq(filterLeads(ROWS, { email: "missing" }).map((r) => r.id), ["3"], "missing means nothing to send to");
+eq(filterLeads(ROWS, { email: "has" }).map((r) => r.id), ["1", "2"], "has means a usable address");
+eq(filterLeads(ROWS, { email: "any" }).length, 3, "any is off");
+
+// Search spans columns and ignores word order.
+eq(matchesQuery(ROWS[0], "purdys chocolate"), false, "every word has to actually appear");
+eq(matchesQuery(ROWS[0], "purdys vancouver"), true, "a query may span two columns");
+eq(matchesQuery(ROWS[1], "2024 sponsored"), true, "word order does not matter");
+eq(matchesQuery(ROWS[2], ""), true, "an empty query matches everything");
+eq(filterLeads(ROWS, { q: "richmond" }).map((r) => r.id), ["2", "3"], "search is case-insensitive");
+
+// due is injected, because next-action.ts owns the rule and needs a clock.
+eq(filterLeads(ROWS, { due: true }, (r) => r.id === "1").map((r) => r.id), ["1"], "the overdue test is the caller's");
+eq(filterLeads(ROWS, { due: true }).length, 0, "no predicate means nothing is overdue, not everything");
+
+// Filters stack.
+eq(filterLeads(ROWS, { q: "richmond", email: "has" }).map((r) => r.id), ["2"], "filters are ANDed together");
+
+// ── sortLeads ─────────────────────────────────────────────────────────────
+eq(sortLeads(ROWS, "company", 1).map((r) => r.id), ["3", "1", "2"], "company A→Z");
+eq(sortLeads(ROWS, "company", -1).map((r) => r.id), ["2", "1", "3"], "company Z→A");
+eq(sortLeads(ROWS, "amount", -1).map((r) => r.id), ["2", "3", "1"], "numbers compare numerically");
+
+// Blanks last in BOTH directions. Reversing a column should bring the other end
+// of the real data into view, not a screenful of dashes.
+eq(sortLeads(ROWS, "amount", 1).map((r) => r.id), ["3", "2", "1"], "the null amount stays last ascending");
+eq(sortLeads(ROWS, "contact_name", 1).map((r) => r.id)[2], "3", "a null contact sorts last");
+eq(sortLeads(ROWS, "contact_name", -1).map((r) => r.id)[2], "3", "and stays last reversed");
+
+// Status sorts down the pipeline, never alphabetically.
+const RANK = { prospects: 0, researched: 1, outreach_sent: 2, in_conversation: 3, closed_won: 4, closed_lost: 5 };
+eq(sortLeads(ROWS, "status", 1, RANK).map((r) => r.id), ["2", "1", "3"], "status follows the board order");
+eq(sortLeads(ROWS, "status", -1, RANK).map((r) => r.id), ["3", "1", "2"], "and reverses cleanly");
+eq(sortLeads(ROWS, "status", 1, { prospects: 0 }).map((r) => r.id)[0], "2", "a stage missing from the rank map sorts last");
+
+// ISO timestamps have to compare as dates under numeric collation.
+eq(sortLeads(ROWS, "created_at", -1).map((r) => r.id), ["2", "3", "1"], "newest first");
+
+// Sorting must not mutate the array the table is rendering from.
+sortLeads(ROWS, "company", 1);
+eq(ROWS.map((r) => r.id), ["1", "2", "3"], "sortLeads returns a copy");
+
+// ── facets ────────────────────────────────────────────────────────────────
+const who = facets(ROWS, "created_by_name", "Unknown");
+eq(who.length, 2, "two spellings of Michael are one entry");
+eq(who[0], { key: "michael", label: "Michael", count: 2 }, "labelled with the majority spelling, counted together");
+eq(facets(ROWS, "owner_name", "Unassigned").find((f) => f.key === "")?.label, "Unassigned", "the empty bucket is named, not dropped");
+eq(facets(ROWS, "owner_name").find((f) => f.key === "")?.count, 1, "and counted");
+
+// ── industryFacets / industryMatches ──────────────────────────────────────
+// The real shape of this column: five spellings of coffee, one of grocery.
+const IND = [
+  { industry: "Coffee Roaster" },
+  { industry: "Coffee Roaster & Retail" },
+  { industry: "Coffee Roasting / Social Enterprise" },
+  { industry: "Coffee" },
+  { industry: "Grocery Retail" },
+  { industry: "Food & Beverage (CPG)" },
+  { industry: "Food Manufacturing / CPG" },
+  { industry: "" },
+];
+const iw = industryFacets(IND);
+eq(iw.find((f) => f.key === "coffee")?.count, 4, "four spellings of coffee collapse into one option");
+eq(iw.find((f) => f.key === "food")?.count, 2, "food likewise");
+eq(iw.find((f) => f.key === "cpg")?.count, 2, "an acronym inside brackets is a word");
+eq(iw.some((f) => f.key === "retail"), true, "retail spans two different industry strings");
+// min=2 by default, so the long tail of one-offs stays out of the dropdown --
+// that tail is what made the whole-value version unusable.
+eq(iw.some((f) => f.key === "enterprise"), false, "singletons are below the default threshold");
+eq(industryFacets(IND, 1).some((f) => f.key === "enterprise"), true, "...and appear when min is lowered");
+eq(iw.some((f) => f.key === "and"), false, "stopwords dropped");
+eq(iw.some((f) => f.key === "amp"), false, "an HTML-escaped ampersand is not an industry");
+eq(iw[0].count >= iw[iw.length - 1].count, true, "sorted by count, commonest first");
+// One row must not vote twice for the same word or it outranks a genuinely
+// more common one.
+eq(industryFacets([{ industry: "Food Products / Food Manufacturing" }], 1).find((f) => f.key === "food")?.count,
+  1, "a word repeated within one row counts once");
+
+eq(filterLeads(IND, { industry: ["coffee"] }).length, 4, "selecting coffee selects all four");
+eq(filterLeads(IND, { industry: ["coffee", "grocery"] }).length, 5, "two words OR together");
+eq(filterLeads(IND, { industry: [] }).length, IND.length, "empty selection is still the filter being off");
+eq(matchesQuery({ industry: "Coffee Roaster" }, "coffee"), true, "search box still reaches industry");
+// Whole word, not substring: "cat" must not select "Catering".
+eq(industryMatches({ industry: "Food Service, Contract Catering" }, "cat"), false, "no partial-word matches");
+eq(industryMatches({ industry: "Food Service, Contract Catering" }, "catering"), true, "the whole word does match");
 
 console.log(`selfcheck: ${checks} assertions passed`);

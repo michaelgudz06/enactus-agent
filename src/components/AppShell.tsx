@@ -3,7 +3,7 @@
 import { createContext, useContext } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Sparkles, LayoutGrid, LogOut, Map, Settings } from "lucide-react";
+import { Sparkles, LayoutGrid, List, LogOut, Map, Settings } from "lucide-react";
 import { Mode } from "@/lib/types";
 
 interface Ctx {
@@ -28,6 +28,10 @@ export default function AppShell({ name, children }: { name: string; children: R
   const tabs = [
     { href: "/agent", label: "Agent", icon: Sparkles },
     { href: "/board", label: "Board", icon: LayoutGrid },
+    // Same rows as the board, read the other way round. The board answers "what
+    // is moving"; this answers "where is X", "who has no email yet" and "what
+    // did Priya add" -- none of which a six-column drag surface can be asked.
+    { href: "/leads", label: "List", icon: List },
     // Both pages were finished and inside the authed layout, but were missing
     // here -- so they were reachable only by typing the URL, and the numbers
     // say nobody ever did: 0 of 108 locatable leads geocoded, 0 senders, 0

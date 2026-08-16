@@ -21,10 +21,21 @@ const NUMBER_WORDS: Record<string, number> = {
 // A bare number is not a count -- "companies in the top 5% by revenue" and
 // "open until 10 pm" both contain digits. Require one of the nouns we actually
 // deliver, so only a real request for N things counts.
+// Kept an allowlist on purpose. The GAP below is positional because adjectives
+// are unbounded, but the NOUN cannot be: "we have 3 events this term, find
+// sponsors" would otherwise run as 3. The cost is that a missing noun fails
+// silently -- the real prompt "find 3 bakeries in Burnaby" ran as 6 because
+// `bakeries` was absent -- so anything a student team would plausibly count
+// goes in, and a miss is a one-word fix here.
 const COUNT_NOUN =
   "(?:leads?|sponsors?|prospects?|companies|company|businesses|business|names?|contacts?|orgs?|organi[sz]ations?" +
   "|firms?|shops?|stores?|brands?|vendors?|suppliers?|partners?|manufacturers?|retailers?|agenc(?:y|ies)" +
-  "|startups?|employers?)";
+  "|startups?|employers?" +
+  // Storefronts a sponsorship team asks for by name.
+  "|bakeries|bakery|restaurants?|cafe|cafes|café|cafés|coffee\\s+shops?|breweries|brewery|distiller(?:y|ies)" +
+  "|grocers?|groceries|printers?|studios?|gyms?|clinics?|dealerships?|venues?|hotels?|distributors?" +
+  // The other side of the ask: who signs the cheque.
+  "|nonprofits?|non-profits?|charit(?:y|ies)|foundations?|donors?|funders?)";
 
 // Any words at all between the number and the noun, not a list of approved ones.
 //
@@ -50,16 +61,28 @@ const NOT_A_UNIT =
   "(?!(?:days?|weeks?|months?|years?|hours?|mins?|minutes?|am|pm|km|kms|kilomet(?:er|re)s?" +
   "|miles?|percent|dollars?|cad|usd|employees?|staff|people|million|billion|thousand|k|m)\\b)";
 
-export function requestedCount(prompt: string, fallback: number = DEFAULT_COUNT): number {
-  const clamp = (n: number) => Math.max(1, Math.min(MAX_COUNT, n));
-
+/**
+ * The number the user actually typed, unclamped -- null when they named none.
+ *
+ * Split out from requestedCount because the clamp used to be invisible: someone
+ * asked for 50 leads, the cap quietly rewrote it to 25, and the shortfall line
+ * then read "You asked for 25 and I found 21". The app was reporting its own
+ * ceiling back as the user's request, so the cap could never be discovered from
+ * the outside -- which is exactly how "why do I only have 110 leads?" happens.
+ */
+export function parsedCount(prompt: string): number | null {
   const digits = prompt.match(new RegExp(`\\b(\\d{1,3})\\s+${NOT_A_UNIT}${GAP}${COUNT_NOUN}\\b`, "i"));
-  if (digits) return clamp(parseInt(digits[1], 10));
+  if (digits) return parseInt(digits[1], 10);
 
   const words = prompt.match(
     new RegExp(`\\b(${Object.keys(NUMBER_WORDS).join("|")})\\s+${NOT_A_UNIT}${GAP}${COUNT_NOUN}\\b`, "i")
   );
-  if (words) return clamp(NUMBER_WORDS[words[1].toLowerCase()]);
+  if (words) return NUMBER_WORDS[words[1].toLowerCase()];
 
-  return fallback;
+  return null;
+}
+
+export function requestedCount(prompt: string, fallback: number = DEFAULT_COUNT): number {
+  const n = parsedCount(prompt);
+  return n === null ? fallback : Math.max(1, Math.min(MAX_COUNT, n));
 }

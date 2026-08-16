@@ -162,6 +162,41 @@ interface TemplateDraft {
 }
 const BLANK: TemplateDraft = { id: null, name: "", subject: "", body: "", sender_id: "", is_default: false };
 
+// Nothing on this page saves until a button is pressed, and the template body is
+// a 16-row textarea someone writes over several sittings. Closing the tab threw
+// all of it away -- which is how the board ended up with 0 senders and 0
+// templates while the volunteer believed they had set both up.
+//
+// localStorage rather than a drafts table: this is unsent, unshared,
+// per-browser scratch text, and a row in Neon for it would need its own route,
+// its own cleanup and its own answer to "whose draft is this".
+const DRAFT_KEY = "enactus.settings.draft.v1";
+
+interface Draft {
+  newSender: { name: string; email: string; title: string; signature: string };
+  form: TemplateDraft;
+}
+
+const hasText = (o: Record<string, unknown>) =>
+  Object.values(o).some((v) => typeof v === "string" && v.trim() !== "");
+
+function readDraft(): Draft | null {
+  try {
+    const raw = localStorage.getItem(DRAFT_KEY);
+    if (!raw) return null;
+    const d = JSON.parse(raw) as Partial<Draft>;
+    // Shape-checked rather than trusted: this string outlives deploys, so a
+    // draft written by an older version must not crash the page it reopens in.
+    if (!d || typeof d !== "object" || !d.newSender || !d.form) return null;
+    return {
+      newSender: { ...{ name: "", email: "", title: "", signature: "" }, ...d.newSender },
+      form: { ...BLANK, ...d.form },
+    };
+  } catch {
+    return null;
+  }
+}
+
 export default function SettingsPage() {
   const [senders, setSenders] = useState<Sender[]>([]);
   const [templates, setTemplates] = useState<EmailTemplate[]>([]);
@@ -173,6 +208,12 @@ export default function SettingsPage() {
   const [form, setForm] = useState<TemplateDraft>(BLANK);
   const [formError, setFormError] = useState("");
   const [copied, setCopied] = useState<string | null>(null);
+  const [restored, setRestored] = useState(false);
+
+  // Unsaved work exists whenever either composer has text in it. Both the
+  // autosave below and the close guard key off this, so they can never disagree
+  // about whether there is something to lose.
+  const dirty = hasText(newSender) || hasText({ name: form.name, subject: form.subject, body: form.body });
 
   // Deliberately does not raise the loading flag itself: doing so would be a
   // synchronous setState inside the mount effect below. The spinner starts on
@@ -200,6 +241,49 @@ export default function SettingsPage() {
     load();
   }, [load]);
 
+  // Restore before the first paint the user can type into, but never during
+  // render: localStorage does not exist on the server, so reading it while
+  // rendering would make the two markups disagree.
+  useEffect(() => {
+    const d = readDraft();
+    if (!d) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot restore on mount; no dependency can re-run it
+    setNewSender(d.newSender);
+    setForm(d.form);
+    setRestored(true);
+  }, []);
+
+  // Autosave. Cheap enough to run on every keystroke -- the whole payload is a
+  // few kilobytes of text -- so there is no debounce to get wrong.
+  useEffect(() => {
+    try {
+      if (dirty) localStorage.setItem(DRAFT_KEY, JSON.stringify({ newSender, form }));
+      else localStorage.removeItem(DRAFT_KEY);
+    } catch {
+      // Private mode, or the quota is full. The close guard below still fires,
+      // which is the part that prevents the loss.
+    }
+  }, [dirty, newSender, form]);
+
+  // The browser's own "Leave site?" dialog. Autosave already survives a closed
+  // tab, but this catches the case it cannot: a different browser, a cleared
+  // profile, or a volunteer who never comes back to this machine.
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+
+  function clearDraft() {
+    setRestored(false);
+    try {
+      localStorage.removeItem(DRAFT_KEY);
+    } catch {
+      /* nothing to clear */
+    }
+  }
+
   async function addSender() {
     const { error } = await api("/api/senders", {
       method: "POST",
@@ -212,6 +296,7 @@ export default function SettingsPage() {
     }
     setNewSender({ name: "", email: "", title: "", signature: "" });
     setNotice("");
+    setRestored(false);
     load();
   }
 
@@ -237,6 +322,7 @@ export default function SettingsPage() {
     }
     setFormError("");
     setForm(BLANK);
+    setRestored(false);
     load();
   }
 
@@ -311,6 +397,20 @@ export default function SettingsPage() {
       {notice && (
         <div className="mx-5 mt-3 text-xs rounded-lg px-3 py-2" style={{ background: "rgba(230,57,70,.1)", color: "var(--text)" }}>
           {notice}
+        </div>
+      )}
+
+      {/* Restoring silently would be worse than losing it: the volunteer needs
+          to know the text on screen is theirs from last time and still unsaved. */}
+      {restored && (
+        <div className="mx-5 mt-3 flex items-center gap-3 text-xs rounded-lg px-3 py-2" style={{ background: "rgba(245,200,66,.12)", color: "var(--text)" }}>
+          <span>
+            Picked up where you left off. This is still a <strong>draft</strong> — press Add sender or Create
+            template to actually save it.
+          </span>
+          <button onClick={clearDraft} className="ml-auto text-[11px] shrink-0" style={{ color: "var(--faint)" }}>
+            Dismiss
+          </button>
         </div>
       )}
 

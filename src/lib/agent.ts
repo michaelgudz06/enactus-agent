@@ -26,7 +26,7 @@ import {
   companyKey,
 } from "./apollo";
 import { db, hasDatabaseUrl } from "./db";
-import { requestedCount } from "./count";
+import { MAX_COUNT, parsedCount, requestedCount } from "./count";
 import { ENACTUS_ORG, ENACTUS_PROJECTS, ENACTUS_VENTURES } from "./enactus";
 
 type Emit = (e: AgentEvent) => void;
@@ -110,6 +110,16 @@ export async function runAgent(
 
   // How many leads to deliver. Decided here, in code, before anything else.
   const targetCount = requestedCount(fullPrompt);
+  // What they actually typed. A run is one 60s function (see RUN_DEADLINE
+  // below), so 25 is a real limit and not a preference -- but it has to be said
+  // out loud, or asking for 50 and being handed 21 with no explanation reads as
+  // the agent ignoring the request.
+  const askedFor = parsedCount(fullPrompt);
+  const overCap = askedFor !== null && askedFor > MAX_COUNT;
+  const capNote = overCap
+    ? ` (you asked for ${askedFor}; ${MAX_COUNT} is the most one run can do -- run it again to keep going)`
+    : "";
+  const capTail = overCap ? ` ${MAX_COUNT} is the most one run can do, so run it again to keep going.` : "";
 
   // Vercel Hobby kills the function at 60s (see maxDuration in the route).
   // Stop our own work at 52s so there is room to persist the leads and flush
@@ -132,7 +142,7 @@ export async function runAgent(
   emit({
     type: "status",
     step: "understand",
-    message: `Understanding your request. Target: ${targetCount} lead${targetCount === 1 ? "" : "s"}`,
+    message: `Understanding your request. Target: ${targetCount} lead${targetCount === 1 ? "" : "s"}${capNote}`,
   });
   // Wider ask needs more angles, or every query returns the same few pages.
   const queryCount = targetCount <= 6 ? 3 : targetCount <= 12 ? 4 : 5;
@@ -697,11 +707,12 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
       type: "status",
       step: "shortfall",
       message:
-        `You asked for ${targetCount} and I found ${finalized.length}` +
+        `You asked for ${askedFor ?? targetCount} and I found ${finalized.length}` +
         (reasons.length ? ` (${reasons.join(", ")})` : "") +
         (truncated
           ? `. The model ran out of time partway through, so these are the ones it finished -- run it again to fill the rest.`
-          : `. Try a broader area or a different industry angle for more.`),
+          : `. Try a broader area or a different industry angle for more.`) +
+        capTail,
     });
   }
 
