@@ -1,194 +1,73 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Search, RefreshCw } from "lucide-react";
 import { useApp } from "@/components/AppShell";
-import { useRunActivity } from "@/components/RunProvider";
-import { Lead, Mode, Status, STATUS_COLUMNS } from "@/lib/types";
+import { useRun } from "@/components/RunProvider";
+import { Lead, Status, STATUS_COLUMNS } from "@/lib/types";
+import { amountQuestion, parseAmount } from "@/lib/amount";
+import { nextAction } from "@/lib/next-action";
 import LeadCard from "@/components/LeadCard";
 import EmailModal from "@/components/EmailModal";
-
-/** One read of `/api/leads`, tagged with the mode and the ticket it was read for. */
-type LeadsResult = { ticket: number; mode: Mode; leads: Lead[]; warning?: string };
-
-/**
- * A read the student asked for — the mode effect's read, or Refresh — against
- * one the run asked for by finding a lead. Only the second is held back by a
- * mutation in flight, because only it arrives at a moment nobody chose.
- */
-export type ReadKind = "auto" | "manual";
-
-/**
- * Every read of the board takes a ticket, and only the newest ticket may write
- * what is on screen. A read that a later one superseded — a mode switch, or a
- * second Refresh — is dropped rather than landing as the wrong mode's leads.
- * One sequence covers every path that reads, so the rule cannot drift apart
- * between them, and it compares tickets rather than modes captured in a
- * closure, which would be the mode of the render that started the read rather
- * than the current one.
- *
- * The same sequence also orders reads against the optimistic mutations — a drag
- * between columns, a delete — because that is the same question and may not
- * grow a second mechanism beside this one. `moveTo`/`del` write the new state
- * on screen and only then await the server, so an automatic read overlapping
- * that window carries pre-mutation rows: applying it would snap a dragged card
- * back or resurrect a deleted one. Such a read is refused, and recorded as owed
- * so the lead that triggered it still reaches the board once the mutation
- * settles — a refusal that dropped it would trade a visible snap-back for an
- * invisible missing lead.
- */
-export type ReadSequence = {
-  /** Take the newest ticket, superseding every read still in flight. */
-  start: (kind?: ReadKind) => number;
-  /** The ordering half of the rule: is this the newest read? */
-  isCurrent: (ticket: number) => boolean;
-  /** The whole rule, and the only gate `applyLeads` asks. */
-  mayApply: (ticket: number) => boolean;
-  /** Supersede every read in flight without starting one. */
-  abandon: () => void;
-  /** Open the window in which an optimistic mutation is unconfirmed; the
-   *  returned function closes it. */
-  beginMutation: () => () => void;
-  /** Whether a refused automatic read is now owed, and may be run again. */
-  takeOwed: () => boolean;
-};
-
-export function createReadSequence(): ReadSequence {
-  let current = 0;
-  let currentKind: ReadKind = "manual";
-  // Ticks on both ends of every mutation, so "did a mutation open or close
-  // while this read was in flight?" is one comparison rather than a history.
-  let mutationTick = 0;
-  let startedAt = 0;
-  let mutating = 0;
-  let owed = false;
-
-  return {
-    start: (kind = "manual") => {
-      current += 1;
-      currentKind = kind;
-      startedAt = mutationTick;
-      return current;
-    },
-    isCurrent: (ticket) => ticket === current,
-    mayApply: (ticket) => {
-      if (ticket !== current) return false;
-      if (currentKind === "manual") return true;
-      if (mutating === 0 && mutationTick === startedAt) return true;
-      owed = true;
-      return false;
-    },
-    abandon: () => { current += 1; },
-    beginMutation: () => {
-      mutating += 1;
-      mutationTick += 1;
-      let settled = false;
-      return () => {
-        if (settled) return;
-        settled = true;
-        mutating -= 1;
-        mutationTick += 1;
-      };
-    },
-    takeOwed: () => {
-      if (!owed || mutating > 0) return false;
-      owed = false;
-      return true;
-    },
-  };
-}
-
-/**
- * The board is loading while the leads on screen are not the ones the current
- * mode asked for, or while a refresh is in flight. That is a fact about this
- * render, so it is derived here rather than announced by an effect a commit
- * later — which is what `setLoading(true)` inside the mount effect was doing.
- */
-export function boardIsLoading(mode: Mode, loadedMode: Mode | null, refreshing: boolean) {
-  return refreshing || loadedMode !== mode;
-}
+import LeadDetail from "@/components/LeadDetail";
 
 export default function BoardPage() {
   const { mode } = useApp();
-  // A run started on the agent view keeps streaming while the board is on
-  // screen, because it is owned by the `(app)` layout rather than that page.
-  // This is the board's cheap view of it: two primitives, so a run streaming
-  // reasoning tokens does not re-render every lead card on the board.
-  const activity = useRunActivity();
   const [leads, setLeads] = useState<Lead[]>([]);
-  // The mode `leads` was read for; null until the first read lands.
-  const [loadedMode, setLoadedMode] = useState<Mode | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
   const [overCol, setOverCol] = useState<Status | null>(null);
   const [emailLead, setEmailLead] = useState<Lead | null>(null);
+  const [detailLead, setDetailLead] = useState<Lead | null>(null);
   const [warning, setWarning] = useState("");
-  const [reads] = useState(createReadSequence);
-  // Bumped when the sequence says a refused automatic read is owed. It is a
-  // dependency of the read effect rather than a read of its own, so the owed
-  // read is issued by the same effect, for the mode on screen now — a re-read
-  // fired from inside a mutation would carry the mode of the render that
-  // started it and could leave the board loading a mode it had left.
-  const [owedRead, setOwedRead] = useState(0);
+  // Read once per load rather than during render: the follow-up thresholds are
+  // whole days, so re-reading the clock on every render would change nothing
+  // except make the render impure. 0 until the first load, which is what keeps
+  // the server-rendered markup free of a time-dependent chip.
+  const [now, setNow] = useState(0);
+  const pressAt = useRef({ x: 0, y: 0 });
+  // The agent may be running on the other tab; leadSignal ticks when it has
+  // written one.
+  const { leadSignal } = useRun();
 
-  const loading = boardIsLoading(mode, loadedMode, refreshing);
-
-  const readLeads = useCallback(async (kind: ReadKind): Promise<LeadsResult> => {
-    const ticket = reads.start(kind);
+  async function load() {
+    setLoading(true);
     const res = await fetch(`/api/leads?mode=${mode}`);
     const data = await res.json();
-    return { ticket, mode, leads: data.leads || [], warning: data.warning };
-  }, [mode, reads]);
-
-  const settleMutation = useCallback((settle: () => void) => {
-    settle();
-    if (reads.takeOwed()) setOwedRead((n) => n + 1);
-  }, [reads]);
-
-  // Reading and applying are separate so a refused response can be dropped:
-  // it would otherwise land as the wrong mode's leads and leave the board
-  // reading as loading forever, or as pre-mutation rows over a drag the student
-  // can still see. Every caller applies through here, so the effect, Refresh
-  // and the run's own ticks are held to the one rule.
-  const applyLeads = useCallback((result: LeadsResult) => {
-    if (!reads.mayApply(result.ticket)) {
-      // Refused by a mutation that has already settled: nothing else is coming
-      // to release the debt, so run the owed read from here.
-      if (reads.takeOwed()) setOwedRead((n) => n + 1);
-      return;
-    }
-    setLeads(result.leads);
-    if (result.warning) setWarning(result.warning);
-    setLoadedMode(result.mode);
-  }, [reads]);
-
-  // `leadSignal` ticks once per lead the run has already tried to write, so the
-  // board reads again and the student watches leads land while the search is
-  // still going. It goes through the same ticket sequence as every other read,
-  // which is what stops a tick mid-flight from landing out of order or over an
-  // unsettled drag.
-  //
-  // KNOWN AND DEFERRED: this one effect serves three triggers — mount, a mode
-  // switch and `leadSignal` — and tags all three `auto`, so an unsettled
-  // mutation defers a mode-switch read too and the board sits under shimmer
-  // until the debt is paid. It self-heals through the owed read, and it is dead
-  // code today because `src/components/AppShell.tsx` hardcodes mode "sponsor".
-  // Telling the three triggers apart means restructuring this effect, which is
-  // out of scope for the navigation change; it was deferred, not missed.
-  useEffect(() => {
-    readLeads("auto").then(applyLeads);
-    return () => reads.abandon();
-  }, [readLeads, applyLeads, reads, activity.leadSignal, owedRead]);
-
-  async function refresh() {
-    setRefreshing(true);
-    // A superseded refresh drops its leads but is still no longer refreshing;
-    // leaving the flag set would wedge the board as loading just as badly.
-    applyLeads(await readLeads("manual"));
-    setRefreshing(false);
+    setLeads(data.leads || []);
+    setNow(Date.now());
+    if (data.warning) setWarning(data.warning);
+    setLoading(false);
   }
+
+  // The mid-run re-read. Deliberately not load(): the board is already on
+  // screen, and swapping it for the skeleton on every arriving lead is worse
+  // than the row showing up a moment late. Touching no state before its first
+  // await is also what keeps the effect below clear of the synchronous-setState
+  // rule.
+  async function refresh() {
+    const res = await fetch(`/api/leads?mode=${mode}`);
+    const data = await res.json();
+    setLeads(data.leads || []);
+    setNow(Date.now());
+  }
+
+  /* eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect --
+     mode is the only real trigger, and load()'s one synchronous setState sets
+     `loading` to the value it already holds on mount. */
+  useEffect(() => { load(); }, [mode]);
+
+  // A run started on the agent tab keeps going now that it is owned by the
+  // layout, so its leads land in the database while this board is on screen.
+  // Skips the first render, where the effect above is already loading.
+  //
+  // The set-state rule counts any call to a function that sets state, without
+  // looking at whether it does so before its first await -- refresh() does not,
+  // so there is no synchronous render cascade here. Fetching in response to a
+  // counter is the intended shape; the rule cannot see the difference.
+  /* eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect -- leadSignal is the trigger; refresh() sets state only after its await */
+  useEffect(() => { if (leadSignal) void refresh(); }, [leadSignal]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -198,42 +77,61 @@ export default function BoardPage() {
     );
   }, [leads, query]);
 
+  // Built from STATUS_COLUMNS rather than a hand-written record, so adding a
+  // stage to types.ts is the whole change -- the previous literal silently
+  // dropped any lead whose stage was not one of its five keys into Prospects.
   const byStatus = useMemo(() => {
-    const map: Record<Status, Lead[]> = { prospects: [], researched: [], outreach_sent: [], in_conversation: [], closed_won: [] };
+    const map = Object.fromEntries(STATUS_COLUMNS.map((c) => [c.id, [] as Lead[]])) as Record<Status, Lead[]>;
     for (const l of filtered) (map[l.status] ?? map.prospects).push(l);
     return map;
   }, [filtered]);
 
-  // The optimistic write happens first and the server confirms it after, so the
-  // mutation is declared to the sequence for exactly that window — in a
-  // `finally`, so a request that throws still closes it rather than holding
-  // every later lead off the board.
+  // The three numbers a VP External gets asked for, computed in code from
+  // stored integers -- never a figure a model wrote. `unvalued` is shown rather
+  // than hidden because a total that quietly omits four wins is worse than one
+  // that admits it is incomplete.
+  const stats = useMemo(() => {
+    const won = leads.filter((l) => l.status === "closed_won");
+    return {
+      wonTotal: won.reduce((s, l) => s + (l.amount ?? 0), 0),
+      wonCount: won.length,
+      unvalued: won.filter((l) => l.amount == null).length,
+      due: now ? leads.filter((l) => nextAction(l, now)?.kind === "followup").length : 0,
+    };
+  }, [leads, now]);
+
   async function moveTo(id: string, status: Status) {
     const prev = leads;
-    const settle = reads.beginMutation();
-    setLeads((ls) => ls.map((l) => (l.id === id ? { ...l, status } : l)));
-    try {
-      const res = await fetch(`/api/leads/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status }),
-      });
-      if (!res.ok) setLeads(prev);
-    } finally {
-      settleMutation(settle);
+    const lead = leads.find((l) => l.id === id);
+    const body: { status: Status; amount?: number } = { status };
+
+    // The only hand-typed value in the app, asked at the one moment it is known
+    // and the volunteer's hand is already on the card. A cancel, a blank, or
+    // anything that is not a whole dollar amount leaves it unset and the card
+    // still moves -- a drag must never be held hostage to a number.
+    if (status === "closed_won" && lead && lead.amount == null) {
+      const n = parseAmount(window.prompt(amountQuestion(lead.company)));
+      if (n !== null) body.amount = n;
     }
+
+    setLeads((ls) => ls.map((l) => (l.id === id ? { ...l, ...body } : l)));
+    const res = await fetch(`/api/leads/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) return setLeads(prev);
+    // closed_at and owner_name are stamped by the route, so the row it returns
+    // is the only one that knows them.
+    const data = await res.json().catch(() => ({}));
+    if (data.lead) setLeads((ls) => ls.map((l) => (l.id === id ? data.lead : l)));
   }
 
   async function del(id: string) {
     const prev = leads;
-    const settle = reads.beginMutation();
     setLeads((ls) => ls.filter((l) => l.id !== id));
-    try {
-      const res = await fetch(`/api/leads/${id}`, { method: "DELETE" });
-      if (!res.ok) setLeads(prev);
-    } finally {
-      settleMutation(settle);
-    }
+    const res = await fetch(`/api/leads/${id}`, { method: "DELETE" });
+    if (!res.ok) setLeads(prev);
   }
 
   return (
@@ -245,49 +143,40 @@ export default function BoardPage() {
         </div>
         <div className="flex items-center gap-3">
           <span className="text-xs" style={{ color: "var(--faint)" }}>{filtered.length} {filtered.length === 1 ? "lead" : "leads"}</span>
-          <button onClick={refresh} className="p-1.5 rounded-lg hover:bg-[var(--surface3)]" style={{ color: "var(--muted)" }} title="Refresh">
+          {stats.wonCount > 0 && (
+            <span className="text-xs font-semibold" style={{ color: "#4ade80" }}>
+              ${stats.wonTotal.toLocaleString()} won
+              {stats.unvalued > 0 && (
+                <span className="font-normal" style={{ color: "var(--faint)" }}>
+                  {" "}· {stats.unvalued} unvalued
+                </span>
+              )}
+            </span>
+          )}
+          {stats.due > 0 && (
+            <span className="text-xs font-semibold" style={{ color: "#f59e0b" }}>
+              {stats.due} need follow-up
+            </span>
+          )}
+          <button onClick={() => load()} className="p-1.5 rounded-lg hover:bg-[var(--surface3)]" style={{ color: "var(--muted)" }} title="Refresh">
             <RefreshCw size={15} className={loading ? "animate-spin" : ""} />
           </button>
         </div>
       </div>
 
-      {activity.running && (
-        <div className="mx-5 mt-3 text-xs rounded-lg px-3 py-2 flex items-center gap-2 border" style={{ background: "rgba(245,200,66,.08)", borderColor: "rgba(245,200,66,.35)", color: "var(--text)" }}>
-          <span className="dot-pulse" style={{ color: "var(--gold)" }}>●</span>
-          {/* No number while the run is in flight, and no promise that the leads
-              it has found are here. The only count the code can prove is the
-              `done` event's, and this banner is gone by then; anything derived
-              from the stream is an upper bound, because a lead that never
-              reached the database can arrive without a `persist` status — that
-              is what `persistLead` does when the service-role key is missing.
-              The banner says what the agent is doing, not how many rows landed.
-              The board's own lead count in the header above is a read of the
-              database, so it stays. The second sentence is dropped under the
-              warning below, where nothing can load and it would be a promise
-              this page already knows it cannot keep. */}
-          <span>
-            The agent is still searching.
-            {!warning && " New leads appear here as they are saved."}
-          </span>
-        </div>
-      )}
-
       {warning && (
         <div className="mx-5 mt-3 text-xs rounded-lg px-3 py-2" style={{ background: "rgba(230,57,70,.1)", color: "var(--text)" }}>
-          {warning} — leads can’t load until the Supabase service-role key is added to the environment.
+          {warning} — leads can’t load until DATABASE_URL is set in the environment.
         </div>
       )}
 
-      {/* Not while a run is going: the banner above already says what is
-          happening, and "your pipeline is empty" would contradict it. */}
-      {!loading && !warning && !activity.running && leads.length === 0 && (
+      {!loading && !warning && leads.length === 0 && (
         <div className="mx-5 mt-4 rounded-xl border p-4 flex items-center gap-3 animate-in" style={{ background: "var(--surface)", borderColor: "var(--border)" }}>
-          <span className="text-xl">🎯</span>
           <div className="text-sm">
             <div className="font-semibold">Your pipeline is empty.</div>
             <div style={{ color: "var(--muted)" }}>
               Head to the{" "}
-              <Link href="/agent" className="font-medium" style={{ color: "var(--gold)" }}>Agent</Link>{" "}
+              <a href="/agent" className="font-medium" style={{ color: "var(--gold)" }}>Agent</a>{" "}
               tab and describe the sponsors you want. Found leads land here in Prospects, and you drag them across the stages as you go.
             </div>
           </div>
@@ -311,7 +200,7 @@ export default function BoardPage() {
                 <div className="flex items-center justify-between px-3.5 py-3 border-b" style={{ borderColor: "var(--border)" }}>
                   <div className="flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full" style={{ background: col.color }} />
-                    <span className="text-sm font-semibold">{col.emoji} {col.label}</span>
+                    <span className="text-sm font-semibold">{col.label}</span>
                   </div>
                   <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: "var(--surface3)", color: "var(--muted)" }}>{items.length}</span>
                 </div>
@@ -325,14 +214,31 @@ export default function BoardPage() {
                     <div className="text-xs text-center py-8" style={{ color: "var(--faint)" }}>Drop leads here</div>
                   ) : (
                     items.map((l) => (
-                      <LeadCard
+                      // Opening the panel is wired here rather than in LeadCard
+                      // because the agent page uses the same card without a
+                      // board to open into.
+                      <div
                         key={l.id}
-                        lead={l}
-                        draggable
-                        onDragStart={() => setDragId(l.id)}
-                        onEmail={setEmailLead}
-                        onDelete={del}
-                      />
+                        onPointerDown={(e) => { pressAt.current = { x: e.clientX, y: e.clientY }; }}
+                        onClick={(e) => {
+                          // A finished drag still lands as a click in some
+                          // browsers, so travel is what separates the two --
+                          // cheaper and less leaky than a drag-state flag.
+                          if (Math.hypot(e.clientX - pressAt.current.x, e.clientY - pressAt.current.y) > 4) return;
+                          // The card's own buttons and links keep their jobs.
+                          if ((e.target as HTMLElement).closest("button, a")) return;
+                          setDetailLead(l);
+                        }}
+                      >
+                        <LeadCard
+                          lead={l}
+                          now={now}
+                          draggable
+                          onDragStart={() => setDragId(l.id)}
+                          onEmail={setEmailLead}
+                          onDelete={del}
+                        />
+                      </div>
                     ))
                   )}
                 </div>
@@ -343,6 +249,16 @@ export default function BoardPage() {
       </div>
 
       {emailLead && <EmailModal lead={emailLead} onClose={() => setEmailLead(null)} />}
+      {detailLead && (
+        <LeadDetail
+          lead={detailLead}
+          onClose={() => setDetailLead(null)}
+          onUpdated={(l) => {
+            setLeads((ls) => ls.map((x) => (x.id === l.id ? l : x)));
+            setDetailLead(l);
+          }}
+        />
+      )}
     </div>
   );
 }

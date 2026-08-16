@@ -3,22 +3,20 @@
 import { createContext, useContext } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Sparkles, LayoutGrid, LogOut } from "lucide-react";
+import { Sparkles, LayoutGrid, List, LogOut, Map, Settings } from "lucide-react";
 import { Mode } from "@/lib/types";
 
 interface Ctx {
   mode: Mode;
-  setMode: (m: Mode) => void;
   name: string;
 }
-const AppCtx = createContext<Ctx>({ mode: "sponsor", setMode: () => {}, name: "" });
+const AppCtx = createContext<Ctx>({ mode: "sponsor", name: "" });
 export const useApp = () => useContext(AppCtx);
 
 export default function AppShell({ name, children }: { name: string; children: React.ReactNode }) {
   // Sponsor-focused: the tool is geared entirely toward sponsorship outreach for
   // VP External. (Sales mode still exists in the backend and can be re-enabled.)
   const mode: Mode = "sponsor";
-  const setMode = () => {};
   const pathname = usePathname();
   const router = useRouter();
 
@@ -30,11 +28,26 @@ export default function AppShell({ name, children }: { name: string; children: R
   const tabs = [
     { href: "/agent", label: "Agent", icon: Sparkles },
     { href: "/board", label: "Board", icon: LayoutGrid },
+    // Same rows as the board, read the other way round. The board answers "what
+    // is moving"; this answers "where is X", "who has no email yet" and "what
+    // did Priya add" -- none of which a six-column drag surface can be asked.
+    { href: "/leads", label: "List", icon: List },
+    // Both pages were finished and inside the authed layout, but were missing
+    // here -- so they were reachable only by typing the URL, and the numbers
+    // say nobody ever did: 0 of 108 locatable leads geocoded, 0 senders, 0
+    // templates. Until a sender exists the From and Template pickers stay
+    // hidden (EmailModal.tsx:229) and outreach is signed with whatever name was
+    // typed at the login box.
+    { href: "/map", label: "Map", icon: Map },
+    { href: "/settings", label: "Settings", icon: Settings },
   ];
 
   return (
-    <AppCtx.Provider value={{ mode, setMode, name }}>
-      <div className="min-h-screen flex flex-col">
+    <AppCtx.Provider value={{ mode, name }}>
+      {/* h-screen, not min-h-screen: both pages scroll inside themselves (the
+          chat transcript, the board's columns), so the shell has to be exactly
+          the viewport for `flex-1 min-h-0` below to resolve to a real height. */}
+      <div className="h-screen flex flex-col">
         <header
           className="sticky top-0 z-50 flex items-center justify-between px-5 py-3 border-b"
           style={{ background: "var(--surface)", borderColor: "var(--border)" }}

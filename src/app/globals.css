@@ -36,6 +36,10 @@
 
 * { box-sizing: border-box; }
 
+/* Tailwind v4 gives buttons cursor: default. Restored once here rather than as
+   an inline style on every control that wants to look clickable. */
+button:not(:disabled), a[href], select { cursor: pointer; }
+
 html, body {
   background: var(--bg);
   color: var(--text);
@@ -64,3 +68,7 @@ html, body {
 .card-hover:hover { transform: translateY(-2px); border-color: #3a414d; box-shadow: 0 8px 24px rgba(0,0,0,.35); }
 
 .reason-scroll { scrollbar-width: thin; }
+
+/* Composer grows with what is typed where the browser supports it; everywhere
+   else the textarea's rows=2 stands. */
+.grow-text { field-sizing: content; min-height: 2.75rem; max-height: 10rem; }

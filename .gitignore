@@ -40,8 +40,7 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# archived pages the alumni roster is rebuilt from. They carry the role email
-# addresses, phone numbers and employer detail that config/alumni/ exists to
-# leave behind, so the raw pages are never committed — only the parsed
-# name/role/years are. See config/alumni/README.md.
-/.cache/
+# local agent/editor config
+.claude/
+CLAUDE.md
+AGENTS.md

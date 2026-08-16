@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
-import { getSession } from "@/lib/auth";
-import { authUrl, hasGoogleConfig, signCookie } from "@/lib/gmail";
+import { getSession, signCookie } from "@/lib/auth";
+import { authUrl, hasGoogleConfig } from "@/lib/gmail";
 import crypto from "crypto";
 
 export const runtime = "nodejs";

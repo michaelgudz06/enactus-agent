@@ -15,7 +15,3 @@ export function stripEmDashes(input: string): string {
     .replace(/[ \t]{2,}/g, " ")
     .trim();
 }
-
-export function sanitizeEmail(body: string): string {
-  return stripEmDashes(body);
-}

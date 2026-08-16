@@ -6,9 +6,9 @@ import RunProvider from "@/components/RunProvider";
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const session = await getSession();
   if (!session) redirect("/login");
-  // RunProvider wraps both `agent` and `board`, and this layout does not
-  // re-render when navigating between them — so a run started on the agent view
-  // keeps streaming while the student watches the board fill up.
+  // RunProvider lives here, above both /agent and /board, because this layout
+  // does not re-render when navigating between them -- which is what lets an
+  // agent run survive switching to the board to watch its leads arrive.
   return (
     <RunProvider>
       <AppShell name={session.name}>{children}</AppShell>

@@ -1,100 +1,112 @@
 "use client";
 
-import { createContext, useContext, useMemo, useState, useSyncExternalStore } from "react";
-import {
-  ALREADY_RUNNING,
-  createRunStore,
-  initialRunState,
-  RunInput,
-  RunState,
-  StartOutcome,
-} from "@/lib/run-store";
+import { createContext, useCallback, useContext, useRef, useState } from "react";
+import { AgentEvent, Lead, Mode } from "@/lib/types";
+import { applyEvent, newTurn, RunTurn, takeLines } from "@/lib/run-events";
 
 /**
- * Mounted by `src/app/(app)/layout.tsx`, which wraps both the agent view and the
- * board. Layouts do not re-render on navigation between the routes below them,
- * so this component — and the run store it holds — stays mounted while the
- * student moves between the two. That is the whole mechanism: the run is owned
- * one level above the page that starts it.
- */
-
-export interface RunControls {
-  start: (input: RunInput) => StartOutcome;
-  cancel: () => void;
-  setDraft: (value: string) => void;
-  setAnswers: (value: string) => void;
-}
-
-/**
- * The board's view of the run. Two primitives rather than the whole state: the
- * reasoning stream writes state dozens of times a second, and a board full of
- * lead cards must not re-render on every token. This value only changes when one
- * of the two changes, so it does not.
+ * The agent run, owned one level above the page that starts it.
  *
- * No count of any kind is published here, deliberately. Every number a run in
- * flight can offer is an upper bound — `runSavedToBoard` says so itself — and a
- * consumer given one will render it as fact. The authoritative count arrives on
- * the `done` event as `RunState.saved`, which the agent view reads from the full
- * state; a mid-run consumer gets the signal to re-read the database instead.
+ * Every piece of run state used to live in `useState` on the agent page, so
+ * navigating to the board unmounted the page and took the reader loop with it --
+ * the run died the moment you went to look at the leads it was producing. This
+ * component is mounted by `src/app/(app)/layout.tsx`, which wraps both routes.
+ * Layouts do not re-render when navigating between the routes below them, so the
+ * run and its reader stay alive while the student moves between the two.
+ *
+ * What this is NOT: durable. The fetch is the browser's own request, so a
+ * refresh, a closed tab or a dropped connection still ends it. Surviving those
+ * needs a job that outlives the request, which is a much larger change. The
+ * server-side run does keep going either way -- `runAgent` writes each lead to
+ * the board as it goes, so leads already found are on the board regardless.
  */
-export interface RunActivity {
+
+export type Turn = RunTurn<Lead>;
+
+interface RunCtx {
+  turns: Turn[];
+  setTurns: React.Dispatch<React.SetStateAction<Turn[]>>;
+  prompt: string;
+  setPrompt: (v: string) => void;
   running: boolean;
-  /** Ticks when a lead may have reached the database; the board reads again. */
+  /** True once a run has been started in this session, for the board's refresh. */
   leadSignal: number;
+  send: (text: string, mode: Mode, awaitingAnswers: boolean) => void;
 }
 
-const OUTSIDE_PROVIDER = "The agent run provider is not mounted.";
+const Ctx = createContext<RunCtx | null>(null);
 
-const RunStateContext = createContext<RunState>(initialRunState);
-const RunActivityContext = createContext<RunActivity>({ running: false, leadSignal: 0 });
-const RunControlsContext = createContext<RunControls>({
-  // Refusing out loud rather than doing nothing: a page rendered outside the
-  // provider would otherwise have a Run button that silently did nothing.
-  start: () => ({ started: false, reason: OUTSIDE_PROVIDER }),
-  cancel: () => {},
-  setDraft: () => {},
-  setAnswers: () => {},
-});
-
-/** The full run state. For the agent view, which renders all of it. */
-export const useRunState = () => useContext(RunStateContext);
-/** The board's cheap view of the run. */
-export const useRunActivity = () => useContext(RunActivityContext);
-export const useRunControls = () => useContext(RunControlsContext);
-
-export { ALREADY_RUNNING };
+export function useRun(): RunCtx {
+  const v = useContext(Ctx);
+  if (!v) throw new Error("useRun must be used inside RunProvider");
+  return v;
+}
 
 export default function RunProvider({ children }: { children: React.ReactNode }) {
-  const [store] = useState(createRunStore);
+  const [turns, setTurns] = useState<Turn[]>([]);
+  const [prompt, setPrompt] = useState("");
+  const [running, setRunning] = useState(false);
+  const [leadSignal, setLeadSignal] = useState(0);
 
-  const state = useSyncExternalStore(store.subscribe, store.getState, store.getState);
+  // The search the agent is working on. Clarifying answers are a reply in the
+  // transcript, but the API still needs the question they answer.
+  const askedRef = useRef("");
+  // Read synchronously by send() so two clicks in one tick cannot both start a
+  // reader; `running` alone is a render behind and would let the second through.
+  const busy = useRef(false);
 
-  const controls = useMemo<RunControls>(
-    () => ({
-      start: store.start,
-      cancel: store.cancel,
-      setDraft: store.setDraft,
-      setAnswers: store.setAnswers,
-    }),
-    [store]
-  );
+  const run = useCallback(async (mode: Mode, answers?: string) => {
+    busy.current = true;
+    setRunning(true);
+    try {
+      const res = await fetch("/api/agent/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: askedRef.current, mode, answers, skipClarify: Boolean(answers) }),
+      });
+      if (!res.ok || !res.body) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.error || `Request failed (${res.status})`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const { lines, rest } = takeLines(buf);
+        buf = rest;
+        for (const line of lines) {
+          let ev: AgentEvent;
+          // A line that is not JSON costs that line and nothing else.
+          try { ev = JSON.parse(line) as AgentEvent; } catch { continue; }
+          setTurns((ts) => applyEvent(ts, ev));
+          // A lead is emitted after the insert has been attempted, so this is
+          // the earliest honest moment to tell the board to read again.
+          if (ev.type === "lead" || ev.type === "done") setLeadSignal((n) => n + 1);
+        }
+      }
+    } catch (e) {
+      setTurns((ts) => applyEvent(ts, { type: "error", message: (e as Error).message }));
+    } finally {
+      busy.current = false;
+      setRunning(false);
+    }
+  }, []);
 
-  const activity = useMemo<RunActivity>(
-    () => ({
-      running: state.running,
-      leadSignal: state.leadSignal,
-    }),
-    [state.running, state.leadSignal]
-  );
+  const send = useCallback((text: string, mode: Mode, awaitingAnswers: boolean) => {
+    const t = text.trim();
+    if (!t || busy.current) return;
+    setPrompt("");
+    setTurns((ts) => [...ts, newTurn<Lead>(t)]);
+    if (awaitingAnswers) void run(mode, t);
+    else { askedRef.current = t; void run(mode); }
+  }, [run]);
 
-  // `children` is created by the layout, which does not re-render, so React
-  // reuses that element and the subtree only re-renders where it reads one of
-  // these contexts.
   return (
-    <RunControlsContext.Provider value={controls}>
-      <RunActivityContext.Provider value={activity}>
-        <RunStateContext.Provider value={state}>{children}</RunStateContext.Provider>
-      </RunActivityContext.Provider>
-    </RunControlsContext.Provider>
+    <Ctx.Provider value={{ turns, setTurns, prompt, setPrompt, running, leadSignal, send }}>
+      {children}
+    </Ctx.Provider>
   );
 }

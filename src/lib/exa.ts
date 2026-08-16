@@ -19,7 +19,13 @@ export function hasExaKey() {
 
 export async function exaSearch(
   query: string,
-  opts: { numResults?: number; category?: string } = {}
+  opts: {
+    numResults?: number;
+    category?: string;
+    excludeDomains?: string[];
+    includeDomains?: string[];
+    textChars?: number;
+  } = {}
 ): Promise<ExaResult[]> {
   const key = process.env.EXA_API_KEY;
   if (!key) throw new Error("EXA_API_KEY not set");
@@ -29,11 +35,25 @@ export async function exaSearch(
     numResults: opts.numResults ?? 8,
     type: "auto",
     contents: {
-      text: { maxCharacters: 1200 },
+      // 1200 is plenty to judge a company from a search snippet, but a team
+      // page lists people far below the fold and gets truncated mid-roster.
+      // Callers reading people ask for more.
+      text: { maxCharacters: opts.textChars ?? 1200 },
       highlights: { numSentences: 3, highlightsPerUrl: 2, query },
     },
   };
   if (opts.category) body.category = opts.category;
+  // Pins the search to one company's own domain. The people extractor treats
+  // "published on their site" as the evidence standard, so a search that can
+  // wander off-domain would hand it pages it is not entitled to trust.
+  if (opts.includeDomains?.length) body.includeDomains = opts.includeDomains;
+  // Ask for pages we have never seen instead of paying for pages the
+  // already-on-board filter is about to delete. That filter is correct -- it
+  // stops two volunteers emailing the same cafe -- but it runs AFTER discovery,
+  // so as the board grows the search keeps returning the same top-ranked
+  // domains and the filter keeps deleting them, and the run starves. Exa caps
+  // this list at 1000.
+  if (opts.excludeDomains?.length) body.excludeDomains = opts.excludeDomains.slice(0, 1000);
 
   const res = await fetch(EXA_URL, {
     method: "POST",

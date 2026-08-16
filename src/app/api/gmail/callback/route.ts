@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
-import { exchangeCode, readCookie, signCookie, GMAIL_COOKIE } from "@/lib/gmail";
+import { readCookie, signCookie } from "@/lib/auth";
+import { exchangeCode, GMAIL_COOKIE } from "@/lib/gmail";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

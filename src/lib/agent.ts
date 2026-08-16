@@ -1,11 +1,33 @@
 import crypto from "crypto";
 import { AgentEvent, ConnectionType, Lead, Mode } from "./types";
-import { chatJSON, streamReasoner, REASONER } from "./llm";
+import {
+  chatJSON,
+  streamReasoner,
+  pluck,
+  extractJSON,
+  salvageObjects,
+  REASONER,
+  STRUCTURER,
+  STRUCTURER_PROVIDER,
+} from "./llm";
 import { exaSearch, dedupeByDomain, ExaResult } from "./exa";
-import { supabaseAdmin, LEADS, SEARCHES, hasServiceKey } from "./supabase";
-import { createVerifiers, isAggregatorHost, EmailCheck, WebsiteCheck } from "./contact";
+import { placesSearch, hasPlacesKey } from "./places";
+import {
+  enrichDomains,
+  disqualify,
+  orgFacts,
+  grounded,
+  provinceFromRequest,
+  hasApolloKey,
+  ApolloOrg,
+  DISQUALIFIER_LABEL,
+  isMembershipName,
+  nameMatchesDomain,
+  companyKey,
+} from "./apollo";
+import { db, hasDatabaseUrl } from "./db";
+import { MAX_COUNT, parsedCount, requestedCount } from "./count";
 import { ENACTUS_ORG, ENACTUS_PROJECTS, ENACTUS_VENTURES } from "./enactus";
-import { ValueDefect, defectMessage, describeValue, readEnvelope, recoverValue, reviewFields } from "./review";
 
 type Emit = (e: AgentEvent) => void;
 
@@ -16,96 +38,8 @@ interface Plan {
   criteria: string;
   altAngle: string;
   location: string;
+  placesQueries?: string[];
 }
-
-// Two views of one shape.
-//
-// The provider is sent a *complete* schema, because that is what strict
-// structured output means: every property listed in `required`, no extras, and
-// optionality expressed as a nullable union so "present" is satisfiable by null.
-//
-// The local check covers the envelope only, for the plan exactly as for the
-// leads. Type-checking the properties here would make one wrong-typed field
-// fatal to everything beside it -- a cosmetic `altAngle` used to end the run
-// before a single search -- which is the failure class this whole change exists
-// to remove. Both payloads are instead checked field by field, by reviewPlan and
-// reviewLeads, where a defect costs the field it is in and is reported rather
-// than swallowed.
-const NULLABLE_STRING = { type: ["string", "null"] };
-const NULLABLE_STRING_ARRAY = { type: ["array", "null"], items: { type: "string" } };
-
-const CONNECTION_TYPES: ConnectionType[] = ["alum", "past_sponsor", "ecosystem", "none"];
-
-function strictObject(properties: Record<string, unknown>): Record<string, unknown> {
-  return { type: "object", additionalProperties: false, required: Object.keys(properties), properties };
-}
-
-const PLAN_PROPERTIES: Record<string, Record<string, unknown>> = {
-  needClarification: { type: ["boolean", "null"] },
-  questions: NULLABLE_STRING_ARRAY,
-  searchQueries: { type: "array", items: { type: "string" } },
-  criteria: { type: "string" },
-  altAngle: NULLABLE_STRING,
-  location: NULLABLE_STRING,
-};
-
-const PLAN_SCHEMA = {
-  name: "search_plan",
-  schema: strictObject(PLAN_PROPERTIES),
-  // Envelope only, and both shapes a plan can arrive in: `searchQueries` is the
-  // one thing the run cannot continue without, and reviewPlan decides that after
-  // every field has had its own chance to be recovered -- listing it as required
-  // here would reject a plan whose queries arrived in a recoverable form, and
-  // rejecting a list here would reject a plan wrapped in a list of one before
-  // reviewPlan could read it out.
-  validate: { type: ["object", "array"] },
-};
-
-// The per-field contract for one lead. reviewLeads checks each field against
-// this independently, so a field that does not match is the only thing lost.
-const LEAD_PROPERTIES: Record<string, Record<string, unknown>> = {
-  company: { type: "string" },
-  website: NULLABLE_STRING,
-  industry: NULLABLE_STRING,
-  location: NULLABLE_STRING,
-  description: NULLABLE_STRING,
-  contact_name: NULLABLE_STRING,
-  contact_role: NULLABLE_STRING,
-  contact_email: NULLABLE_STRING,
-  // Not an enum in the local check on purpose: an unrecognised value costs this
-  // one field -- persistLead normalises it to "none" -- never the whole lead.
-  connection_type: NULLABLE_STRING,
-  connection_note: NULLABLE_STRING,
-  sponsorship_type: NULLABLE_STRING_ARRAY,
-  fit_score: { type: ["number", "null"] },
-  why_fit: NULLABLE_STRING,
-  reasoning: NULLABLE_STRING,
-  source_index: { type: ["number", "null"] },
-};
-
-// The provider is still asked for the four literals. A strict validator wants a
-// type on every node, so the nullable enum carries the same union NULLABLE_STRING
-// uses rather than an enum list on its own.
-const REQUEST_LEAD_PROPERTIES = {
-  ...LEAD_PROPERTIES,
-  connection_type: { type: ["string", "null"], enum: [...CONNECTION_TYPES, null] },
-};
-
-const LEADS_SCHEMA = {
-  name: "leads",
-  schema: strictObject({ leads: { type: "array", items: strictObject(REQUEST_LEAD_PROPERTIES) } }),
-  validate: {
-    type: "object",
-    required: ["leads"],
-    properties: { leads: { type: "array" } },
-  },
-};
-
-// How much of the analysis the structuring step is shown. The old 3,000-char cap
-// silently dropped the tail, which is exactly where the analyst's conclusions
-// live; the structuring model has a 1M-token context, so this only needs to be
-// generous enough to bound a runaway stream.
-const REASONING_FORWARD_CHARS = 60000;
 
 const STOP = new Set(
   "the a an and or of for to in on at with from find me some list companies company business businesses that are who is looking want need new leads potential more".split(
@@ -140,6 +74,23 @@ function domainOf(url: string): string {
   }
 }
 
+
+// Drop reasons, rendered for a human. Any reason without a label is skipped
+// rather than printed: a new drop reason added without a sentence rendered as
+// "3 undefined" in the shortfall message a volunteer reads.
+function dropReasons(dropped: Record<string, number>): string[] {
+  return Object.entries(dropped)
+    .filter(([k]) => k in DISQUALIFIER_LABEL)
+    .map(([k, n]) => `${n} ${DISQUALIFIER_LABEL[k as keyof typeof DISQUALIFIER_LABEL]}`);
+}
+
+// A candidate plus whatever Apollo could verify about it.
+interface Candidate {
+  result: ExaResult;
+  domain: string;
+  org: ApolloOrg | null;
+}
+
 function planPrompt(mode: Mode): string {
   if (mode === "sales") {
     return `You help a project manager find B2B sales leads (potential customers to sell their product/service to). Turn their request into effective web-search queries and a crisp ideal-customer description.`;
@@ -156,48 +107,77 @@ export async function runAgent(
   const { prompt, mode, answers, userName } = input;
   const fullPrompt = answers ? `${prompt}\n\nAdditional context from user: ${answers}` : prompt;
 
+  // How many leads to deliver. Decided here, in code, before anything else.
+  const targetCount = requestedCount(fullPrompt);
+  // What they actually typed. A run is one 60s function (see RUN_DEADLINE
+  // below), so 25 is a real limit and not a preference -- but it has to be said
+  // out loud, or asking for 50 and being handed 21 with no explanation reads as
+  // the agent ignoring the request.
+  const askedFor = parsedCount(fullPrompt);
+  const overCap = askedFor !== null && askedFor > MAX_COUNT;
+  const capNote = overCap
+    ? ` (you asked for ${askedFor}; ${MAX_COUNT} is the most one run can do -- run it again to keep going)`
+    : "";
+  const capTail = overCap ? ` ${MAX_COUNT} is the most one run can do, so run it again to keep going.` : "";
+
+  // Vercel Hobby kills the function at 60s (see maxDuration in the route).
+  // Stop our own work at 52s so there is room to persist the leads and flush
+  // the stream. Overrunning it loses the whole run.
+  const RUN_DEADLINE = Date.now() + 52_000;
+  // Do NOT tune this from a one-off measurement. The same structuring call has
+  // been measured at 1.0s and at over 20s within the same hour, on the same
+  // model and provider -- two separate sessions have now sized this budget from
+  // a lucky reading and starved the stage that actually produces the leads.
+  // The reserve is deliberately generous, and structuring streams so that
+  // overrunning it costs a few leads rather than all of them.
+  const STRUCTURE_RESERVE_MS = 20_000;
+  // R1 is verbose and never returns early, so this cap trades reasoning depth
+  // for headroom rather than risking the run.
+  const R1_CAP_MS = 16_000;
+  const t0 = Date.now();
+  const mark = (label: string) => console.log(`[agent] ${label} @${Date.now() - t0}ms`);
+
   // ── 1. Understand + plan ────────────────────────────────────────────────
-  emit({ type: "status", step: "understand", message: "Understanding your request and planning searches" });
-  let planned: unknown;
+  emit({
+    type: "status",
+    step: "understand",
+    message: `Understanding your request. Target: ${targetCount} lead${targetCount === 1 ? "" : "s"}${capNote}`,
+  });
+  // Wider ask needs more angles, or every query returns the same few pages.
+  const queryCount = targetCount <= 6 ? 3 : targetCount <= 12 ? 4 : 5;
+  let plan: Plan;
   try {
-    planned = await chatJSON<unknown>(
+    plan = await chatJSON<Plan>(
       [
-        { role: "system", content: `${planPrompt(mode)}\n\nRespond ONLY with JSON of shape: {"needClarification": boolean, "questions": string[], "searchQueries": string[], "criteria": string, "altAngle": string, "location": string}. Provide 3 focused searchQueries. Only set needClarification true (with up to 2 short questions) if the request is too vague to search well. altAngle is a different angle to try if this search was already done before.` },
+        { role: "system", content: `${planPrompt(mode)}\n\nRespond ONLY with JSON of shape: {"needClarification": boolean, "questions": string[], "searchQueries": string[], "criteria": string, "altAngle": string, "location": string, "placesQueries": string[]}. Provide ${queryCount} DISTINCT searchQueries that attack the request from different angles (industry, community-giving language, local-news coverage, grant/foundation wording) so they do not all return the same pages.${
+              mode === "sales"
+                ? ""
+                : ` The target is organisations that GIVE money or goods. Do not write queries that surface charities, foundations seeking donations, non-profits, or community groups looking for sponsors -- those compete with Enactus for the same donor dollars rather than funding it. Words like "non-profit", "charity" and "fundraiser" in a query reliably return the wrong side of the transaction.`
+            } placesQueries: up to 3 short local-business queries suited to a maps search (e.g. "coffee shops Burnaby", "print shops near SFU"), or [] if the request is not about local storefront businesses. ALWAYS populate searchQueries, criteria and location, even when needClarification is true -- the user can skip the questions and those fields are still used. Only set needClarification true (with up to 2 short questions) if the request is too vague to search well. altAngle is a different angle to try if this search was already done before.` },
         { role: "user", content: fullPrompt },
       ],
-      { maxTokens: 800, schema: PLAN_SCHEMA }
+      { model: STRUCTURER, provider: STRUCTURER_PROVIDER, maxTokens: 800 }
     );
   } catch (e) {
-    // No plan came back at all, so there is nothing to degrade to.
     emit({ type: "error", message: `Planning failed: ${(e as Error).message}` });
     return;
   }
 
-  const review = reviewPlan(planned);
-  for (const defect of review.defects) {
-    emit({ type: "status", step: "understand", message: defectMessage(defect, "plan") });
-  }
-  if (!review.plan) {
-    emit({ type: "error", message: `Nothing to search: ${review.blocker}.` });
-    return;
-  }
-  const plan = review.plan;
-
-  if (plan.needClarification && !answers && !input.skipClarify && plan.questions.length) {
+  if (plan.needClarification && !answers && !input.skipClarify && plan.questions?.length) {
     emit({ type: "clarify", questions: plan.questions.slice(0, 2) });
     return;
   }
 
   // ── 2. History check (lightweight, in DB) ───────────────────────────────
   const norm = normalize(fullPrompt);
-  if (hasServiceKey()) {
+  if (hasDatabaseUrl()) {
     try {
-      const { data } = await supabaseAdmin
-        .from(SEARCHES)
-        .select("prompt, normalized, created_at")
-        .eq("mode", mode)
-        .order("created_at", { ascending: false })
-        .limit(40);
+      const data = (await db()`
+        select prompt, normalized, created_at from enactus_searches
+        where mode = ${mode} order by created_at desc limit 40`) as {
+        prompt: string;
+        normalized: string | null;
+      }[];
       let best = { score: 0, prompt: "" };
       for (const row of data ?? []) {
         const score = jaccard(norm, row.normalized || normalize(row.prompt));
@@ -216,72 +196,256 @@ export async function runAgent(
     }
   }
 
-  // ── 3. Discover via Exa ─────────────────────────────────────────────────
-  emit({ type: "status", step: "discover", message: `Searching the web with Exa: ${plan.searchQueries.slice(0, 3).join("  ·  ")}` });
-  let candidates: ExaResult[] = [];
+  // ── 3. Discover ─────────────────────────────────────────────────────────
+  // The funnel is sized from targetCount rather than fixed. Previously this was
+  // 3 queries x 6 results capped at 6 candidates, so "give me 10 leads" could
+  // not have succeeded no matter how the model was prompted. Roughly 3
+  // candidates per requested lead survives dedupe, the noise filter and the
+  // already-on-the-board filter with enough left to choose from.
+  // The planner returns needClarification with an EMPTY searchQueries array for
+  // requests it considers vague ("give me 10 leads from Burnaby" hits this every
+  // time). When the user has skipped the questions there is nothing to fall back
+  // on, and the run used to die with a misleading "No candidates found". Asking
+  // the planner nicely is not enough on its own, so synthesise queries here too.
+  let queries = (plan.searchQueries ?? []).filter((q) => typeof q === "string" && q.trim()).slice(0, queryCount);
+  if (!queries.length) {
+    const subject = fullPrompt.replace(/\b\d{1,3}\b/g, " ").replace(/\s+/g, " ").trim();
+    queries =
+      mode === "sales"
+        ? [subject, `${subject} companies`, `${subject} buyers`]
+        : [
+            `${subject} companies community sponsorship`,
+            `${subject} businesses supporting local students`,
+            `${subject} corporate giving community investment`,
+          ];
+    queries = queries.slice(0, queryCount);
+  }
+  const candidateTarget = Math.min(60, Math.max(12, targetCount * 3));
+  // Dividing the target across queries assumed the queries return disjoint
+  // results. They do not -- they are deliberately overlapping phrasings of one
+  // subject, so dedupeByDomain collapses most of the union (18 raw -> 6 in one
+  // observed failing run). At targetCount=5 the old arithmetic asked for 15 raw
+  // URLs, fewer than the 18 the build before it used, so the count rebuild made
+  // small asks WORSE at discovery while fixing them at structuring. Overshoot
+  // instead: the searches already run in one Promise.all, so a wider net costs
+  // one search's wall clock and the pool is sliced back before any LLM sees it.
+  const perQuery = Math.min(25, Math.max(10, Math.ceil((candidateTarget * 2) / Math.max(1, queries.length))));
+
+  const usingPlaces = hasPlacesKey() && (plan.placesQueries?.length ?? 0) > 0;
+  emit({
+    type: "status",
+    step: "discover",
+    message: `Searching ${usingPlaces ? "Exa + Google Places" : "the web with Exa"}: ${queries.join("  ·  ")}`,
+  });
+
+  // ── 2b. What is already on the board ────────────────────────────────────
+  // Read BEFORE discovery, not after. This used to run only as a post-filter,
+  // which meant every search spent its whole result budget re-finding companies
+  // the club already had and then threw them away: measured at a 206-lead
+  // board, 9 of 14 usable candidates were deleted here, leaving 4 to fill an
+  // ask for 10. The filter below still runs -- it is the net for leads whose
+  // website is null and so cannot be excluded by domain -- but the domains now
+  // go to Exa first so it returns ground we have not covered.
+  const boardDomains = new Set<string>();
+  const boardNames = new Set<string>();
+  if (hasDatabaseUrl()) {
+    try {
+      const rows = (await db()`
+        select website, company from enactus_leads where mode = ${mode}`) as {
+        website: string | null;
+        company: string | null;
+      }[];
+      for (const r of rows ?? []) {
+        if (r.website)
+          boardDomains.add(domainOf(r.website.startsWith("http") ? r.website : `https://${r.website}`));
+        if (r.company) boardNames.add(companyKey(r.company));
+      }
+      boardDomains.delete("");
+    } catch {
+      // Non-fatal: a dedupe we could not run must not stop the search.
+    }
+  }
+  const excludeDomains = [...boardDomains];
+
+  let found: ExaResult[] = [];
   try {
-    const batches = await Promise.all(
-      plan.searchQueries.slice(0, 3).map((q) => exaSearch(q, { numResults: 6 }).catch(() => []))
+    const exaBatches = Promise.all(
+      queries.map((q) => exaSearch(q, { numResults: perQuery, excludeDomains }).catch(() => []))
     );
-    candidates = dedupeByDomain(batches.flat().filter((r) => r.url));
+    // Places returns actual businesses rather than pages about businesses, so
+    // it is the better source for local storefront sponsors. Shaped into the
+    // same ExaResult so everything downstream stays source-agnostic.
+    const placeBatches = usingPlaces
+      ? Promise.all(
+          plan.placesQueries!.slice(0, 3).map((q) =>
+            placesSearch(q, { maxResults: Math.ceil(candidateTarget / 2) }).then((ps) =>
+              ps
+                .filter((p) => p.website)
+                .map<ExaResult>((p) => ({
+                  url: p.website!,
+                  title: p.name,
+                  publishedDate: null,
+                  author: null,
+                  text: [p.name, p.primaryType?.replace(/_/g, " "), p.address]
+                    .filter(Boolean)
+                    .join(" · "),
+                  highlights: [],
+                }))
+            )
+          )
+        )
+      : Promise.resolve([] as ExaResult[][]);
+
+    const [exa, places] = await Promise.all([exaBatches, placeBatches]);
+    found = dedupeByDomain([...exa.flat(), ...places.flat()].filter((r) => r.url));
   } catch (e) {
     emit({ type: "error", message: `Discovery failed: ${(e as Error).message}` });
     return;
   }
-  // Drop obvious non-company noise + cap.
-  candidates = candidates
-    .filter((r) => !/wikipedia\.org|reddit\.com|indeed\.com|glassdoor\./.test(r.url))
-    .slice(0, 6);
+
+  // Obvious non-company noise: encyclopedias, forums and job boards are never
+  // the sponsor themselves.
+  found = found.filter(
+    (r) => !/wikipedia\.org|reddit\.com|indeed\.com|glassdoor\.|linkedin\.com|facebook\.com|yelp\./.test(r.url)
+  );
+  const foundCount = found.length;
+  mark(`discovery done (${foundCount} raw)`);
+
+  // ── 3a. Drop anything already on the board ──────────────────────────────
+  // A rotating volunteer team runs this every few weeks. Without this filter
+  // the same café resurfaces every search and two people email it a month
+  // apart, which is the one failure that actually costs the club a sponsor.
+  // Uses the sets read at 2b -- one query per run, not two. Exa has already
+  // been told to avoid these domains, so this is now a backstop for the leads
+  // it could not be told about (64 of 206 board rows have no website) and for
+  // Google Places results, which never saw the exclusion list.
+  let alreadyKnown = 0;
+  {
+    const before = found.length;
+    found = found.filter((r) => {
+      const d = domainOf(r.url);
+      const n = (r.title ?? "").trim().toLowerCase();
+      return !(boardDomains.has(d) || (n && boardNames.has(n)));
+    });
+    alreadyKnown = before - found.length;
+  }
+
+  // ── 3b. Verify against Apollo ───────────────────────────────────────────
+  // Deterministic reality check: Apollo confirms a candidate is a real,
+  // currently-staffed company in the right province in ~0.4s per 10 domains.
+  // This is what removes defunct companies, national chains with no local
+  // decision maker, and trade associations -- classes the prompt rules alone
+  // never reliably caught.
+  const province = provinceFromRequest(fullPrompt, plan.location, plan.criteria);
+  let candidates: Candidate[] = found.map((r) => ({ result: r, domain: domainOf(r.url), org: null }));
+  const dropped: Record<string, number> = {};
+  if (hasApolloKey() && candidates.length) {
+    const enriched = await enrichDomains(
+      candidates.map((c) => c.domain).filter(Boolean),
+      { signal: AbortSignal.timeout(Math.max(2000, Math.min(8000, RUN_DEADLINE - Date.now() - 20_000))) }
+    );
+    for (const c of candidates) c.org = enriched.get(c.domain) ?? null;
+    mark(`apollo done`);
+  }
+  // Outside the Apollo block on purpose: the membership-name test needs no
+  // enrichment, so a missing or rate-limited APOLLO_API_KEY must not silently
+  // switch the whole guard off.
+  candidates = candidates.filter((c) => {
+    const why = disqualify(c.org, { province, name: c.result.title });
+    if (why) dropped[why] = (dropped[why] ?? 0) + 1;
+    return !why;
+  });
+
+  // Interleave verified and unverified rather than sorting verified first.
+  // Sorting then slicing would quietly undo the whole point of disqualify()
+  // never dropping on missing data: Apollo has poor coverage of very small
+  // local businesses, so a verified-first sort pushes exactly the corner-shop
+  // in-kind sponsors this club relies on below the cut whenever the pool is
+  // large.
+  const verified = candidates.filter((c) => c.org);
+  const unverified = candidates.filter((c) => !c.org);
+  const mixed: Candidate[] = [];
+  for (let i = 0; i < Math.max(verified.length, unverified.length); i++) {
+    if (verified[i]) mixed.push(verified[i]);
+    if (unverified[i]) mixed.push(unverified[i]);
+  }
+  // Give the model roughly twice what we need so it has genuine choice, without
+  // paying to reason over candidates that can never make the cut.
+  candidates = mixed.slice(0, Math.max(targetCount * 2, 12));
 
   if (!candidates.length) {
-    emit({ type: "status", step: "discover", message: "No candidates found. Try rephrasing or broadening the request." });
-    emit({ type: "done", count: 0, saved: 0, searchId: null });
+    const why = alreadyKnown
+      ? `Everything found was already on the board (${alreadyKnown} skipped). Try a different angle or city.`
+      : "No candidates found. Try rephrasing or broadening the request.";
+    emit({ type: "status", step: "discover", message: why });
+    emit({ type: "done", count: 0, searchId: null });
     return;
   }
-  emit({ type: "status", step: "research", message: `Found ${candidates.length} candidates. Analyzing fit and connections` });
 
-  // ── 4. Reason + score with the reasoning model (visible reasoning) ──────
-  const context = candidates
-    .map((c, i) => `[${i + 1}] ${c.title || domainOf(c.url)}\nURL: ${c.url}\n${(c.text || c.highlights.join(" ")).slice(0, 700)}`)
-    .join("\n\n");
+  // Say what was filtered rather than silently narrowing: a run that quietly
+  // drops half its candidates reads as "the agent is weak at finding people".
+  const notes = [
+    `${foundCount} found`,
+    alreadyKnown ? `${alreadyKnown} already on the board` : "",
+    ...dropReasons(dropped),
+  ].filter(Boolean);
+  emit({
+    type: "status",
+    step: "research",
+    message: `${notes.join(", ")} → analyzing ${candidates.length} candidates for ${targetCount} leads`,
+  });
+
+  // ── 4. Reason + score with R1 (visible reasoning) ───────────────────────
+  // Apollo's facts go in as a labelled line so the model states real employee
+  // counts, industries and locations instead of inventing them. Anything it
+  // could not verify simply has no VERIFIED line.
+  // Numbered with the candidate's GLOBAL index so a chunked structuring pass can
+  // render a subset without renumbering: source_index always points straight
+  // back into candidates[].
+  const renderContext = (list: Candidate[], startIdx: number) =>
+    list
+      .map((c, i) => {
+        const r = c.result;
+        const facts = orgFacts(c.org);
+        return [
+          `[${startIdx + i + 1}] ${c.org?.name || r.title || c.domain}`,
+          `URL: ${r.url}`,
+          facts,
+          (r.text || r.highlights.join(" ") || "").slice(0, 700),
+        ]
+          .filter(Boolean)
+          .join("\n");
+      })
+      .join("\n\n");
+  const context = renderContext(candidates, 0);
 
   const scoreSystem =
     mode === "sales"
       ? `You are a sales-lead analyst. Assess each candidate organization as a potential CUSTOMER for the user's product.\n\n${ENACTUS_VENTURES}`
-      : `You are a sponsorship-lead analyst for Enactus SFU. Assess each candidate organization as a potential SPONSOR. Detect any Simon Fraser University (SFU) or Enactus alumni connection, or past-sponsor / SFU-ecosystem tie, strictly from the provided text.\n\n${ENACTUS_ORG}\n\n${ENACTUS_PROJECTS}\n\nFor each strong sponsor, identify which specific Enactus SFU project best matches their industry or values, so outreach can pitch that project.\n\nHARD EXCLUSIONS — drop these candidates entirely (do not output them at all): other student clubs, university clubs, or student associations (at SFU or any school); anything that would require Enactus to PAY (paid memberships, paid directory or association listings, ticketed programs, fee-based accelerators). Enactus is asking companies to give, not to join or pay. Only keep real companies, businesses, or grant-making foundations.`;
+      : `You are a sponsorship-lead analyst for Enactus SFU. Assess each candidate organization as a potential SPONSOR. Detect any Simon Fraser University (SFU) or Enactus alumni connection, or past-sponsor / SFU-ecosystem tie, strictly from the provided text.\n\n${ENACTUS_ORG}\n\n${ENACTUS_PROJECTS}\n\nFor each strong sponsor, identify which specific Enactus SFU project best matches their industry or values, so outreach can pitch that project.\n\nHARD EXCLUSIONS — drop these candidates entirely (do not output them at all): other student clubs, university clubs, or student associations (at SFU or any school); anything that would require Enactus to PAY (paid memberships, paid directory or association listings, ticketed programs, fee-based accelerators); and charities, hospital or arts foundations, and community non-profits that RAISE money rather than give it — they are competing for the same donors, not funding Enactus. Enactus is asking companies to give, not to join, pay, or fundraise alongside. Only keep real companies, businesses, and foundations that actually MAKE grants.`;
 
-  // criteria is degradable, so it can legitimately be empty here. An empty
-  // labelled field tells the model less than no field at all.
-  const idealLead = plan.criteria ? `\nIdeal lead: ${plan.criteria}` : "";
-
-  // Stage A — the reasoning model thinks out loud (visible), no JSON. Capped so
-  // it stays snappy.
-  const reasoningUser = `User request: ${fullPrompt}${idealLead}
+  // Stage A — R1 reasons out loud (visible), no JSON. Capped so it stays snappy.
+  const reasoningUser = `User request: ${fullPrompt}
+Ideal lead: ${plan.criteria}
 
 Candidates:
 ${context}
 
-Reason candidate by candidate: which are the strongest ${mode === "sales" ? "customers" : "sponsors"} and why? Weigh SFU/Enactus ties, local fit, how winnable the ask is${mode === "sales" ? "" : ", and which specific Enactus SFU project each best aligns with"}. Be concise and specific. Do NOT output JSON, just think it through.`;
+The team needs ${targetCount} ${mode === "sales" ? "customers" : "sponsors"} to contact from this list, so cover at least ${targetCount} of the candidates. Outreach is cheap and breadth beats precision here: a plausible sponsor worth an email is a yes, not just the perfect one. Only rule a candidate out if it is genuinely unsuitable.
 
-  emit({ type: "status", step: "reason", message: "Reasoning about each candidate" });
-  // Hard time budget: reasoning is the slow step. Cap it so the serverless function
-  // always has room to structure + persist within the 60s limit. If the budget
-  // is hit, we proceed with whatever reasoning streamed so far.
-  const REASONING_BUDGET_MS = 28000;
+Reason candidate by candidate: how would each be approached and why might they say yes? Weigh SFU/Enactus ties, local fit, how winnable the ask is${mode === "sales" ? "" : ", and which specific Enactus SFU project each best aligns with"}. Where a VERIFIED line is present, use those figures rather than estimating. Be concise and specific. Do NOT output JSON, just think it through.`;
+
+  mark("plan+exa done");
+  emit({ type: "status", step: "reason", message: "DeepSeek R1 reasoning about each candidate" });
+  // A fixed per-stage cap on R1 alone is not enough: planning and Exa have
+  // already spent an unknown amount of the 60s function limit, and structuring
+  // still has to run after this. Both LLM stages share ONE deadline instead, so
+  // whatever planning overran comes out of R1's slice rather than out of
+  // structuring, which is the stage that actually produces the leads.
+  const msLeft = () => RUN_DEADLINE - Date.now();
+  const R1_BUDGET_MS = Math.max(5000, Math.min(R1_CAP_MS, msLeft() - STRUCTURE_RESERVE_MS));
   const controller = new AbortController();
-  let budgetHit = false;
-  const budget = setTimeout(() => {
-    budgetHit = true;
-    controller.abort();
-  }, REASONING_BUDGET_MS);
-  // Accumulate every delta as it arrives. Whatever the stream does afterwards --
-  // return normally, abort, or throw -- the reasoning the user already watched
-  // stream past is still ours to structure from.
-  let streamed = "";
-  const capture = (d: string) => {
-    streamed += d;
-    emit({ type: "reasoning", text: d });
-  };
+  const budget = setTimeout(() => controller.abort(), R1_BUDGET_MS);
   let reasoningText = "";
   try {
     const r = await streamReasoner(
@@ -289,7 +453,10 @@ Reason candidate by candidate: which are the strongest ${mode === "sales" ? "cus
         { role: "system", content: scoreSystem },
         { role: "user", content: reasoningUser },
       ],
-      { onReasoning: capture, onContent: capture },
+      {
+        onReasoning: (d) => emit({ type: "reasoning", text: d }),
+        onContent: (d) => emit({ type: "reasoning", text: d }),
+      },
       { model: REASONER, maxTokens: 1200, signal: controller.signal, fastProvider: true }
     );
     reasoningText = (r.reasoning || r.content || "").trim();
@@ -301,441 +468,279 @@ Reason candidate by candidate: which are the strongest ${mode === "sales" ? "cus
     }
   } finally {
     clearTimeout(budget);
-  }
-  // An abort can surface either as a partial return or as a throw. Either way,
-  // degrade to what actually streamed rather than to nothing.
-  if (!reasoningText) reasoningText = streamed.trim();
-  if (budgetHit) {
-    emit({
-      type: "status",
-      step: "reason",
-      message: reasoningText
-        ? `Analysis hit its ${Math.round(REASONING_BUDGET_MS / 1000)}s time budget. Ranking from the ${reasoningText.length} characters of reasoning that streamed before the cut.`
-        : `Analysis hit its ${Math.round(REASONING_BUDGET_MS / 1000)}s time budget before producing anything. Ranking from the candidate research instead.`,
-    });
+    mark(`R1 done (budget was ${R1_BUDGET_MS}ms)`);
   }
 
-  // Stage B — the structured-output model turns the analysis into JSON (fast).
+  // Stage B — V3 turns the analysis into reliable structured JSON.
   emit({ type: "status", step: "structure", message: "Structuring the shortlisted leads" });
-  const structureUser = `User request: ${fullPrompt}${idealLead}
+
+  // Measured on a real 10-lead run: v3.2 emits ~400 output tokens per lead and
+  // the provider was managing ~90 tok/s, so ten leads is ~45s of generation --
+  // more than the entire function budget, and no reshuffling of the time
+  // budget can create throughput that isn't there. Splitting the candidates
+  // into DISJOINT chunks structured concurrently turns that into roughly one
+  // chunk's wall-clock. Disjoint inputs mean two chunks cannot return the same
+  // company, so there is no cross-chunk dedupe to get wrong.
+  // Chunks are small on purpose. At 5 leads a chunk still ran past the budget
+  // and had to be salvaged mid-lead; at 3 it finishes cleanly, and a chunk that
+  // FINISHES is worth more than a bigger one that gets cut off.
+  const LEADS_PER_CHUNK = 3;
+  // Never make more chunks than the candidate pool can feed -- a chunk asked
+  // for more leads than it has candidates simply under-delivers.
+  const nChunks = Math.max(
+    1,
+    Math.min(4, Math.floor(candidates.length / LEADS_PER_CHUNK), Math.ceil(targetCount / LEADS_PER_CHUNK))
+  );
+  const perChunk = Math.ceil(candidates.length / nChunks);
+  const wantPerChunk = Math.ceil(targetCount / nChunks);
+
+  const structureUserFor = (slice: Candidate[], startIdx: number, want: number) => `User request: ${fullPrompt}
+Ideal lead: ${plan.criteria}
 Mode: ${mode}
 
 Candidates:
-${context}
+${renderContext(slice, startIdx)}
 
 Analyst reasoning to base your selection on:
-${reasoningText.slice(0, REASONING_FORWARD_CHARS)}
+${reasoningText.slice(0, 3000)}
 
-Output ONLY JSON of the leads worth pursuing:
-{"leads":[{"company","website","industry","location","description","contact_name","contact_role","contact_email","connection_type","connection_note","sponsorship_type","fit_score","why_fit","reasoning","source_index"}]}
+Output ONLY JSON. Return EXACTLY ${want} leads if the candidates allow it, best first. There are ${slice.length} candidates above, so returning fewer than ${want} means leaving usable prospects unsent. Include every candidate that is a plausible ${mode === "sales" ? "customer" : "sponsor"} worth one email, not only the ideal ones. Only return fewer than ${want} if the remaining candidates are genuinely unsuitable.
+{"leads":[{"company","website","industry","location","description","contact_name","contact_role","contact_email","connection_type","connection_note","sponsorship_type","why_fit","reasoning","source_index"}]}
 Rules:
 - connection_type is one of: "alum" (SFU/Enactus alum tie), "past_sponsor", "ecosystem" (SFU entrepreneurship ecosystem), or "none". Only claim a connection if the text supports it.
 - sponsorship_type: for sponsor mode an array subset of ["monetary","in_kind"]; for sales mode 1-3 short angle tags.
-- fit_score is 0-100. description is one tight sentence. why_fit is one or two sentences, concrete${mode === "sales" ? "" : ", and should name the specific Enactus SFU project this sponsor best aligns with (e.g. Nourish, Alara, Unify, SKYES, NextSpark, Renovo, SensMS, Second Savour)"}.
-- reasoning: 3 to 5 sentences about THIS company ONLY. Never mention, compare, or rank other candidates in it. Explain the concrete evidence from the research for the fit, the SFU/alumni/past-sponsor angle if any${mode === "sales" ? "" : ", which specific Enactus SFU project they should fund and why it matches them"}, how winnable the ask looks, and a suggested first ask.
+- description is one tight sentence. why_fit is ONE sentence under 100 characters${mode === "sales" ? "" : ", naming the specific Enactus SFU project this sponsor best aligns with (e.g. Nourish, Alara, Unify, SKYES, NextSpark, Renovo, SensMS, Second Savour)"}. Open with the reason, not the company name, and never restate the description.
+- Where a candidate has a VERIFIED line, take industry and location from it verbatim. Never invent an employee count, revenue figure or founding year.
+- reasoning: ONE sentence under 200 characters about THIS company ONLY -- the single strongest piece of concrete evidence from the research, then the first ask it justifies${mode === "sales" ? "" : " and the Enactus SFU project it funds"}. Never mention, compare, or rank other candidates in it. If the evidence is thin, say so instead of padding.
 - contact_email only if visible in the text; otherwise null. source_index is the [n] you used.
-- website is the company's own domain, exactly as it appears in the research. Never a LinkedIn/Facebook/directory page, never a guess or an example, and never annotated — null if the research does not show one.
 ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student club, university club/association, or anything requiring Enactus to pay a membership/fee. Only real companies, businesses, or grant-making foundations."}`;
 
-  // chatJSON already normalises the known shape variance through `coerce`, so
-  // whatever comes back is the envelope or nothing. The coercion runs inside
-  // chatJSON and cannot emit, so it records what it read into this list and the
-  // run announces it below, through the same mechanism every other level uses.
-  const envelopeDefects: ValueDefect[] = [];
-  let parsed: { leads: unknown[] } | null = null;
-  let structuringError = "";
-  try {
-    parsed =
-      (await chatJSON<{ leads: unknown[] } | null>(
+  let parsedLeads: RawLead[] | null = null;
+  let structureError: string | null = null;
+  let truncated = false;
+  // Give structuring everything that is left, minus a slice for persisting.
+  // All chunks share one deadline because they run concurrently: the budget is
+  // wall-clock, not work, so it is not divided between them.
+  const structureCtl = new AbortController();
+  const structureAllowance = Math.max(5000, msLeft() - 6000);
+  // Measured ~400 output tokens per lead at the full field set, and a run at
+  // 1800 truncated mid-JSON even for 5 leads, losing everything. Size the
+  // ceiling to what this chunk is actually asked for.
+  const structureTokens = Math.min(12_000, Math.max(2500, wantPerChunk * 420 + 600));
+  mark(`structure start (allowance ${structureAllowance}ms, ${nChunks} chunks x ${wantPerChunk} leads, ${structureTokens} tok)`);
+  const structureTimer = setTimeout(() => structureCtl.abort(), structureAllowance);
+
+  const runChunk = async (idx: number): Promise<RawLead[]> => {
+    const startIdx = idx * perChunk;
+    const slice = candidates.slice(startIdx, startIdx + perChunk);
+    if (!slice.length) return [];
+    let body = "";
+    try {
+      const s = await streamReasoner(
         [
           { role: "system", content: `${scoreSystem} Output only the JSON described, nothing else.` },
-          { role: "user", content: structureUser },
+          // Never ask a chunk for more leads than it was given candidates. At
+          // targetCount=10 with a pool of 6, each chunk saw 3 candidates and was
+          // told "there are 3 candidates above, so returning fewer than 5 means
+          // leaving usable prospects unsent" -- a false statement, and direct
+          // pressure to invent a company.
+          { role: "user", content: structureUserFor(slice, startIdx, Math.min(wantPerChunk, slice.length)) },
         ],
-        { maxTokens: 2800, schema: LEADS_SCHEMA, coerce: (raw) => coerceLeadsPayload(raw, envelopeDefects) }
-      )) ?? null;
-  } catch (e) {
-    // Say what actually went wrong. A schema rejection, a rate limit and an
-    // unparseable body used to be indistinguishable to the person waiting.
-    structuringError = (e as Error).message;
+        {},
+        {
+          model: STRUCTURER,
+          provider: STRUCTURER_PROVIDER,
+          maxTokens: structureTokens,
+          signal: structureCtl.signal,
+          temperature: 0.3,
+          json: true,
+        }
+      );
+      body = s.content;
+    } catch (e) {
+      // One slow chunk must not lose the chunks that did finish.
+      if (!structureError) structureError = (e as Error).message;
+    }
+    if (!body) return [];
+
+    // Whole-body parse first; fall back to scanning out the leads that did
+    // finish. This covers both an abort mid-stream and the model closing
+    // cleanly with slightly malformed JSON, which was observed on 3 of 12
+    // otherwise healthy calls -- in both cases the finished leads are still
+    // in the buffer.
+    // Candidates are numbered GLOBALLY in the prompt so chunks need no
+    // renumbering, but a model handed a list starting at [10] still often
+    // numbers its answers 1,2,3. Unfixed, chunk 4's "source_index: 2" resolved
+    // to a chunk-1 candidate and the lead was grounded against a page it was
+    // never shown. Only this scope knows startIdx and slice.length.
+    const remap = (l: RawLead): RawLead => {
+      const si = typeof l?.source_index === "number" ? l.source_index : NaN;
+      if (si > startIdx && si <= startIdx + slice.length) return l; // already global
+      if (si >= 1 && si <= slice.length) return { ...l, source_index: startIdx + si }; // local
+      return { ...l, source_index: undefined }; // unattributable: keep the lead, drop the link
+    };
+
+    try {
+      const whole = pluck<RawLead>(extractJSON(body), "leads");
+      // A valid EMPTY array is a parse success, not a failure: falling through
+      // to salvage on it returns whatever sibling object follows "leads": [].
+      if (whole) return whole.map(remap);
+    } catch {
+      // fall through to salvage
+    }
+    const salvaged = salvageObjects(body) as RawLead[];
+    if (salvaged.length) {
+      truncated = true;
+      mark(`chunk ${idx + 1}: salvaged ${salvaged.length} leads from a partial body (${body.length} chars)`);
+    }
+    return salvaged.map(remap);
+  };
+
+  try {
+    const chunks = await Promise.all(Array.from({ length: nChunks }, (_, i) => runChunk(i)));
+    const all = chunks.flat();
+    if (all.length) parsedLeads = all;
+  } finally {
+    clearTimeout(structureTimer);
+    mark(`structure done (${parsedLeads?.length ?? 0} leads)`);
   }
-  for (const defect of envelopeDefects) {
-    emit({ type: "status", step: "structure", message: defectMessage(defect, "response") });
+  if (!parsedLeads?.length && !structureError) {
+    structureError = structureCtl.signal.aborted
+      ? "ran out of time before structuring finished"
+      : "model returned no usable leads";
   }
-  if (!parsed) {
+  if (!parsedLeads?.length) {
+    // Keep the cause: a swallowed error here is indistinguishable from "the
+    // model had an off day", which hides real outages (bad key, dead model id,
+    // truncated output) behind a retry suggestion.
+    console.error("structure step failed:", structureError);
     emit({
       type: "error",
-      message: structuringError
-        ? `The model did not return usable results: ${structuringError}`
-        : "The model did not return usable results. Try again or rephrase.",
+      message: `The model did not return usable results (${structureError}). Try again or rephrase.`,
     });
     return;
   }
 
-  const { leads: reviewed, defects } = reviewLeads(parsed.leads ?? [], candidates.length);
-  for (const defect of defects) {
-    emit({ type: "status", step: "structure", message: defectMessage(defect, "lead") });
-  }
-
-  // One verifier for the whole run: each domain costs at most one DNS query.
-  // Every model-supplied detail is checked up front and concurrently, so a batch
-  // of leads on dead domains costs one timeout window rather than one each --
-  // this runs inside the same 60s serverless budget as the reasoning step.
-  const verify = createVerifiers();
-  const checked = await Promise.all(
-    reviewed.map(async (raw) => {
-      const [contact, site] = await Promise.all([
-        raw.contact_email ? verify.email(raw.contact_email) : null,
-        raw.website ? verify.website(raw.website) : null,
-      ]);
-      return { raw, src: resolveSource(candidates, raw.source_index), contact, site };
-    })
-  );
-
   const finalized: Lead[] = [];
-  const unsaved: string[] = [];
-  let savedCount = 0;
-  for (const { raw, src, contact, site } of checked) {
-    const { website, websiteStatus } = websiteFor(site, src);
-    const { lead, saved, error } = await persistLead(raw, { website, websiteStatus, src, mode, userName, contact });
-    finalized.push(lead);
-    if (saved) savedCount += 1;
-    if (!saved && error) {
-      unsaved.push(lead.company);
-      emit({
-        type: "status",
-        step: "persist",
-        message: `${lead.company} was NOT saved to the board: ${error}`,
-      });
+  let persistError: string | null = null;
+  // The system prompt already says to exclude membership bodies, and a real run
+  // returned one anyway. The prompt is a suggestion; this is the rule.
+  // SFU itself joins the list for the same reason: a run returned "Simon Fraser
+  // University" as a sponsor prospect for its own student club.
+  // Everything the model produced funnels through here on its way to the board,
+  // so this is where the shape is checked once rather than trusted N times.
+  // salvageObjects and pluck can both hand back a non-lead (a sibling object, a
+  // stray string); without the type test those reach the database.
+  const seenNames = new Set<string>();
+  const usable = parsedLeads.filter((raw) => {
+    if (!raw || typeof raw !== "object" || typeof raw.company !== "string" || !raw.company.trim()) return false;
+    if (isMembershipName(raw.company)) {
+      dropped.membership_org = (dropped.membership_org ?? 0) + 1;
+      return false;
     }
+    if (/^(simon fraser|sfu\b)/i.test(raw.company.trim())) return false;
+    // Chunks were assumed to be unable to collide because their inputs are
+    // disjoint. A real Langley run emitted "Otter Co-Op" three times, each as
+    // its own board row: the model names a company mentioned INSIDE a page, and
+    // two pages about one firm survive dedupeByDomain. Duplicate cards mean the
+    // same sponsor gets emailed twice by two volunteers, which is the failure
+    // that costs the relationship.
+    //
+    // Checked against the board too, not just against this run. The pre-search
+    // filter can only compare Exa PAGE TITLES to stored names, and a page title
+    // is never a bare company name, so it catches nothing by name -- and the
+    // domain half misses every board row whose website is null. This is the
+    // first point where a real company name exists to compare.
+    const key = companyKey(raw.company);
+    if (seenNames.has(key)) {
+      dropped.duplicate = (dropped.duplicate ?? 0) + 1;
+      return false;
+    }
+    if (boardNames.has(key)) {
+      alreadyKnown++;
+      return false;
+    }
+    seenNames.add(key);
+    return true;
+  });
+  // The prompt asks for exactly targetCount, but a prompt is not a guarantee:
+  // enforce the ceiling here so an over-eager run cannot clutter the board or
+  // burn credits. Under-delivery is reported honestly below instead.
+  for (const raw of usable.slice(0, targetCount)) {
+    // `?? 1` silently bound every lead with no source_index to candidate #1 --
+    // which is how one Langley candidate became three separate board rows. An
+    // unattributable lead now resolves to undefined and simply keeps no site.
+    const cand = candidates[(raw.source_index ?? 0) - 1];
+    // The fetched URL only. Taking `raw.website ||` first meant the model could
+    // supply its own domain, and the nameMatchesDomain guard below would then be
+    // checking the model's domain against the model's company name -- the guard
+    // grading its own homework, which passes.
+    const website = cand ? `https://${cand.domain}` : null;
+    const { lead, error, duplicate } = await persistLead(raw, {
+      website,
+      src: cand?.result,
+      org: cand?.org ?? null,
+      mode,
+      userName,
+    });
+    if (error && !persistError) persistError = error;
+    // Lost a race with the unique index: the company is already on the board,
+    // so it is not a new lead and must not be shown as one.
+    if (duplicate) {
+      alreadyKnown++;
+      continue;
+    }
+    finalized.push(lead);
     emit({ type: "lead", lead });
   }
 
-  if (unsaved.length) {
+  // Honour the count out loud. Silently returning 3 when 10 were asked for is
+  // exactly the behaviour that made the agent feel like it was not listening;
+  // if the funnel genuinely could not fill the order, say so and say why.
+  if (finalized.length < targetCount) {
+    const reasons = [
+      alreadyKnown ? `${alreadyKnown} were already on the board` : "",
+      ...dropReasons(dropped),
+    ].filter(Boolean);
+    emit({
+      type: "status",
+      step: "shortfall",
+      message:
+        `You asked for ${askedFor ?? targetCount} and I found ${finalized.length}` +
+        (reasons.length ? ` (${reasons.join(", ")})` : "") +
+        (truncated
+          ? `. The model ran out of time partway through, so these are the ones it finished -- run it again to fill the rest.`
+          : `. Try a broader area or a different industry angle for more.`) +
+        capTail,
+    });
+  }
+
+  // A dead database used to fail silently here: cards rendered from in-memory
+  // objects and vanished on refresh, which reads as "the agent is flaky"
+  // rather than "the database is down". Say it out loud instead. One event,
+  // not one per lead.
+  if (persistError) {
     emit({
       type: "error",
-      message:
-        `${unsaved.length} of ${finalized.length} lead${finalized.length === 1 ? "" : "s"} could not be written to the database and ` +
-        `${unsaved.length === 1 ? "is" : "are"} shown here only — reload and ${unsaved.length === 1 ? "it" : "they"} will be gone. ` +
-        `If the error mentions a missing column, run the "alter table ... add column if not exists" statements in supabase-setup.sql.`,
+      message: `These leads were NOT saved and will disappear on refresh. Database error: ${persistError}`,
     });
   }
 
   // ── 5. Save the search to history ───────────────────────────────────────
   let searchId: string | null = null;
-  if (hasServiceKey()) {
+  if (hasDatabaseUrl()) {
     try {
-      const { data } = await supabaseAdmin
-        .from(SEARCHES)
-        .insert({ prompt: fullPrompt, normalized: norm, mode, result_count: finalized.length, created_by_name: userName })
-        .select("id")
-        .single();
-      searchId = data?.id ?? null;
+      const [row] = (await db()`
+        insert into enactus_searches (prompt, normalized, mode, result_count, created_by_name)
+        values (${fullPrompt}, ${norm}, ${mode}, ${finalized.length}, ${userName})
+        returning id`) as { id: string }[];
+      searchId = row?.id ?? null;
     } catch {
-      // non-fatal
+      // non-fatal: history is a nicety, the leads themselves already persisted
     }
   }
 
-  emit({ type: "done", count: finalized.length, saved: savedCount, searchId });
-}
-
-// `source_index` is the model's claim about which candidate it used. Trust it
-// only when it actually indexes a candidate we researched: an out-of-range or
-// absent index used to silently attribute a lead to another company's page.
-function resolveSource(candidates: ExaResult[], sourceIndex: unknown): ExaResult | undefined {
-  if (typeof sourceIndex !== "number" || !Number.isInteger(sourceIndex)) return undefined;
-  if (sourceIndex < 1 || sourceIndex > candidates.length) return undefined;
-  return candidates[sourceIndex - 1];
-}
-
-// A company website is either the model's own claim or the source's hostname,
-// and both routes into the field carry the same guard: never an aggregator's
-// hostname, which belongs to the platform rather than the lead, and never a
-// domain code could not resolve. A claim that fails is recorded as unverified
-// instead of being trusted or thrown away -- the lead is always kept, because
-// the company may still be worth pursuing.
-function websiteFor(
-  claimed: WebsiteCheck | null,
-  src?: ExaResult
-): { website: string | null; websiteStatus: string | null } {
-  const fromSource = sourceWebsite(src);
-  if (!claimed) return { website: fromSource, websiteStatus: null };
-  if (claimed.ok) return { website: claimed.url, websiteStatus: null };
-  return { website: fromSource, websiteStatus: unverifiedWebsiteNote(claimed) };
-}
-
-// The search engine actually returned this URL, so its hostname is evidence
-// rather than a model claim -- but it is still only the company's own site when
-// it is not a platform that hosts pages about companies.
-function sourceWebsite(src?: ExaResult): string | null {
-  if (!src) return null;
-  const host = domainOf(src.url);
-  if (!host || isAggregatorHost(host)) return null;
-  return `https://${host}`;
-}
-
-// This note explains a REJECTED CLAIM, and any website shown alongside it came
-// from somewhere else, so it has to name the model as the source of the string
-// rather than read as a warning about the site on the card.
-function unverifiedWebsiteNote(check: Exclude<WebsiteCheck, { ok: true }>): string {
-  switch (check.reason) {
-    case "format":
-      return `rejected: the model claimed ${check.url}, which is not a usable web address`;
-    case "aggregator":
-      return `rejected: the model claimed ${check.url}, which is a social or directory page rather than a company site`;
-    case "domain":
-      return `rejected: the model claimed ${check.url}, which does not resolve`;
-    default:
-      return `not verified: the model claimed ${check.url}, and the domain lookup did not complete`;
-  }
-}
-
-const LEADS_SUBJECT = "The leads response";
-
-// What the envelope has to carry for there to be anything to act on: one lead
-// object with a name to put on a card. Everything else about a lead is checked
-// per field, per lead, by reviewLeads.
-const LEADS_LIST_SCHEMA: Record<string, unknown> = {
-  type: "array",
-  items: { type: "object", required: ["company"], properties: { company: { type: "string" } } },
-};
-
-// The structuring model returns `{"leads":[...]}` most of the time and a bare
-// top-level array the rest of the time. Live testing measured the bare array at
-// 53% of completed runs, and every lead in those runs used to be thrown away.
-// Accept both shapes.
-//
-// A lone lead where a list was asked for -- `{"leads":{...}}`, or the bare lead
-// object on its own -- is the same single reading recoverValue applies to every
-// other field, and it is applied here, at the earliest boundary both shapes pass
-// through, rather than being re-derived downstream. It is recorded on `defects`
-// so the caller announces it: this arrives after the searches and the reasoning
-// stage, and used to discard a usable lead outright. A payload with nothing
-// lead-shaped in it still has nothing to act on, and still stops the run.
-function coerceLeadsPayload(p: unknown, defects: ValueDefect[]): { leads: unknown[] } | null {
-  if (Array.isArray(p)) return { leads: p };
-  if (!p || typeof p !== "object") return null;
-
-  const envelope = p as Record<string, unknown>;
-  if (Array.isArray(envelope.leads)) return { leads: envelope.leads };
-
-  const lone = envelope.leads === undefined ? envelope : envelope.leads;
-  const recovered = recoverValue(LEADS_LIST_SCHEMA, lone);
-  if (!recovered) return null;
-
-  defects.push({
-    subject: LEADS_SUBJECT,
-    field: "leads",
-    detail: `read ${describeValue(lone)} as a list of one lead`,
-    action: "coerced",
-  });
-  return { leads: recovered.value as unknown[] };
-}
-
-const PLAN_SUBJECT = "The search plan";
-
-interface PlanReview {
-  /** Null only when the next step has nothing to act on. */
-  plan: Plan | null;
-  defects: ValueDefect[];
-  /** Why the run cannot continue, when it cannot. */
-  blocker: string | null;
-}
-
-/**
- * Checks the plan field by field, on the same contract reviewLeads uses.
- *
- * A malformed optional field -- `altAngle` is a cosmetic hint about a different
- * search angle -- costs that field and nothing else. A wrong type with one
- * possible reading is recovered. Only `searchQueries` can stop the run, and only
- * when it yields no query at all: at that point there is genuinely nothing to
- * search, which is a real stop rather than a degradation.
- */
-function reviewPlan(entry: unknown): PlanReview {
-  const defects: ValueDefect[] = [];
-  const raw = readEnvelope(entry, PLAN_SUBJECT, "plan", defects);
-  if (!raw) {
-    return { plan: null, defects, blocker: `the model returned ${describeValue(entry)} instead of a plan` };
-  }
-
-  const claimedQueries = raw.searchQueries;
-  reviewFields(PLAN_SUBJECT, raw, PLAN_PROPERTIES, defects);
-
-  // When no query survives, the blocker names what the model sent and is the one
-  // report of that loss, however the list arrived -- recovered entry by entry
-  // here or by reviewFields above. Reporting the same loss twice is its own kind
-  // of noise.
-  const searchQueries = stringList(raw.searchQueries, "searchQueries", defects);
-  if (!searchQueries.length) {
-    return {
-      plan: null,
-      defects: defects.filter((d) => d.field !== "searchQueries"),
-      blocker: missingQueriesReason(claimedQueries),
-    };
-  }
-
-  // criteria only sharpens the ranking prompt, which also carries the user's own
-  // request, so losing it degrades the run rather than ending it. Announce it,
-  // unless reviewFields already reported the value it arrived as.
-  const criteria = typeof raw.criteria === "string" ? raw.criteria.trim() : "";
-  if (!criteria && !defects.some((d) => d.field === "criteria")) {
-    defects.push({
-      subject: PLAN_SUBJECT,
-      field: "criteria",
-      detail: "the model described no ideal lead, so ranking runs on the request alone",
-      action: "ignored",
-    });
-  }
-
-  return {
-    plan: {
-      needClarification: raw.needClarification === true,
-      questions: stringList(raw.questions, "questions", defects),
-      searchQueries,
-      criteria,
-      altAngle: typeof raw.altAngle === "string" ? raw.altAngle : "",
-      location: typeof raw.location === "string" ? raw.location : "",
-    },
-    defects,
-    blocker: null,
-  };
-}
-
-// Say what was actually missing. "Planning failed" told the user nothing about
-// which part of the plan was unusable, or that the rest of it was fine.
-function missingQueriesReason(claimed: unknown): string {
-  if (claimed === undefined) return "the plan came back with no searchQueries at all";
-  if (Array.isArray(claimed) && !claimed.length) return "the plan came back with an empty searchQueries list";
-  return `no usable query survived in searchQueries (the model sent ${describeValue(claimed)})`;
-}
-
-// An entry with nothing in it costs that entry and nothing else -- but it is
-// still a loss, and a silent repair teaches nobody that the model is misbehaving,
-// so what was dropped is reported like every other degradation.
-function stringList(value: unknown, field: string, defects: ValueDefect[]): string[] {
-  if (!Array.isArray(value)) return [];
-  const kept: string[] = [];
-  const dropped: unknown[] = [];
-  for (const entry of value) {
-    if (typeof entry === "string" && entry.trim().length > 0) kept.push(entry);
-    else dropped.push(entry);
-  }
-  if (dropped.length) {
-    defects.push({
-      subject: PLAN_SUBJECT,
-      field,
-      detail: `${dropped.length} of ${value.length} ${field} entries were empty (${describeValue(dropped)}), leaving ${kept.length}`,
-      action: "ignored",
-    });
-  }
-  return kept;
-}
-
-// The name is what decides whether this record can be put on a card at all, so
-// it is read on the same single-reading rule as every field behind it: a lone
-// name in a list of one is that name. A name with no single reading leaves the
-// field as it arrived, and the caller drops the lead naming what it got.
-function readCompany(raw: Record<string, unknown>, defects: ValueDefect[]): string {
-  const claimed = raw.company;
-  if (typeof claimed === "string" && claimed.trim()) return claimed.trim();
-
-  const recovered = recoverValue(LEAD_PROPERTIES.company, claimed);
-  if (!recovered || typeof recovered.value !== "string" || !recovered.value.trim()) return "";
-
-  defects.push({
-    subject: recovered.value.trim(),
-    field: "company",
-    detail: `read company ${describeValue(claimed)} as ${describeValue(recovered.value)}`,
-    action: "coerced",
-  });
-  raw.company = recovered.value;
-  return recovered.value.trim();
-}
-
-/**
- * Checks each lead on its own, field by field, through the shared mechanism in
- * `src/lib/review.ts`.
- *
- * One bad field costs that field and nothing else. A wrong type with a single
- * possible reading is recovered; anything else is removed so persistLead's
- * existing normalisation supplies the default. Either way the model's slip is
- * reported rather than swallowed. A record is dropped only when it is genuinely
- * unusable -- no company name to put on a card. A defect in one lead never
- * touches another lead in the same response.
- */
-function reviewLeads(entries: unknown[], candidateCount: number): { leads: RawLead[]; defects: ValueDefect[] } {
-  const leads: RawLead[] = [];
-  const defects: ValueDefect[] = [];
-
-  entries.forEach((entry, i) => {
-    const position = `lead ${i + 1}`;
-    const raw = readEnvelope(entry, position, "lead", defects);
-    if (!raw) {
-      defects.push({
-        subject: position,
-        field: "lead",
-        detail: `expected an object, got ${describeValue(entry)}`,
-        action: "dropped",
-      });
-      return;
-    }
-
-    const claimedCompany = raw.company;
-    const company = readCompany(raw, defects);
-    if (!company) {
-      defects.push({
-        subject: position,
-        field: "company",
-        detail: `no usable company name (got ${describeValue(claimedCompany)})`,
-        action: "dropped",
-      });
-      return;
-    }
-
-    reviewFields(company, raw, LEAD_PROPERTIES, defects);
-
-    // The schema this run sends permits null, so null is the model saying it
-    // found no tie, not a defect. Any other unrecognised value is a claim about
-    // a real relationship, and is reported rather than quietly becoming "none".
-    if (raw.connection_type != null && !(CONNECTION_TYPES as string[]).includes(raw.connection_type as string)) {
-      defects.push({
-        subject: company,
-        field: "connection_type",
-        detail: `expected one of ${CONNECTION_TYPES.join(", ")}, got ${describeValue(raw.connection_type)}`,
-        action: "ignored",
-      });
-      delete raw.connection_type;
-    }
-
-    // An index that points at no candidate is a fabricated attribution, which is
-    // a louder slip than a mistyped field, so it cannot be the one that passes
-    // unannounced. The lead is still kept, with no source rather than a wrong one.
-    const claimedSource = raw.source_index;
-    if (claimedSource == null) {
-      defects.push({
-        subject: company,
-        field: "source_index",
-        detail: "the model named no source, so this lead is kept without one",
-        action: "ignored",
-      });
-    } else if (
-      typeof claimedSource !== "number" ||
-      !Number.isInteger(claimedSource) ||
-      claimedSource < 1 ||
-      claimedSource > candidateCount
-    ) {
-      defects.push({
-        subject: company,
-        field: "source_index",
-        detail: `the model cited candidate ${describeValue(claimedSource)}, but only ${candidateCount} were researched`,
-        action: "ignored",
-      });
-      delete raw.source_index;
-    }
-
-    leads.push(raw as unknown as RawLead);
-  });
-
-  return { leads, defects };
+  emit({ type: "done", count: finalized.length, searchId });
 }
 
 interface RawLead {
@@ -750,91 +755,124 @@ interface RawLead {
   connection_type?: string;
   connection_note?: string | null;
   sponsorship_type?: string[];
-  fit_score?: number;
   why_fit?: string | null;
   reasoning?: string | null;
   source_index?: number;
-}
-
-// An address the model produced that code could not verify. Kept on the record
-// so a human can chase it down, never handed to the drafting or Gmail path.
-function unverifiedNote(check: Exclude<EmailCheck, { ok: true }>): string {
-  const why =
-    check.reason === "format"
-      ? "not a valid email address"
-      : check.reason === "domain"
-        ? "domain has no mail record"
-        : "the domain lookup did not complete, so this was never checked";
-  return `unverified (${why}): ${check.email}`;
-}
-
-// A lead the database accepted, or the same lead in memory plus the reason it
-// was not written. `saved` is never true unless a row actually came back.
-interface PersistResult {
-  lead: Lead;
-  saved: boolean;
-  error: string | null;
 }
 
 async function persistLead(
   raw: RawLead,
   ctx: {
     website: string | null;
-    websiteStatus: string | null;
     src?: ExaResult;
+    org: ApolloOrg | null;
     mode: Mode;
     userName: string;
-    contact: EmailCheck | null;
   }
-): Promise<PersistResult> {
-  // An unrecognised connection_type costs this field and nothing else.
-  const conn = (CONNECTION_TYPES as string[]).includes(raw.connection_type ?? "")
-    ? (raw.connection_type as ConnectionType)
-    : "none";
+): Promise<{ lead: Lead; error: string | null; duplicate?: boolean }> {
+  // Every claim about a PERSON or a shared history has to survive the evidence
+  // we actually fetched. This runs first so there is no path into the database
+  // that skips it. Uses the full ExaResult, not the 700-char slice the model
+  // saw, so a real contact further down the page is not thrown away.
+  const evidence = [
+    ctx.src?.title,
+    ctx.src?.text,
+    ctx.src?.highlights?.join(" "),
+    orgFacts(ctx.org),
+    ctx.org?.name,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const safe = grounded(raw, evidence, ctx.website ? domainOf(ctx.website) : null);
+
+  const conn = (["alum", "past_sponsor", "ecosystem", "none"].includes(safe.connection_type ?? "")
+    ? safe.connection_type
+    : "none") as ConnectionType;
+
+  // Apollo's values win over the model's wherever it has them: these are the
+  // fields most likely to be confabulated, and Apollo's are looked up.
+  const apolloLocation = [ctx.org?.city, ctx.org?.state].filter(Boolean).join(", ") || null;
+
+  // Everything below is inherited from the candidate PAGE. If the company the
+  // model named is not that page's owner, the page's domain and the publisher's
+  // Apollo facts belong to someone else -- an empty website is a smaller error
+  // than a confident link to the wrong company.
+  const company = raw.company || ctx.org?.name || "Unknown";
+  const siteIsTheirs = nameMatchesDomain(company, ctx.website ? domainOf(ctx.website) : null);
 
   const row = {
-    company: raw.company || "Unknown",
-    website: ctx.website,
-    website_status: ctx.websiteStatus,
-    industry: raw.industry ?? null,
+    company,
+    website: siteIsTheirs ? ctx.website : null,
+    industry: (siteIsTheirs ? ctx.org?.industry : null) ?? raw.industry ?? null,
     description: raw.description ?? null,
-    contact_name: raw.contact_name ?? null,
-    contact_role: raw.contact_role ?? null,
-    contact_email: ctx.contact?.ok ? ctx.contact.email : null,
-    contact_email_status: ctx.contact && !ctx.contact.ok ? unverifiedNote(ctx.contact) : null,
-    location: raw.location ?? null,
+    contact_name: safe.contact_name ?? null,
+    contact_role: safe.contact_role ?? null,
+    contact_email: safe.contact_email ?? null,
+    location: (siteIsTheirs ? apolloLocation : null) ?? raw.location ?? null,
     connection_type: conn,
-    connection_note: raw.connection_note ?? null,
+    connection_note: safe.connection_note ?? null,
     sponsorship_type: Array.isArray(raw.sponsorship_type) ? raw.sponsorship_type : [],
-    fit_score: typeof raw.fit_score === "number" ? Math.max(0, Math.min(100, Math.round(raw.fit_score))) : null,
+    // Retired. The 0-100 number was invented by the model, not computed from
+    // anything, and it made volunteers skip lead #7 for no real reason. The
+    // column stays so old rows still read; nothing writes it now.
+    fit_score: null as number | null,
     why_fit: raw.why_fit ?? null,
-    // Per-company reasoning only. The shared analyst trace discusses every
-    // candidate together, which the structuring prompt explicitly forbids a
-    // lead's reasoning from doing, so it is never borrowed here. If the model
-    // gave nothing company-specific, fall back to this company's own why_fit,
-    // then leave the field empty.
-    reasoning: (raw.reasoning && raw.reasoning.trim()) || (raw.why_fit && raw.why_fit.trim()) || null,
+    // Per-company only. ctx.reasoningTrace was up to 4000 chars of the SHARED
+    // analyst trace about EVERY candidate in the run, so whenever V3 omitted a
+    // company-specific reasoning, every card in that run got the same dump
+    // comparison-shopping other companies under a panel titled "Why we chose
+    // {company}" -- the exact thing the prompt above forbids. why_fit was the
+    // next fallback and it is already on the card, so it only made the
+    // disclosure a duplicate. Nothing to say is honest.
+    reasoning: raw.reasoning?.trim() || null,
     sources: ctx.src ? [{ url: ctx.src.url, title: ctx.src.title ?? undefined }] : [],
     status: "prospects" as const,
     mode: ctx.mode,
     created_by_name: ctx.userName,
   };
 
-  const now = new Date().toISOString();
-  const inMemory = { id: crypto.randomUUID(), board_order: 0, created_at: now, updated_at: now, ...row } as Lead;
-
-  if (!hasServiceKey()) return { lead: inMemory, saved: false, error: null };
-
-  // The insert can fail for reasons the model has nothing to do with -- the
-  // commonest being a project that has not run the additive column migrations in
-  // supabase-setup.sql. Returning a plausible in-memory lead and calling it saved
-  // is the worst shape this codebase has: the board looks full and is empty on
-  // reload. Keep the object for display, but say what happened.
-  try {
-    const { data, error } = await supabaseAdmin.from(LEADS).insert(row).select("*").single();
-    if (!error && data) return { lead: data as Lead, saved: true, error: null };
-    return { lead: inMemory, saved: false, error: error?.message || "the database accepted the insert but returned no row" };
-  } catch (e) {
-    return { lead: inMemory, saved: false, error: (e as Error).message };
+  let error: string | null = null;
+  if (hasDatabaseUrl()) {
+    try {
+      const [saved] = await db()`
+        insert into enactus_leads (
+          company, website, industry, description, contact_name, contact_role,
+          contact_email, location, connection_type, connection_note,
+          sponsorship_type, fit_score, why_fit, reasoning, sources, status,
+          mode, created_by_name
+        ) values (
+          ${row.company}, ${row.website}, ${row.industry}, ${row.description},
+          ${row.contact_name}, ${row.contact_role}, ${row.contact_email},
+          ${row.location}, ${row.connection_type}, ${row.connection_note},
+          ${row.sponsorship_type}::text[], ${row.fit_score}, ${row.why_fit},
+          ${row.reasoning}, ${JSON.stringify(row.sources)}::jsonb, ${row.status},
+          ${row.mode}, ${row.created_by_name}
+        )
+        on conflict do nothing
+        returning *`;
+      if (saved) return { lead: saved as Lead, error: null };
+      // No row means the unique index rejected it as a company already on the
+      // board -- NOT a failure. Reported as an error, this showed the volunteer
+      // a red database message for the one case the constraint exists to
+      // handle. Hand back the row that is already there and say so.
+      const [existing] = await db()`
+        select * from enactus_leads
+        where mode = ${row.mode} and lower(btrim(company)) = lower(btrim(${row.company}))
+        limit 1`;
+      if (existing) return { lead: existing as Lead, error: null, duplicate: true };
+      error = "insert returned no row";
+    } catch (e) {
+      error = (e as Error).message;
+    }
+  } else {
+    error = "DATABASE_URL missing";
   }
+
+  // Still hand back a usable card so the run's work isn't lost, but the caller
+  // now knows it is unsaved and tells the user.
+  const now = new Date().toISOString();
+  return {
+    lead: { id: crypto.randomUUID(), board_order: 0, created_at: now, updated_at: now, ...row } as Lead,
+    error,
+  };
 }

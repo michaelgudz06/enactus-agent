@@ -1,11 +1,9 @@
-import crypto from "crypto";
-
 // Per-browser Gmail connection. Each teammate connects their own Google account.
-// Tokens live in a signed, httpOnly cookie (never exposed to JS).
+// Tokens live in a signed, httpOnly cookie (never exposed to JS) -- the same
+// signCookie/readCookie pair the session cookie uses, in auth.ts.
 
-const SECRET = process.env.SESSION_SECRET || "dev-secret-change-me";
 export const GMAIL_COOKIE = "gmail_tokens";
-export const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.compose";
+const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.compose";
 
 export interface GmailTokens {
   access_token: string;
@@ -17,24 +15,6 @@ export function hasGoogleConfig(): boolean {
   const id = process.env.GOOGLE_CLIENT_ID;
   const secret = process.env.GOOGLE_CLIENT_SECRET;
   return Boolean(id && secret && !id.startsWith("REPLACE") && !secret.startsWith("REPLACE"));
-}
-
-export function signCookie(data: unknown): string {
-  const payload = Buffer.from(JSON.stringify(data)).toString("base64url");
-  const sig = crypto.createHmac("sha256", SECRET).update(payload).digest("hex");
-  return `${payload}.${sig}`;
-}
-
-export function readCookie<T>(value: string | undefined): T | null {
-  if (!value) return null;
-  const [payload, sig] = value.split(".");
-  if (!payload || !sig) return null;
-  if (crypto.createHmac("sha256", SECRET).update(payload).digest("hex") !== sig) return null;
-  try {
-    return JSON.parse(Buffer.from(payload, "base64url").toString()) as T;
-  } catch {
-    return null;
-  }
 }
 
 export function authUrl(state: string): string {
@@ -85,10 +65,20 @@ export async function ensureAccessToken(tokens: GmailTokens): Promise<GmailToken
   return { access_token: d.access_token, refresh_token: tokens.refresh_token, expiry: Date.now() + (d.expires_in ?? 3600) * 1000 };
 }
 
+// Header values are joined with CRLF below, so a newline inside one ends the
+// header and starts another. `to` and `subject` originate from lead data the
+// model wrote, which makes this a trust boundary: an address containing
+// "\r\nBcc:" would add recipients to a draft the user is about to send.
+const headerSafe = (s: string) => s.replace(/[\r\n]+/g, " ").trim();
+
 export async function createDraft(accessToken: string, to: string, subject: string, body: string): Promise<string> {
+  const cleanTo = headerSafe(to);
+  if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(cleanTo)) {
+    throw new Error(`Refusing to draft: "${to}" is not a valid email address.`);
+  }
   const mime = [
-    `To: ${to}`,
-    `Subject: ${subject}`,
+    `To: ${cleanTo}`,
+    `Subject: ${headerSafe(subject)}`,
     'Content-Type: text/plain; charset="UTF-8"',
     "MIME-Version: 1.0",
     "",
