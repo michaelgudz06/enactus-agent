@@ -55,19 +55,19 @@ export interface EmailDraft {
   created_at: string;
 }
 
-export const STATUS_COLUMNS: { id: Status; label: string; emoji: string; color: string }[] = [
-  { id: "prospects", label: "Prospects", emoji: "🎯", color: "#818cf8" },
-  { id: "researched", label: "Researched", emoji: "🔍", color: "#f59e0b" },
-  { id: "outreach_sent", label: "Outreach Sent", emoji: "📨", color: "#38bdf8" },
-  { id: "in_conversation", label: "In Conversation", emoji: "💬", color: "#34d399" },
-  { id: "closed_won", label: "Closed / Won", emoji: "✅", color: "#f87171" },
+export const STATUS_COLUMNS: { id: Status; label: string; color: string }[] = [
+  { id: "prospects", label: "Prospects", color: "#818cf8" },
+  { id: "researched", label: "Researched", color: "#f59e0b" },
+  { id: "outreach_sent", label: "Outreach Sent", color: "#38bdf8" },
+  { id: "in_conversation", label: "In Conversation", color: "#34d399" },
+  { id: "closed_won", label: "Closed / Won", color: "#f87171" },
 ];
 
-export const CONNECTION_META: Record<ConnectionType, { label: string; icon: string; color: string }> = {
-  alum: { label: "SFU Alum", icon: "🎓", color: "#c4b5fd" },
-  past_sponsor: { label: "Past Sponsor", icon: "⭐", color: "#F5C842" },
-  ecosystem: { label: "SFU Ecosystem", icon: "🌱", color: "#34d399" },
-  none: { label: "New Lead", icon: "🆕", color: "#9aa1ac" },
+export const CONNECTION_META: Record<ConnectionType, { label: string; color: string }> = {
+  alum: { label: "SFU Alum", color: "#c4b5fd" },
+  past_sponsor: { label: "Past Sponsor", color: "#F5C842" },
+  ecosystem: { label: "SFU Ecosystem", color: "#34d399" },
+  none: { label: "New Lead", color: "#9aa1ac" },
 };
 
 // Streaming event contract between the agent route and the client.

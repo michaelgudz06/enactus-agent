@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Search, RefreshCw } from "lucide-react";
 import { useApp } from "@/components/AppShell";
 import { Lead, Status, STATUS_COLUMNS } from "@/lib/types";
 import LeadCard from "@/components/LeadCard";
 import EmailModal from "@/components/EmailModal";
+import LeadDetail from "@/components/LeadDetail";
 
 export default function BoardPage() {
   const { mode } = useApp();
@@ -15,7 +16,9 @@ export default function BoardPage() {
   const [dragId, setDragId] = useState<string | null>(null);
   const [overCol, setOverCol] = useState<Status | null>(null);
   const [emailLead, setEmailLead] = useState<Lead | null>(null);
+  const [detailLead, setDetailLead] = useState<Lead | null>(null);
   const [warning, setWarning] = useState("");
+  const pressAt = useRef({ x: 0, y: 0 });
 
   async function load() {
     setLoading(true);
@@ -26,7 +29,8 @@ export default function BoardPage() {
     setLoading(false);
   }
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [mode]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- load() is stable enough; mode is the only real trigger
+  useEffect(() => { load(); }, [mode]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -77,13 +81,12 @@ export default function BoardPage() {
 
       {warning && (
         <div className="mx-5 mt-3 text-xs rounded-lg px-3 py-2" style={{ background: "rgba(230,57,70,.1)", color: "var(--text)" }}>
-          {warning} — leads can’t load until the Supabase service-role key is added to the environment.
+          {warning} — leads can’t load until DATABASE_URL is set in the environment.
         </div>
       )}
 
       {!loading && !warning && leads.length === 0 && (
         <div className="mx-5 mt-4 rounded-xl border p-4 flex items-center gap-3 animate-in" style={{ background: "var(--surface)", borderColor: "var(--border)" }}>
-          <span className="text-xl">🎯</span>
           <div className="text-sm">
             <div className="font-semibold">Your pipeline is empty.</div>
             <div style={{ color: "var(--muted)" }}>
@@ -112,7 +115,7 @@ export default function BoardPage() {
                 <div className="flex items-center justify-between px-3.5 py-3 border-b" style={{ borderColor: "var(--border)" }}>
                   <div className="flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full" style={{ background: col.color }} />
-                    <span className="text-sm font-semibold">{col.emoji} {col.label}</span>
+                    <span className="text-sm font-semibold">{col.label}</span>
                   </div>
                   <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: "var(--surface3)", color: "var(--muted)" }}>{items.length}</span>
                 </div>
@@ -126,14 +129,30 @@ export default function BoardPage() {
                     <div className="text-xs text-center py-8" style={{ color: "var(--faint)" }}>Drop leads here</div>
                   ) : (
                     items.map((l) => (
-                      <LeadCard
+                      // Opening the panel is wired here rather than in LeadCard
+                      // because the agent page uses the same card without a
+                      // board to open into.
+                      <div
                         key={l.id}
-                        lead={l}
-                        draggable
-                        onDragStart={() => setDragId(l.id)}
-                        onEmail={setEmailLead}
-                        onDelete={del}
-                      />
+                        onPointerDown={(e) => { pressAt.current = { x: e.clientX, y: e.clientY }; }}
+                        onClick={(e) => {
+                          // A finished drag still lands as a click in some
+                          // browsers, so travel is what separates the two --
+                          // cheaper and less leaky than a drag-state flag.
+                          if (Math.hypot(e.clientX - pressAt.current.x, e.clientY - pressAt.current.y) > 4) return;
+                          // The card's own buttons and links keep their jobs.
+                          if ((e.target as HTMLElement).closest("button, a")) return;
+                          setDetailLead(l);
+                        }}
+                      >
+                        <LeadCard
+                          lead={l}
+                          draggable
+                          onDragStart={() => setDragId(l.id)}
+                          onEmail={setEmailLead}
+                          onDelete={del}
+                        />
+                      </div>
                     ))
                   )}
                 </div>
@@ -144,6 +163,7 @@ export default function BoardPage() {
       </div>
 
       {emailLead && <EmailModal lead={emailLead} onClose={() => setEmailLead(null)} />}
+      {detailLead && <LeadDetail lead={detailLead} onClose={() => setDetailLead(null)} />}
     </div>
   );
 }

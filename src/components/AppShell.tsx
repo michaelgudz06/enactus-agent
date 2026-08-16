@@ -8,17 +8,15 @@ import { Mode } from "@/lib/types";
 
 interface Ctx {
   mode: Mode;
-  setMode: (m: Mode) => void;
   name: string;
 }
-const AppCtx = createContext<Ctx>({ mode: "sponsor", setMode: () => {}, name: "" });
+const AppCtx = createContext<Ctx>({ mode: "sponsor", name: "" });
 export const useApp = () => useContext(AppCtx);
 
 export default function AppShell({ name, children }: { name: string; children: React.ReactNode }) {
   // Sponsor-focused: the tool is geared entirely toward sponsorship outreach for
   // VP External. (Sales mode still exists in the backend and can be re-enabled.)
   const mode: Mode = "sponsor";
-  const setMode = () => {};
   const pathname = usePathname();
   const router = useRouter();
 
@@ -33,8 +31,11 @@ export default function AppShell({ name, children }: { name: string; children: R
   ];
 
   return (
-    <AppCtx.Provider value={{ mode, setMode, name }}>
-      <div className="min-h-screen flex flex-col">
+    <AppCtx.Provider value={{ mode, name }}>
+      {/* h-screen, not min-h-screen: both pages scroll inside themselves (the
+          chat transcript, the board's columns), so the shell has to be exactly
+          the viewport for `flex-1 min-h-0` below to resolve to a real height. */}
+      <div className="h-screen flex flex-col">
         <header
           className="sticky top-0 z-50 flex items-center justify-between px-5 py-3 border-b"
           style={{ background: "var(--surface)", borderColor: "var(--border)" }}
