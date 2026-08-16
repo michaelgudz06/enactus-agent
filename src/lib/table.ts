@@ -21,7 +21,6 @@ export interface LeadFilters {
   owner?: string[];
   createdBy?: string[];
   industry?: string[];
-  connection?: string[];
   email?: EmailFilter;
   /** Only rows the caller's isDue() says are overdue. */
   due?: boolean;
@@ -87,7 +86,6 @@ export function filterLeads<T extends object>(
     if (on(f.createdBy) && !f.createdBy!.includes(personKey(get(r, "created_by_name")))) return false;
     // Word match, not value match -- see industryFacets for why.
     if (on(f.industry) && !f.industry!.some((w) => industryMatches(r, w))) return false;
-    if (on(f.connection) && !f.connection!.includes(str(get(r, "connection_type")) || "none")) return false;
 
     if (f.email === "has" && !str(get(r, "contact_email")).includes("@")) return false;
     // Not `=== ""`: a row can carry a value that is not a usable address, and

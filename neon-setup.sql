@@ -171,9 +171,10 @@ alter table enactus_leads add column if not exists owner_name text;
 alter table enactus_email_drafts add column if not exists to_email text;
 
 -- The stage vocabulary, enforced by the database rather than by remembering to
--- guard every write path -- POST /api/leads still interpolates b.status raw, so
--- a typo could file a card under a stage no column renders and leave no way to
--- drag it back. ADD CONSTRAINT has no IF NOT EXISTS, hence the DO block, which
+-- guard every write path. The route that interpolated b.status raw is gone and
+-- every remaining writer validates, so this is now belt-and-braces -- which is
+-- the point: a typo here files a card under a stage no column renders, leaving
+-- no way to drag it back. ADD CONSTRAINT has no IF NOT EXISTS, hence the DO block, which
 -- is what keeps this file rerunnable against a live database.
 do $$ begin
   alter table enactus_leads add constraint enactus_leads_status_chk

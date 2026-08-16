@@ -74,7 +74,6 @@ function domainOf(url: string): string {
   }
 }
 
-const msLeftFrom = (deadline: number) => deadline - Date.now();
 
 // Drop reasons, rendered for a human. Any reason without a label is skipped
 // rather than printed: a new drop reason added without a sentence rendered as
@@ -343,7 +342,7 @@ export async function runAgent(
   if (hasApolloKey() && candidates.length) {
     const enriched = await enrichDomains(
       candidates.map((c) => c.domain).filter(Boolean),
-      { signal: AbortSignal.timeout(Math.max(2000, Math.min(8000, msLeftFrom(RUN_DEADLINE) - 20_000))) }
+      { signal: AbortSignal.timeout(Math.max(2000, Math.min(8000, RUN_DEADLINE - Date.now() - 20_000))) }
     );
     for (const c of candidates) c.org = enriched.get(c.domain) ?? null;
     mark(`apollo done`);

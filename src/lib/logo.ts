@@ -6,7 +6,7 @@
 // copy against the original.
 
 // Social and aggregator profiles are never a logo source. lead.website is
-// model-written and POST /api/leads takes b.website unvalidated, so this is the
+// model-written and stored unvalidated, so this is the
 // standing "never link LinkedIn" rule enforced where the request is actually
 // made, not in a prompt. Dot-anchored, so linkedinsurance.com is a real company.
 const SOCIAL = /(^|\.)(linkedin|facebook|instagram|twitter|x|youtube|tiktok|yelp|crunchbase|indeed|glassdoor)\./;
@@ -21,7 +21,7 @@ const SOCIAL = /(^|\.)(linkedin|facebook|instagram|twitter|x|youtube|tiktok|yelp
  */
 export function logoUrl(website: string | null | undefined): string | null {
   if (!website) return null;
-  // POST /api/leads stores `${b.website ?? null}` unvalidated, so the value
+  // The website column is stored unvalidated, so the value
   // arrives however the model wrote it: padded, or upper-case scheme.
   const raw = website.trim();
   let host: string;

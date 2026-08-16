@@ -586,7 +586,7 @@ eq(logoUrl(null), null, "null website -> monogram, which is 25% of the board");
 eq(logoUrl(""), null, "empty website -> monogram");
 eq(logoUrl("not a url"), null, "unparseable -> monogram, never a broken request");
 eq(logoUrl("https://localhost"), null, "no dot is not a company domain");
-// POST /api/leads stores `${b.website ?? null}` unvalidated, so the column holds
+// The website column is stored unvalidated, so it holds
 // whatever the model wrote. Each of these fell back to a monogram before.
 eq(logoUrl("  https://vancity.com  "), G("vancity.com"), "padded value is trimmed, not treated as unparseable");
 eq(logoUrl("HTTPS://vancity.com"), G("vancity.com"), "scheme match is case-insensitive");

@@ -183,6 +183,13 @@ export function disqualify(
   // The name test is the one check that does not need an Apollo record: the
   // name is itself the evidence. Everything below still requires Apollo to have
   // positively told us something is wrong.
+  //
+  // Known limit: `!org` means "Apollo said nothing", and a 429 or an exhausted
+  // credit balance is indistinguishable here from a genuine no-record. On a bad
+  // Apollo day that silently switches the wrong_region and defunct checks off
+  // while the run still reports full confidence. Letting the candidate through
+  // is the right default for a corner store with no Apollo footprint; the fix
+  // for the other case is for enrichDomains to report its failure count up.
   if (isMembershipName(org?.name ?? opts.name)) return "membership_org";
   if (!org) return null;
   if (org.employees === 0) return "defunct";

@@ -56,18 +56,6 @@ export interface SearchRow {
   created_at: string;
 }
 
-export interface EmailDraft {
-  id: string;
-  lead_id: string;
-  subject: string | null;
-  body: string | null;
-  gmail_draft_id: string | null;
-  to_email: string | null;
-  status: "draft" | "created_in_gmail" | "sent";
-  created_by_name: string | null;
-  created_at: string;
-}
-
 export const STATUS_COLUMNS: { id: Status; label: string; color: string }[] = [
   { id: "prospects", label: "Prospects", color: "#818cf8" },
   { id: "researched", label: "Researched", color: "#f59e0b" },
