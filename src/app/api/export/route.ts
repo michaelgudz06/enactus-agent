@@ -1,5 +1,4 @@
-import crypto from "crypto";
-import { getSession } from "@/lib/auth";
+import { getSession, secretMatches } from "@/lib/auth";
 import { db, hasDatabaseUrl } from "@/lib/db";
 import { toCsv } from "@/lib/csv";
 
@@ -18,15 +17,8 @@ export const maxDuration = 60;
  * time and is simply unavailable if the variable is unset -- an absent token
  * must never mean "everyone is allowed".
  */
-function tokenMatches(header: string | null): boolean {
-  const expected = process.env.BACKUP_TOKEN || "";
-  if (!expected) return false;
-  const given = (header ?? "").replace(/^Bearer\s+/i, "");
-  const a = Buffer.from(given);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
-}
+const tokenMatches = (header: string | null): boolean =>
+  secretMatches((header ?? "").replace(/^Bearer\s+/i, ""), process.env.BACKUP_TOKEN);
 
 // Explicit and ordered rather than `select *`: this file is read by whoever
 // inherits the board, and a column order that starts with the company and the

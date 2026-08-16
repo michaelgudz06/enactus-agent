@@ -43,15 +43,19 @@ function verifyToken(token: string | undefined): Session | null {
   return typeof data?.name === "string" ? { name: data.name } : null;
 }
 
-export function checkPassword(input: string): boolean {
-  const expected = process.env.APP_TEAM_PASSWORD || "";
+// The one constant-time secret compare in the app -- team password and backup
+// token are the same rule. An unset or empty `expected` authorises nobody, and
+// the length check stays ahead of timingSafeEqual, which throws on a mismatch.
+export function secretMatches(input: string, expected: string | undefined): boolean {
   if (!expected) return false;
-  // constant-time compare
   const a = Buffer.from(input);
   const b = Buffer.from(expected);
   if (a.length !== b.length) return false;
   return crypto.timingSafeEqual(a, b);
 }
+
+export const checkPassword = (input: string): boolean =>
+  secretMatches(input, process.env.APP_TEAM_PASSWORD);
 
 export const COOKIE_NAME = COOKIE;
 

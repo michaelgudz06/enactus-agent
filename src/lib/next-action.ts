@@ -9,8 +9,8 @@
 //
 // No imports on purpose: scripts/selfcheck.ts runs this under
 // `node --experimental-strip-types`, which cannot resolve `@/lib/types`. The
-// lead therefore arrives structurally and the thresholds as defaulted
-// arguments -- the same trade email-lint.ts and run-events.ts make.
+// lead therefore arrives structurally -- the same trade email-lint.ts and
+// run-events.ts make.
 
 export interface ActionableLead {
   status: string;
@@ -28,6 +28,8 @@ export interface NextAction {
 }
 
 const DAY = 86_400_000;
+const FOLLOW_UP_DAYS = 7;
+const REPLY_DAYS = 5;
 
 /**
  * Days since anything happened to this lead.
@@ -52,18 +54,13 @@ export function quietDaysFor(lead: ActionableLead, now: number): number {
  * 107 prospects would be noise that teaches the team to ignore chips.
  * closed_lost is silent because it is terminal.
  */
-export function nextAction(
-  lead: ActionableLead,
-  now: number,
-  followUpDays = 7,
-  replyDays = 5
-): NextAction | null {
+export function nextAction(lead: ActionableLead, now: number): NextAction | null {
   const quiet = quietDaysFor(lead, now);
 
-  if (lead.status === "outreach_sent" && quiet >= followUpDays) {
+  if (lead.status === "outreach_sent" && quiet >= FOLLOW_UP_DAYS) {
     return { label: `Follow up · quiet ${quiet}d`, kind: "followup", quietDays: quiet };
   }
-  if (lead.status === "in_conversation" && quiet >= replyDays) {
+  if (lead.status === "in_conversation" && quiet >= REPLY_DAYS) {
     return { label: `Reply due · quiet ${quiet}d`, kind: "followup", quietDays: quiet };
   }
   // A win with no number on it cannot be counted, and the total on the board is

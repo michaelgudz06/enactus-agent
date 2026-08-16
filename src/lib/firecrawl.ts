@@ -475,15 +475,10 @@ interface PostResult {
 // call now fails fast so the next one still gets its turn.
 const CALL_TIMEOUT_MS = 8_000;
 
-async function post(
-  path: string,
-  body: unknown,
-  signal?: AbortSignal,
-  timeoutMs: number = CALL_TIMEOUT_MS
-): Promise<PostResult> {
+async function post(path: string, body: unknown, signal?: AbortSignal): Promise<PostResult> {
   const key = process.env.FIRECRAWL_API_KEY;
   if (!key) return { data: null, timedOut: false, status: 0 };
-  const timer = AbortSignal.timeout(timeoutMs);
+  const timer = AbortSignal.timeout(CALL_TIMEOUT_MS);
   const merged = signal ? AbortSignal.any([signal, timer]) : timer;
   try {
     const res = await fetch(`${BASE}${path}`, {
@@ -529,7 +524,7 @@ export interface ContactFind {
  */
 export async function findContactEmail(
   website: string,
-  opts: { signal?: AbortSignal; maxPages?: number } = {}
+  opts: { signal?: AbortSignal } = {}
 ): Promise<ContactFind> {
   const empty: ContactFind = {
     email: null,
@@ -603,7 +598,7 @@ export async function findContactEmail(
   );
   const targets = (
     urls.length ? urls : [`https://${host}/contact`, `https://${host}/about`, `https://${host}`]
-  ).slice(0, opts.maxPages ?? 3);
+  ).slice(0, 3);
 
   const people: ContactPerson[] = [];
   let checked = 0;
