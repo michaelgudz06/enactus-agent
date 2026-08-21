@@ -21,6 +21,7 @@ import { nextAction, quietDaysFor } from "../src/lib/next-action.ts";
 import { amountQuestion, parseAmount } from "../src/lib/amount.ts";
 import { csvCell, toCsv } from "../src/lib/csv.ts";
 import { facets, filterLeads, industryFacets, industryMatches, matchesQuery, personKey, sortLeads } from "../src/lib/table.ts";
+import { companyPoints, contactPoints, isBranchAddress, isDecisionInbox, isGenericInbox, isPersonalEmail, namesLocalOutlet, scoreLead, boardOrderFor, WEIGHTS } from "../src/lib/score.ts";
 
 let checks = 0;
 const eq = (actual: unknown, expected: unknown, msg: string) => {
@@ -900,5 +901,184 @@ eq(parseAmount("12ab"), null, "junk rejected");
 eq(parseAmount("1e3"), 1000, "exponent notation parses, as it always did");
 eq(parseAmount("Infinity"), null, "...but Infinity is not an integer, so it still fails");
 eq(amountQuestion("Purdys").includes("Purdys"), true, "the question names the company");
+
+
+// ── scoreLead ─────────────────────────────────────────────────────────────
+// These pin the ORDER the weights imply, not the exact numbers -- the numbers
+// are meant to be tuned, the ordering is what the club's outreach history
+// actually measured. If a weight edit inverts one of these, that edit is
+// almost certainly wrong.
+const cornerShop = {
+  industry: "Restaurants",
+  location: "Burnaby, British Columbia",
+  employees: 12,
+  connectionType: "none",
+  contactName: "A Manager",
+  contactRole: "Owner",
+  contactEmail: "firstname.lastname@example.ca",
+};
+const nationalBank = {
+  industry: "Banking",
+  location: "Toronto, Ontario",
+  employees: 40_000,
+  connectionType: "none",
+  contactName: "A Recruiter",
+  contactRole: "Senior Campus Recruiter",
+  contactEmail: "firstname.lastname@examplebank.com",
+};
+assert.ok(
+  scoreLead(cornerShop).score > scoreLead(nationalBank).score,
+  "a local storefront with a named owner must outrank a national bank with an HR contact"
+);
+checks++;
+
+// The finding the whole rubric rests on: local alone is not enough. Fifteen
+// local businesses contacted at info@ addresses converted zero times.
+const localGeneric = { ...cornerShop, contactName: null, contactRole: null, contactEmail: "info@example.ca" };
+assert.ok(
+  scoreLead(cornerShop).score > scoreLead(localGeneric).score + 60,
+  "a named contact at a local business must clear a generic inbox by a wide margin"
+);
+checks++;
+
+// Absence of evidence is never evidence against. A 429 from Apollo looks
+// exactly like a genuine no-record, so a missing headcount must not deduct.
+eq(
+  companyPoints({ industry: "Restaurants", employees: null }).score,
+  companyPoints({ industry: "Restaurants" }).score,
+  "an unknown headcount scores the same as an absent one"
+);
+eq(companyPoints({ employees: null }).score, 0, "nothing known scores zero, not negative");
+
+// Wrong side of the transaction.
+assert.ok(companyPoints({ industry: "higher education" }).score < 0, "universities receive, they do not sponsor");
+checks++;
+assert.ok(companyPoints({ industry: "government administration" }).score < 0, "government is not a sponsor");
+checks++;
+// ...but a museum is: two of them are confirmed sponsors, so the nonprofit
+// pattern must not catch them.
+assert.ok(companyPoints({ industry: "Museums" }).score > 0, "museums are confirmed sponsors, not wrong-side");
+checks++;
+
+// Email shape -- the strongest single feature that is knowable before sending.
+eq(isGenericInbox("info@example.ca"), true, "info@ is a front desk");
+eq(isGenericInbox("partnerships@example.ca"), true, "partnerships@ is a front desk");
+eq(isGenericInbox("jane.doe@example.ca"), false, "a person is not a front desk");
+eq(isPersonalEmail("jane.doe@example.ca"), true, "first.last@");
+eq(isPersonalEmail("jane_doe@example.ca"), true, "first_last@");
+eq(isPersonalEmail("louise@example.ca"), true, "a bare first name is still a person");
+eq(isPersonalEmail("info@example.ca"), false, "generic is never personal");
+eq(isPersonalEmail(null), false, "no address is not a personal address");
+eq(isPersonalEmail("not-an-email"), false, "a string with no @ is not an address");
+
+// The two-pass delta must be exact: scoring in one pass and scoring in two
+// must agree, or clicking "Find contact" silently changes a lead's rank for
+// reasons unrelated to the contact.
+const withContact = { ...cornerShop };
+const withoutContact = { ...cornerShop, contactName: null, contactRole: null, contactEmail: null };
+eq(
+  companyPoints(withoutContact).score + contactPoints(withoutContact).score,
+  scoreLead(withoutContact).score,
+  "halves sum to the whole (pass 1)"
+);
+eq(
+  scoreLead(withoutContact).score + (contactPoints(withContact).score - contactPoints(withoutContact).score),
+  scoreLead(withContact).score,
+  "pass 1 + delta equals a single-pass score"
+);
+
+// The board sorts ascending, so a better lead needs a smaller number. Getting
+// this backwards puts the best lead at the bottom, which is the bug this
+// whole column was added to fix.
+assert.ok(
+  boardOrderFor(scoreLead(cornerShop).score) < boardOrderFor(scoreLead(nationalBank).score),
+  "a better score must sort earlier on the board"
+);
+checks++;
+
+eq(WEIGHTS.enterprise < 0 && WEIGHTS.genericInbox < 0 && WEIGHTS.hrContact < 0, true, "penalties are negative");
+eq(WEIGHTS.localWithContact > 0 && WEIGHTS.priorRelationship > 0, true, "bonuses are positive");
+
+// ── the outlet rules ──────────────────────────────────────────────────────
+// Four of the ~20 confirmed sponsors are outlets of national brands (Popeyes,
+// Old Spaghetti Factory, Browns Socialhouse, Safeway). Apollo resolves each to
+// its parent domain and reports corporate headcount, so before these rules the
+// rubric marked its own winners down by 40.
+eq(isBranchAddress("vancouver@hiveclimbing.com"), true, "a mailbox named after a city is a branch");
+eq(isBranchAddress("coquitlam-store@example.com"), true, "punctuation does not hide the place name");
+eq(isBranchAddress("bc.portcoquitlam@example.ca"), true, "nor does a region prefix");
+eq(isBranchAddress("brewerydistrict@example.com"), true, "neighbourhoods count too");
+eq(isBranchAddress("jane.doe@example.ca"), false, "a person is not a branch");
+eq(isBranchAddress("info@example.ca"), false, "a front desk is not a branch");
+// The airline, not the municipality -- bare "delta" is deliberately excluded.
+eq(isBranchAddress("delta@example.com"), false, "delta@ is far more likely to be the airline");
+
+eq(namesLocalOutlet("Popeyes Burnaby/Coquitlam"), true, "a name carrying the neighbourhood is one shop");
+eq(namesLocalOutlet("Oxygen Yoga & Fitness Kensington"), true, "...including neighbourhoods the location regex omits");
+eq(namesLocalOutlet("Popeyes"), false, "the brand alone is not an outlet");
+eq(namesLocalOutlet(null), false, "no name is not an outlet");
+
+// A branch mailbox must be read as a shop, never as a first name. Before the
+// ladder was ordered, isPersonalEmail scored "vancouver" as a person.
+eq(
+  contactPoints({ contactEmail: "vancouver@example.com" }).score,
+  0,
+  "a branch address scores nothing -- and above all is not counted as a person"
+);
+eq(isDecisionInbox("manager@example.com"), true, "manager@ is a decision maker");
+eq(isDecisionInbox("gm@example.com"), true, "so is gm@");
+eq(isDecisionInbox("info@example.com"), false, "a front desk is not a decision maker");
+eq(isDecisionInbox("jane.doe@example.com"), false, "a named person is scored as a person, not an inbox");
+eq(
+  contactPoints({ contactEmail: "manager@example.com" }).score,
+  WEIGHTS.decisionInbox,
+  "manager@ is a decision maker, not a front desk and not a person"
+);
+eq(WEIGHTS.decisionInbox > WEIGHTS.genericInbox, true, "a manager beats a front desk");
+// Four such addresses exist in three years of outreach, so there is no evidence
+// either way and the two stay level. Demoting manager@ below a personal address
+// marked a confirmed sponsor down by 10 for no measured reason.
+eq(WEIGHTS.decisionInbox, WEIGHTS.personalEmail, "a manager's desk is not scored below a named person on n=4");
+
+const franchise = { company: "Popeyes Burnaby/Coquitlam", industry: "Restaurants", employees: 50_000 };
+const brand = { company: "Popeyes", industry: "Restaurants", employees: 50_000 };
+assert.ok(
+  companyPoints(franchise).score > companyPoints(brand).score,
+  "a named local outlet must outrank the national brand it belongs to"
+);
+checks++;
+eq(companyPoints(brand).score < 0, true, "the brand at corporate is still penalised");
+
+// Promotional-products suppliers: Promosapien gave $522, the second largest
+// contribution on record, and exactly one such company was ever contacted.
+assert.ok(
+  companyPoints({ description: "a promotional products and branded merchandise supplier" }).score > 0,
+  "a promo-products supplier scores positive"
+);
+checks++;
+// Apollo's industry is coarse and often missing, so the description has to be
+// matched as well or the storefront bonus never fires on a thin record.
+eq(
+  companyPoints({ description: "an independent neighbourhood coffee roaster and cafe" }).score,
+  WEIGHTS.storefront,
+  "a storefront is recognised from its description alone"
+);
+
+// The delta must survive the new rules: contactPoints still depends only on
+// location and the three contact fields, so pass 2 stays exact.
+const outletP1 = { company: "Browns Socialhouse", industry: "Restaurants", employees: 5_000, contactEmail: null };
+const outletP2 = { ...outletP1, contactEmail: "brewerydistrict@example.com" };
+eq(
+  scoreLead(outletP1).score + (contactPoints(outletP2).score - contactPoints(outletP1).score),
+  scoreLead(outletP2).score,
+  "pass 1 + delta still equals a single pass once a branch address arrives"
+);
+// The outlet exemption is a NAME rule, not a mailbox rule: it corrects Apollo
+// attributing a parent company's headcount to one shop.
+eq(
+  scoreLead({ company: "Browns Socialhouse Brentwood", industry: "Restaurants", employees: 5_000 }).score >= 0,
+  true,
+  "a chain whose name carries the neighbourhood is no longer buried by its parent's headcount"
+);
 
 console.log(`selfcheck: ${checks} assertions passed`);

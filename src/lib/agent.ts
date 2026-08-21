@@ -28,6 +28,7 @@ import {
 import { db, hasDatabaseUrl } from "./db";
 import { MAX_COUNT, parsedCount, requestedCount } from "./count";
 import { ENACTUS_ORG, ENACTUS_PROJECTS, ENACTUS_VENTURES } from "./enactus";
+import { scoreLead, boardOrderFor } from "./score";
 
 type Emit = (e: AgentEvent) => void;
 
@@ -93,11 +94,19 @@ interface Candidate {
 
 function planPrompt(mode: Mode): string {
   if (mode === "sales") {
-    return `You help a project manager find B2B sales leads (potential customers to sell their product/service to). Turn their request into effective web-search queries and a crisp ideal-customer description.`;
-  }
-  return `You help Enactus SFU, a student social-entrepreneurship club at Simon Fraser University (Burnaby / Vancouver, BC), find corporate sponsors offering monetary or in-kind support. Favour Lower Mainland businesses with a track record of backing students or community, and especially any with Simon Fraser University (SFU) or Enactus alumni ties. Turn the user's request into effective web-search queries and a crisp ideal-sponsor description.
+    return `You help a project manager find customers, stockists and supply partners for an Enactus SFU student venture. Turn their request into effective web-search queries and a crisp ideal-customer description.
 
-Only look for real companies, businesses, or grant-making foundations that could give money or in-kind support. NEVER target other student clubs, university clubs or associations (at SFU or elsewhere), or organizations whose "sponsorship" is actually a paid membership, paid directory listing, or a fee the club would have to pay. Word the search queries to find businesses/sponsors, not clubs or memberships.`;
+The partnerships that have actually worked were independent Metro Vancouver retailers and suppliers who agreed to stock a student-made product or supply materials at cost: an independent bookstore acting as a sales channel, a neighbourhood yarn shop, an organic seed company, a local grocer. Favour owner-operated shops in the venture's own category over chains and distributors -- a named owner can say yes to a shelf trial, a buying department cannot.`;
+  }
+  return `You help Enactus SFU, a student social-entrepreneurship club at Simon Fraser University (Burnaby / Vancouver, BC), find local businesses willing to donate a raffle prize, gift card, product sample, or small cash gift for a student event.
+
+What actually converts, measured across three years of this club's own outreach: independent consumer-facing businesses in Metro Vancouver -- restaurants and cafes, gyms and yoga and climbing studios, escape rooms, museums and small attractions, neighbourhood retail -- of roughly 2 to 200 staff, where a single owner or store manager can approve a $25-$300 giveaway without asking anyone. Businesses whose own customers are students convert best, because what they give (a free class, a voucher, a product trial) costs them very little and wins them a regular customer who lives nearby. Promotional-products and branded-merchandise suppliers are the same shape and are badly under-used: their product is swag, so donating it is a free sample.
+
+For a chain, target the SPECIFIC LOCAL BRANCH -- the Burnaby location, the Kitsilano store -- never head office. Do NOT write queries aimed at corporate social responsibility, community investment, philanthropy, or grant programs: roughly fifty attempts at large companies through that door produced not one donation.
+
+Turn the user's request into effective web-search queries and a crisp ideal-sponsor description.
+
+Only look for real businesses that could give money, product, or vouchers. NEVER target other student clubs, university clubs or associations (at SFU or elsewhere), or organizations whose "sponsorship" is actually a paid membership, paid directory listing, or a fee the club would have to pay. Word the search queries to find businesses, not clubs or memberships.`;
 }
 
 export async function runAgent(
@@ -149,11 +158,15 @@ export async function runAgent(
   try {
     plan = await chatJSON<Plan>(
       [
-        { role: "system", content: `${planPrompt(mode)}\n\nRespond ONLY with JSON of shape: {"needClarification": boolean, "questions": string[], "searchQueries": string[], "criteria": string, "altAngle": string, "location": string, "placesQueries": string[]}. Provide ${queryCount} DISTINCT searchQueries that attack the request from different angles (industry, community-giving language, local-news coverage, grant/foundation wording) so they do not all return the same pages.${
+        { role: "system", content: `${planPrompt(mode)}\n\nRespond ONLY with JSON of shape: {"needClarification": boolean, "questions": string[], "searchQueries": string[], "criteria": string, "altAngle": string, "location": string, "placesQueries": string[]}. Provide ${queryCount} DISTINCT searchQueries that attack the request from different angles (neighbourhood plus business category, local-news coverage of independent businesses, business-improvement-association and neighbourhood directory listings, "supported a local school or team" phrasing) so they do not all return the same pages.${
               mode === "sales"
                 ? ""
-                : ` The target is organisations that GIVE money or goods. Do not write queries that surface charities, foundations seeking donations, non-profits, or community groups looking for sponsors -- those compete with Enactus for the same donor dollars rather than funding it. Words like "non-profit", "charity" and "fundraiser" in a query reliably return the wrong side of the transaction.`
-            } placesQueries: up to 3 short local-business queries suited to a maps search (e.g. "coffee shops Burnaby", "print shops near SFU"), or [] if the request is not about local storefront businesses. ALWAYS populate searchQueries, criteria and location, even when needClarification is true -- the user can skip the questions and those fields are still used. Only set needClarification true (with up to 2 short questions) if the request is too vague to search well. altAngle is a different angle to try if this search was already done before.` },
+                : ` The target is organisations that GIVE money or goods. Do not write queries that surface charities, foundations seeking donations, non-profits, or community groups looking for sponsors -- those compete with Enactus for the same donor dollars rather than funding it. Words like "non-profit", "charity" and "fundraiser" in a query reliably return the wrong side of the transaction, and words like "corporate social responsibility", "community investment" and "philanthropy" reliably return large companies that have never given this club anything.`
+            } placesQueries: ${
+              mode === "sales"
+                ? 'up to 3 short local-business queries suited to a maps search (e.g. "gift shops Vancouver", "yarn shops Burnaby"), or [] if the request is not about local storefront businesses'
+                : 'AT LEAST 2 and up to 4 short local-business queries suited to a maps search (e.g. "coffee shops Burnaby", "climbing gyms near SFU"). A maps search returns the businesses themselves rather than pages written about them, which is the only channel that reliably finds the independent storefronts this club actually wins, so never leave it empty'
+            }. ALWAYS populate searchQueries, criteria and location, even when needClarification is true -- the user can skip the questions and those fields are still used. Only set needClarification true (with up to 2 short questions) if the request is too vague to search well. altAngle is a different angle to try if this search was already done before.` },
         { role: "user", content: fullPrompt },
       ],
       { model: STRUCTURER, provider: STRUCTURER_PROVIDER, maxTokens: 800 }
@@ -421,8 +434,10 @@ export async function runAgent(
 
   const scoreSystem =
     mode === "sales"
-      ? `You are a sales-lead analyst. Assess each candidate organization as a potential CUSTOMER for the user's product.\n\n${ENACTUS_VENTURES}`
-      : `You are a sponsorship-lead analyst for Enactus SFU. Assess each candidate organization as a potential SPONSOR. Detect any Simon Fraser University (SFU) or Enactus alumni connection, or past-sponsor / SFU-ecosystem tie, strictly from the provided text.\n\n${ENACTUS_ORG}\n\n${ENACTUS_PROJECTS}\n\nFor each strong sponsor, identify which specific Enactus SFU project best matches their industry or values, so outreach can pitch that project.\n\nHARD EXCLUSIONS — drop these candidates entirely (do not output them at all): other student clubs, university clubs, or student associations (at SFU or any school); anything that would require Enactus to PAY (paid memberships, paid directory or association listings, ticketed programs, fee-based accelerators); and charities, hospital or arts foundations, and community non-profits that RAISE money rather than give it — they are competing for the same donors, not funding Enactus. Enactus is asking companies to give, not to join, pay, or fundraise alongside. Only keep real companies, businesses, and foundations that actually MAKE grants.`;
+      ? `You are a sales-lead analyst. Assess each candidate organization as a potential CUSTOMER, STOCKIST or SUPPLY PARTNER for the user's product. Prefer independent owner-operated retailers and suppliers in the product's own category -- the partnerships that have worked were a shelf trial agreed by a shop owner, not a listing won from a buying department -- and prefer a candidate whose page names an actual person over an equally good one that names nobody.\n\n${ENACTUS_VENTURES}`
+      : `You are a sponsorship-lead analyst for Enactus SFU. Assess each candidate organization as a potential SPONSOR. Detect any Simon Fraser University (SFU) or Enactus alumni connection, or past-sponsor / SFU-ecosystem tie, strictly from the provided text.\n\n${ENACTUS_ORG}\n\n${ENACTUS_PROJECTS}\n\nFor each strong sponsor, identify which specific Enactus SFU project best matches their industry or values, so outreach can pitch that project.\n\nHARD EXCLUSIONS — drop these candidates entirely (do not output them at all): other student clubs, university clubs, or student associations (at SFU or any school); anything that would require Enactus to PAY (paid memberships, paid directory or association listings, ticketed programs, fee-based accelerators); and charities, hospital or arts foundations, and community non-profits that RAISE money rather than give it — they are competing for the same donors, not funding Enactus. and grant-making foundations, whose money arrives through a months-long written application owned by a different team, not through sponsor outreach. Enactus is asking a business to hand over a gift card, a voucher or a product, not to join, pay, fundraise alongside, or run a grant round. IMPORTANT CARVE-OUT: a museum, gallery, theatre or attraction that SELLS ADMISSION is not in that category and must be kept -- two museums and a cinema are confirmed past sponsors, because they can donate tickets. The test is whether the organisation has something to sell you, not how it is incorporated.
+
+RANK BY WHO CAN SAY YES. Every sponsorship this club has ever landed was approved by one owner, franchisee or store manager acting alone, and roughly half of all past outreach went to HR and campus-recruiting contacts who converted nothing at all. Prefer a candidate whose page names an actual person -- an owner, founder, or store manager -- over an equally good company that names nobody. For a chain, prefer the specific local branch over the national brand: reaching a store has worked, reaching head office never has. Independent businesses of roughly 2 to 200 staff are the target; a large national employer contacted at corporate is not, however well known its name.`;
 
   // Stage A — R1 reasons out loud (visible), no JSON. Capped so it stays snappy.
   const reasoningUser = `User request: ${fullPrompt}
@@ -799,23 +814,52 @@ async function persistLead(
   // than a confident link to the wrong company.
   const company = raw.company || ctx.org?.name || "Unknown";
   const siteIsTheirs = nameMatchesDomain(company, ctx.website ? domainOf(ctx.website) : null);
+  // Resolved once so the score and the stored row cannot disagree about what
+  // industry or location this lead has.
+  const row_industry = (siteIsTheirs ? ctx.org?.industry : null) ?? raw.industry ?? null;
+  const row_location = (siteIsTheirs ? apolloLocation : null) ?? raw.location ?? null;
+
+  // Pass 1 of two. Contact fields are almost always null at this point -- Exa
+  // returns pages about companies, not staff directories -- so the contact
+  // weights simply do not fire yet. findContactFor() re-scores the row the
+  // moment a real person is found, which is also the moment those weights
+  // become knowable. See the header of score.ts.
+  const fit = scoreLead({
+    company,
+    industry: row_industry,
+    description: raw.description ?? null,
+    location: row_location,
+    employees: ctx.org?.employees ?? null,
+    connectionType: conn,
+    contactName: safe.contact_name,
+    contactRole: safe.contact_role,
+    contactEmail: safe.contact_email,
+  });
 
   const row = {
     company,
     website: siteIsTheirs ? ctx.website : null,
-    industry: (siteIsTheirs ? ctx.org?.industry : null) ?? raw.industry ?? null,
+    industry: row_industry,
     description: raw.description ?? null,
     contact_name: safe.contact_name ?? null,
     contact_role: safe.contact_role ?? null,
     contact_email: safe.contact_email ?? null,
-    location: (siteIsTheirs ? apolloLocation : null) ?? raw.location ?? null,
+    location: row_location,
     connection_type: conn,
     connection_note: safe.connection_note ?? null,
     sponsorship_type: Array.isArray(raw.sponsorship_type) ? raw.sponsorship_type : [],
-    // Retired. The 0-100 number was invented by the model, not computed from
-    // anything, and it made volunteers skip lead #7 for no real reason. The
-    // column stays so old rows still read; nothing writes it now.
-    fit_score: null as number | null,
+    // Computed in src/lib/score.ts from the club's own outreach history, never
+    // emitted by a model. The previous occupant of this column WAS model-emitted
+    // -- a 0-100 number invented from nothing, which made volunteers skip lead
+    // #7 for no reason -- so the rule that replaced it is that every point here
+    // traces back to a field on this row. Rows written before 2026-08-20 hold
+    // the old invented values and are not comparable with these.
+    fit_score: fit.score,
+    // The board sorts board_order ASC, so a better lead needs a smaller number
+    // (score.ts negates it). Without this write the ranking is invisible: every
+    // row defaults to 0, the sort collapses to created_at desc, and because
+    // leads insert best-first the top pick lands at the BOTTOM of the board.
+    board_order: boardOrderFor(fit.score),
     why_fit: raw.why_fit ?? null,
     // Per-company only. ctx.reasoningTrace was up to 4000 chars of the SHARED
     // analyst trace about EVERY candidate in the run, so whenever V3 omitted a
@@ -838,13 +882,13 @@ async function persistLead(
         insert into enactus_leads (
           company, website, industry, description, contact_name, contact_role,
           contact_email, location, connection_type, connection_note,
-          sponsorship_type, fit_score, why_fit, reasoning, sources, status,
-          mode, created_by_name
+          sponsorship_type, fit_score, board_order, why_fit, reasoning, sources,
+          status, mode, created_by_name
         ) values (
           ${row.company}, ${row.website}, ${row.industry}, ${row.description},
           ${row.contact_name}, ${row.contact_role}, ${row.contact_email},
           ${row.location}, ${row.connection_type}, ${row.connection_note},
-          ${row.sponsorship_type}::text[], ${row.fit_score}, ${row.why_fit},
+          ${row.sponsorship_type}::text[], ${row.fit_score}, ${row.board_order}, ${row.why_fit},
           ${row.reasoning}, ${JSON.stringify(row.sources)}::jsonb, ${row.status},
           ${row.mode}, ${row.created_by_name}
         )
@@ -872,7 +916,7 @@ async function persistLead(
   // now knows it is unsaved and tells the user.
   const now = new Date().toISOString();
   return {
-    lead: { id: crypto.randomUUID(), board_order: 0, created_at: now, updated_at: now, ...row } as Lead,
+    lead: { id: crypto.randomUUID(), created_at: now, updated_at: now, ...row } as Lead,
     error,
   };
 }

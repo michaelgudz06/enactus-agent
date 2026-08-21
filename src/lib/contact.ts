@@ -7,6 +7,7 @@
 
 import { db } from "./db";
 import { findContactEmail, type ContactFind } from "./firecrawl";
+import { contactPoints } from "./score";
 
 /**
  * Never throws and never returns a partial write: either the lead row and the
@@ -18,7 +19,9 @@ export async function findContactFor(
   actorName: string,
   opts: { signal?: AbortSignal } = {}
 ): Promise<ContactFind | { error: string }> {
-  const rows = await db()`select website from enactus_leads where id = ${leadId}`;
+  const rows = await db()`
+    select website, industry, location, connection_type, contact_name, contact_role, contact_email
+      from enactus_leads where id = ${leadId}`;
   if (!rows.length) return { error: "Lead not found" };
 
   const website = rows[0].website as string | null;
@@ -55,6 +58,56 @@ export async function findContactFor(
       where id = $4`,
     [found.name, found.role, found.email, leadId]
   );
+
+  // Pass 2. The contact weights carry the strongest signals in the club's
+  // history -- a named person replies 15.7% against 5.5%, a personal address
+  // 21.9% against 6.9%, a generic inbox 2.8% against 10.7% -- and none of them
+  // are knowable until right here.
+  //
+  // Applied as a DELTA rather than a fresh score. A full re-score would have to
+  // re-fetch Apollo for the headcount it already scored in pass 1, and skipping
+  // that would silently drop 15 points from every right-sized company the
+  // moment someone clicked "Find contact". The before/after states below mirror
+  // the coalesce rules of the UPDATE above exactly, so this cannot double-count
+  // a contact that was already there.
+  const before = rows[0] as {
+    industry: string | null;
+    location: string | null;
+    contact_name: string | null;
+    contact_role: string | null;
+    contact_email: string | null;
+  };
+  const after = {
+    location: before.location,
+    contactName: before.contact_name ?? found.name,
+    contactRole: before.contact_name ? before.contact_role : (found.role ?? before.contact_role),
+    contactEmail: before.contact_email ?? found.email,
+  };
+  const delta =
+    contactPoints(after).score -
+    contactPoints({
+      location: before.location,
+      contactName: before.contact_name,
+      contactRole: before.contact_role,
+      contactEmail: before.contact_email,
+    }).score;
+  if (delta !== 0) {
+    try {
+      await db().query(
+        // Both SET expressions see the OLD fit_score, so they stay consistent.
+        // The negation mirrors boardOrderFor() in score.ts -- board_order sorts
+        // ascending, so a better lead needs a smaller number.
+        `update enactus_leads
+            set fit_score = coalesce(fit_score, 0) + $1,
+                board_order = -(coalesce(fit_score, 0) + $1),
+                updated_at = now()
+          where id = $2`,
+        [delta, leadId]
+      );
+    } catch {
+      // The contact is the deliverable; a stale score is a cosmetic problem.
+    }
+  }
 
   // The evidence URL is the point of the row: it is what lets anyone check the
   // contact later without re-running the scrape. Best effort on purpose -- an
