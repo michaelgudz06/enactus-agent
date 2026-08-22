@@ -39,6 +39,11 @@ export function pluck<T = unknown>(parsed: unknown, key: string): T[] | null {
   if (parsed && typeof parsed === "object") {
     const direct = (parsed as Record<string, unknown>)[key];
     if (Array.isArray(direct)) return direct as T[];
+    // A chunk asked for exactly one lead sometimes answers with the object
+    // instead of a list of one. Reading that as "no leads" silently dropped it,
+    // and a pool small enough to ask for one lead is the case that can least
+    // afford to lose it.
+    if (direct && typeof direct === "object") return [direct as T];
     // Last resort: a single array-valued property under any name.
     const arrays = Object.values(parsed as Record<string, unknown>).filter(Array.isArray);
     if (arrays.length === 1) return arrays[0] as T[];
@@ -246,8 +251,11 @@ export async function streamReasoner(
  * scan and drop every lead after it.
  */
 export function salvageObjects(text: string): unknown[] {
-  const from = text.indexOf("["); // skip the {"leads": wrapper; a bare array starts here too
-  if (from === -1) return [];
+  // Start inside the array so the {"leads": wrapper is skipped; a bare array
+  // starts here too. When there is no array at all the body is a lone object,
+  // and `from + 1` becomes 0 so the whole string is scanned -- requiring a
+  // bracket used to return nothing for exactly the one-lead answer above.
+  const from = text.indexOf("[");
   const out: unknown[] = [];
   let depth = 0;
   let start = -1;

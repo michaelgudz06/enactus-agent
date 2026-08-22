@@ -1148,4 +1148,27 @@ eq(toCad(10) > 10, true, "CAD is the larger number");
 eq(billingMonth(new Date("2026-09-01T05:00:00Z")), "2026-08", "late-evening Vancouver on the 31st bills to August");
 eq(billingMonth(new Date("2026-09-01T08:00:00Z")), "2026-09", "after midnight Vancouver bills to September");
 
+// ── a lone lead is still a lead ──────────────────────────────────────────
+//
+// A chunk whose candidate pool holds one company is asked for one lead, and a
+// model answering that sometimes returns the object instead of a list of one.
+// Both recovery paths used to read that as "no leads" and drop it silently.
+const oneLead = { company: "Solo Cafe", why_fit: "independent storefront" };
+eq(pluck({ leads: oneLead }, "leads")?.length, 1, "a lone lead object under the key reads as a list of one");
+eq(pluck({ leads: [oneLead] }, "leads")?.length, 1, "a list of one still reads as a list of one");
+eq(salvageObjects(JSON.stringify(oneLead)).length, 1, "a bare lone object is salvaged");
+eq(salvageObjects("```json\n" + JSON.stringify(oneLead) + "\n```").length, 1, "a fenced lone object is salvaged");
+
+// The non-regressions that matter more than the fix. An empty array is a parse
+// SUCCESS, and agent.ts relies on pluck returning [] rather than null so it does
+// not fall through to salvage and pick up whatever sibling object follows.
+eq(pluck({ leads: [] }, "leads")?.length, 0, "an empty lead array stays an empty array, not null");
+eq(salvageObjects('{"leads":[]}').length, 0, "an empty wrapped array salvages nothing");
+eq(salvageObjects(`[${JSON.stringify(oneLead)},${JSON.stringify(oneLead)}]`).length, 2, "a bare array still salvages every element");
+eq(
+  salvageObjects(`{"leads":[${JSON.stringify(oneLead)},${JSON.stringify(oneLead)},{"company":"Cut`).length,
+  2,
+  "a truncated wrapped array still salvages the finished leads"
+);
+
 console.log(`selfcheck: ${checks} assertions passed`);
