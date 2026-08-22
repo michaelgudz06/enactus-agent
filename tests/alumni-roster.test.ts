@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -16,18 +17,24 @@ import {
   academicYearOfCapture,
   academicYearOfLabel,
   acceptEntry,
+  applyConfirmedSpellings,
   applyRemovals,
+  canonicaliseRemovals,
   carriesContactDetail,
   compressYears,
+  confirmedSpellingMap,
   coverageByYear,
   csvCell,
+  CSV_PREAMBLE,
   expandYears,
   findNearDuplicates,
   isPlausiblePersonName,
   isPlausibleRole,
   mergeSightings,
   nameKey,
+  nearMissesOnRemovalList,
   normaliseNameCase,
+  parseConfirmedSpellings,
   parseAlumniBusinessOwners,
   parseCollapseomatic,
   parseCompetitionCoaches,
@@ -80,12 +87,29 @@ const TEAM_ROW = "team\tarchived\tteam\twww.enactussfu.ca/team\thttps://www.enac
 const COMPETITION_ROW =
   "competition\tarchived\tcompetition\twww.enactussfu.ca/competition\thttps://www.enactussfu.ca/competition\t-";
 
+/**
+ * The club's competition page, in two snapshots that spell one coach's name two
+ * different ways — the shape the committed roster met for real, and the one the
+ * removal list cannot match across on its own.
+ */
+const VARIANT_PAGES: Array<[string, string]> = [
+  ["competition-20260114050523.html", "2025\t Tim MacDougall"],
+  ["competition-20260516055532.html", "2026\t Tim MacDougal"],
+];
+const variantHtml = (spec: string) => {
+  const [year, name] = spec.split("\t");
+  return `<h5 class="text-primary-yellow"> ${year} </h5><h1> Regionals </h1>
+    <h3>Coaches: ${name}</h3>`;
+};
+
 function runBuild({
   removals = "# nobody yet\n",
   unrecordedPage = false,
   emptySource = false,
   strayPage = false,
   expectedEmpty = null,
+  spellings = null,
+  variantSpellings = false,
   registry = null,
   registryMissing = false,
   seed = null,
@@ -95,6 +119,8 @@ function runBuild({
   emptySource?: boolean;
   strayPage?: boolean;
   expectedEmpty?: string | null;
+  spellings?: string | null;
+  variantSpellings?: boolean;
   registry?: string | null;
   registryMissing?: boolean;
   seed?: string | null;
@@ -116,17 +142,26 @@ function runBuild({
     writeFileSync(path.join(cacheDir, STRAY_PAGE), CACHED_HTML);
     manifest += `${STRAY_PAGE}\thttps://web.archive.org/web/20130205151700id_/http://enactussfu.com/faculty-advisors/\n`;
   }
+  if (variantSpellings) {
+    for (const [file, spec] of VARIANT_PAGES) {
+      writeFileSync(path.join(cacheDir, file), variantHtml(spec));
+      manifest += `${file}\thttps://web.archive.org/web/${/-(\d{14})/.exec(file)![1]}id_/https://www.enactussfu.ca/competition\n`;
+    }
+  }
   writeFileSync(path.join(cacheDir, "manifest.tsv"), manifest);
   if (unrecordedPage) writeFileSync(path.join(cacheDir, "team-20260301000000.html"), CACHED_HTML);
   if (removals !== null) writeFileSync(path.join(outDir, "removed.txt"), removals);
   if (expectedEmpty !== null) {
     writeFileSync(path.join(outDir, "expected-empty-sources.txt"), expectedEmpty);
   }
+  if (spellings !== null) writeFileSync(path.join(outDir, "confirmed-spellings.tsv"), spellings);
 
   // The registry declares exactly the pages this cache holds, so the fixture
   // exercises the gates rather than tripping over sources it never fetched.
   const registryPath = path.join(root, "sources.tsv");
-  const rows = registry ?? [TEAM_ROW, ...(emptySource ? [COMPETITION_ROW] : [])].join("\n");
+  const rows =
+    registry ??
+    [TEAM_ROW, ...(emptySource || variantSpellings ? [COMPETITION_ROW] : [])].join("\n");
   if (!registryMissing) writeFileSync(registryPath, `# fixture registry\n${rows}\n`);
 
   const outFile = path.join(outDir, "past-executives.csv");
@@ -824,6 +859,182 @@ describe("near duplicates", () => {
   });
 });
 
+describe("a removal that names one of two spellings", () => {
+  test("the spelling still in the file is named back to whoever listed the other", () => {
+    expect(nearMissesOnRemovalList(["Tim MacDougall"], ["Adam Paroo", "Tim MacDougal"])).toEqual([
+      ["Tim MacDougall", "Tim MacDougal"],
+    ]);
+  });
+
+  test("it reports what the student wrote, not the key it matched on", () => {
+    expect(nearMissesOnRemovalList(["TIM  MACDOUGALL"], ["Tim MacDougal"])).toEqual([
+      ["TIM  MACDOUGALL", "Tim MacDougal"],
+    ]);
+  });
+
+  test("a removal that landed says nothing, which is the common case", () => {
+    expect(nearMissesOnRemovalList(["Minna Van"], ["Adam Paroo", "Rajin Shokar"])).toEqual([]);
+  });
+
+  test("an empty list says nothing", () => {
+    expect(nearMissesOnRemovalList([], ["Tim MacDougal"])).toEqual([]);
+  });
+
+  test("a name still in the file under the very spelling listed is not a near miss", () => {
+    // That is an unfinished removal, which the exact check refuses; this one
+    // only speaks about what an exact match cannot see.
+    expect(nearMissesOnRemovalList(["Minna Van"], ["Minna Van"])).toEqual([]);
+  });
+
+  test("two people a character apart are reported, because a person decides, not this", () => {
+    expect(nearMissesOnRemovalList(["Ann Lee"], ["Anna Lee"])).toEqual([["Ann Lee", "Anna Lee"]]);
+  });
+});
+
+describe("spellings a human has confirmed", () => {
+  const ROW = [
+    "Tim MacDougal",
+    "Tim MacDougall",
+    "https://web.archive.org/web/20260516055532id_/https://www.enactussfu.ca/competition",
+    "captain",
+    "2026-08-06",
+  ].join("\t");
+
+  test("reads a row per correction and skips comments and blank lines", () => {
+    expect(parseConfirmedSpellings(`# settled\n\n${ROW}\n`)).toEqual([
+      {
+        published: "Tim MacDougal",
+        confirmed: "Tim MacDougall",
+        sourceUrl:
+          "https://web.archive.org/web/20260516055532id_/https://www.enactussfu.ca/competition",
+        confirmedBy: "captain",
+        confirmedOn: "2026-08-06",
+      },
+    ]);
+  });
+
+  test("an empty file confirms nothing rather than failing", () => {
+    expect(parseConfirmedSpellings("# nobody has confirmed anything\n")).toEqual([]);
+  });
+
+  test.each([
+    ["a row missing a column", "Tim MacDougal\tTim MacDougall\thttps://x.invalid/p\tcaptain"],
+    ["a published spelling that is not a name", `Executives\tTim MacDougall\thttps://x.invalid/p\tcaptain\t2026-08-06`],
+    ["a confirmed spelling that is not a name", `Tim MacDougal\tcompetition@enactussfu.ca\thttps://x.invalid/p\tcaptain\t2026-08-06`],
+    ["a correction to the same spelling", `Tim MacDougal\tTim MacDougal\thttps://x.invalid/p\tcaptain\t2026-08-06`],
+    ["no snapshot the published spelling was read from", `Tim MacDougal\tTim MacDougall\t-\tcaptain\t2026-08-06`],
+    ["a contact detail where the confirming role goes", `Tim MacDougal\tTim MacDougall\thttps://x.invalid/p\tvpexternal@enactussfu.ca\t2026-08-06`],
+    ["no date on the confirmation", `Tim MacDougal\tTim MacDougall\thttps://x.invalid/p\tcaptain\tlast week`],
+    [
+      "one spelling corrected twice, so the rows disagree",
+      `Tim MacDougal\tTim MacDougall\thttps://x.invalid/p\tcaptain\t2026-08-06\nTim MacDougal\tTim MacDougald\thttps://x.invalid/p\tcaptain\t2026-08-06`,
+    ],
+    [
+      "a chain, where what one row confirms another row corrects",
+      `Tim MacDougal\tTim MacDougall\thttps://x.invalid/p\tcaptain\t2026-08-06\nTim MacDougall\tTim MacDougale\thttps://x.invalid/p\tcaptain\t2026-08-06`,
+    ],
+  ])("throws on %s", (_case, contents) => {
+    expect(() => parseConfirmedSpellings(contents)).toThrow();
+  });
+
+  test("every sighting of the published spelling is renamed, before anything is merged", () => {
+    const spellings = confirmedSpellingMap(parseConfirmedSpellings(ROW));
+    const rows = mergeSightings(
+      applyConfirmedSpellings(
+        [
+          sighting({ name: "Tim MacDougal", role: "Competition coach", year: "2025-26" }),
+          sighting({ name: "Tim MacDougall", role: "Competition coach", year: "2024-25" }),
+        ],
+        spellings,
+      ),
+    );
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].name).toBe("Tim MacDougall");
+    expect(rows[0].yearsActive).toBe("2024-25..2025-26");
+    expect(findNearDuplicates(rows)).toEqual([]);
+  });
+
+  test("a request to be removed lands under either spelling", () => {
+    const spellings = confirmedSpellingMap(parseConfirmedSpellings(ROW));
+    const sightings = applyConfirmedSpellings(
+      [sighting({ name: "Tim MacDougal" }), sighting({ name: "Rajin Shokar" })],
+      spellings,
+    );
+
+    for (const written of ["Tim MacDougal", "Tim MacDougall"]) {
+      const removed = canonicaliseRemovals(parseRemovalList(written), spellings);
+      expect(applyRemovals(sightings, removed).map((s) => s.name)).toEqual(["Rajin Shokar"]);
+    }
+  });
+
+  test("with nothing confirmed, sightings and removals are left exactly as they were", () => {
+    const none = confirmedSpellingMap([]);
+    const sightings = [sighting({ name: "Tim MacDougal" })];
+
+    expect(applyConfirmedSpellings(sightings, none)).toBe(sightings);
+    expect(canonicaliseRemovals(parseRemovalList("Minna Van"), none)).toEqual(
+      parseRemovalList("Minna Van"),
+    );
+  });
+
+  test("the committed file is well formed and every correction is dated and attributed", () => {
+    const committed = parseConfirmedSpellings(
+      readFileSync(fileURLToPath(new URL("../config/alumni/confirmed-spellings.tsv", import.meta.url)), "utf8"),
+    );
+
+    expect(committed.length).toBeGreaterThan(0);
+    for (const spelling of committed) {
+      expect(spelling.confirmedOn).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(spelling.confirmedBy).not.toBe("");
+      expect(spelling.sourceUrl).toMatch(/^https?:\/\//);
+    }
+  });
+
+  test("the committed corrections hold a name, and nothing else about the person", () => {
+    // This file names a real person, so it lives under the same rule as the
+    // roster beside it: name, role and years, never an address, a phone number,
+    // an employer or anything from LinkedIn. The roster's own rows are guarded
+    // by the parsers; nothing guarded this one.
+    const committed = parseConfirmedSpellings(
+      readFileSync(fileURLToPath(new URL("../config/alumni/confirmed-spellings.tsv", import.meta.url)), "utf8"),
+    );
+
+    expect(committed.length).toBeGreaterThan(0);
+    for (const spelling of committed) {
+      for (const field of [spelling.published, spelling.confirmed, spelling.confirmedBy]) {
+        expect(carriesContactDetail(field)).toBe(false);
+      }
+      expect(isPlausiblePersonName(spelling.published)).toBe(true);
+      expect(isPlausiblePersonName(spelling.confirmed)).toBe(true);
+      // The evidence is a page the club itself published, or the archive's copy
+      // of one. LinkedIn is never fetched and may never be cited either.
+      expect([
+        "web.archive.org",
+        "enactussfu.ca",
+        "www.enactussfu.ca",
+        "enactussfu.com",
+        "www.enactussfu.com",
+      ]).toContain(new URL(spelling.sourceUrl).hostname);
+    }
+  });
+
+  test("no row in the committed roster still carries a spelling that was corrected", () => {
+    const committed = parseConfirmedSpellings(
+      readFileSync(fileURLToPath(new URL("../config/alumni/confirmed-spellings.tsv", import.meta.url)), "utf8"),
+    );
+    const rows = parseRosterCsv(
+      readFileSync(fileURLToPath(new URL("../config/alumni/past-executives.csv", import.meta.url)), "utf8"),
+    );
+    const names = new Set(rows.map((row) => nameKey(row.name)));
+
+    for (const spelling of committed) {
+      expect(names.has(nameKey(spelling.published))).toBe(false);
+      expect(names.has(nameKey(spelling.confirmed))).toBe(true);
+    }
+  });
+});
+
 describe("csv", () => {
   test("a cell containing a comma or a quote is quoted", () => {
     expect(csvCell("Director of Finance")).toBe("Director of Finance");
@@ -950,6 +1161,182 @@ describe("a source that parses to no names", () => {
   });
 });
 
+describe("a person the club's pages spell two ways, through the build", () => {
+  const CONFIRMED = [
+    "Tim MacDougal",
+    "Tim MacDougall",
+    "https://web.archive.org/web/20260516055532id_/https://www.enactussfu.ca/competition",
+    "captain",
+    "2026-08-06",
+  ].join("\t");
+
+  const namesIn = (file: string) =>
+    parseRosterCsv(readFileSync(file, "utf8")).map((row) => row.name);
+
+  test("with nothing confirmed they are two rows, and the run says which two", () => {
+    const run = runBuild({ variantSpellings: true });
+
+    expect(run.status).toBe(0);
+    expect(namesIn(run.outFile)).toContain("Tim MacDougal");
+    expect(namesIn(run.outFile)).toContain("Tim MacDougall");
+    expect(run.stderr).toMatch(/near-duplicate names[\s\S]*Tim MacDougal\s+\/\s+Tim MacDougall/);
+    expect(run.stderr).toContain("confirmed-spellings.tsv");
+  });
+
+  test("a confirmed spelling makes them one row, and the rebuild keeps it that way", () => {
+    const run = runBuild({ variantSpellings: true, spellings: `# settled\n${CONFIRMED}\n` });
+
+    expect(run.status).toBe(0);
+    expect(run.stdout).toMatch(/spellings:\s+1 confirmed, 1 sighting\(s\) renamed/);
+
+    const rows = parseRosterCsv(readFileSync(run.outFile, "utf8"));
+    const merged = rows.filter((row) => row.name.startsWith("Tim MacDoug"));
+    expect(merged).toHaveLength(1);
+    expect(merged[0].name).toBe("Tim MacDougall");
+    expect(merged[0].yearsActive).toBe("2024-25..2025-26");
+    // Still one source URL and one capture date per role, as every row is.
+    expect(merged[0].sourceUrl.split(" | ")).toHaveLength(1);
+    expect(run.stderr).not.toContain("near-duplicate names");
+  });
+
+  test("once confirmed, a removal written under either spelling takes them out", () => {
+    for (const written of ["Tim MacDougal", "Tim MacDougall"]) {
+      const run = runBuild({
+        variantSpellings: true,
+        spellings: `${CONFIRMED}\n`,
+        removals: `${written}\n`,
+      });
+
+      expect(run.status).toBe(0);
+      expect(namesIn(run.outFile).filter((name) => name.startsWith("Tim MacDoug"))).toEqual([]);
+    }
+  });
+
+  test("a removal naming one of two unconfirmed spellings is reported, not silently half done", () => {
+    const run = runBuild({ variantSpellings: true, removals: "Tim MacDougall\n" });
+
+    expect(run.status).toBe(0);
+    // The rebuild is the moment the unregistered spelling comes back, so this is
+    // where it has to be said.
+    expect(namesIn(run.outFile)).toContain("Tim MacDougal");
+    expect(run.stderr).toContain("possibly unfinished removal");
+    expect(run.stderr).toMatch(/on the list: Tim MacDougall\s+\/\s+still in the file: Tim MacDougal/);
+  });
+
+  test("a removal that landed leaves the run silent about it", () => {
+    const run = runBuild({ removals: "Naia Wong\n" });
+
+    expect(run.status).toBe(0);
+    expect(run.stderr).not.toContain("possibly unfinished removal");
+  });
+
+  test.each([
+    ["a list nobody is on", "# nobody yet\n"],
+    ["an empty list", ""],
+  ])("%s says nothing at all", (_case, removals) => {
+    const run = runBuild({ variantSpellings: true, removals });
+
+    expect(run.status).toBe(0);
+    expect(run.stderr).not.toContain("possibly unfinished removal");
+  });
+
+  test("a malformed correction stops the build rather than splitting the person again", () => {
+    const run = runBuild({
+      variantSpellings: true,
+      spellings: "Tim MacDougal\tTim MacDougall\tcaptain\n",
+      seed: "the roster from the last good build\n",
+    });
+
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("confirmed-spellings.tsv");
+    expect(readFileSync(run.outFile, "utf8")).toBe("the roster from the last good build\n");
+  });
+
+  test("no file at all confirms nothing, and is not an error", () => {
+    const run = runBuild({ variantSpellings: true, spellings: null });
+
+    expect(run.status).toBe(0);
+    expect(namesIn(run.outFile)).toContain("Tim MacDougal");
+  });
+
+  test("a correction nothing spells that way any more is reported as stale", () => {
+    const run = runBuild({ spellings: `${CONFIRMED}\n` });
+
+    expect(run.status).toBe(0);
+    expect(run.stderr).toMatch(/stale entry on confirmed-spellings.tsv[\s\S]*Tim MacDougal/);
+  });
+
+  test("a correction left behind by a removal is reported as stale too", () => {
+    // The cache still spells him both ways, so the raw sightings do too — but
+    // the roster keeps neither. Nothing said so, and the row naming him stayed
+    // in the directory indefinitely with the removal looking complete.
+    const run = runBuild({
+      variantSpellings: true,
+      spellings: `${CONFIRMED}\n`,
+      removals: "Tim MacDougall\n",
+    });
+
+    expect(run.status).toBe(0);
+    expect(namesIn(run.outFile).filter((name) => name.startsWith("Tim MacDoug"))).toEqual([]);
+    expect(run.stderr).toMatch(/stale entry on confirmed-spellings.tsv[\s\S]*Tim MacDougal/);
+  });
+
+  test("a confirmed spelling still in use is not reported as stale", () => {
+    const run = runBuild({ variantSpellings: true, spellings: `${CONFIRMED}\n` });
+
+    expect(run.status).toBe(0);
+    expect(run.stderr).not.toContain("stale entry on confirmed-spellings.tsv");
+  });
+});
+
+describe("honouring a removal for someone who had a confirmed spelling", () => {
+  const CONFIRMED = [
+    "Tim MacDougal",
+    "Tim MacDougall",
+    "https://web.archive.org/web/20260516055532id_/https://www.enactussfu.ca/competition",
+    "captain",
+    "2026-08-06",
+  ].join("\t");
+
+  const namesIn = (file: string) =>
+    parseRosterCsv(readFileSync(file, "utf8")).map((row) => row.name);
+
+  test("every spelling on the list, then the row deleted, takes them out for good", () => {
+    // The procedure in config/alumni/README.md, done in the order it states:
+    // both spellings registered first, then both rows gone — the roster's and
+    // the correction's.
+    const run = runBuild({
+      variantSpellings: true,
+      spellings: "# nothing confirmed any more\n",
+      removals: "Tim MacDougal\nTim MacDougall\n",
+    });
+
+    expect(run.status).toBe(0);
+    expect(namesIn(run.outFile).filter((name) => name.startsWith("Tim MacDoug"))).toEqual([]);
+    // The build read a correction file that no longer names him, so there is no
+    // second record of him left for a later run to restore or to disclose.
+    expect(run.stdout).toMatch(/spellings:\s+0 confirmed, 0 sighting\(s\) renamed/);
+    expect(run.stderr).not.toContain("possibly unfinished removal");
+    expect(run.stderr).not.toContain("stale entry on confirmed-spellings.tsv");
+  });
+
+  test("the row deleted with only one spelling registered restores them, and is reported", () => {
+    // The ordering hazard: with the correction gone, nothing renames the
+    // published spelling, so a list carrying only the confirmed one leaves the
+    // other sighting standing.
+    const run = runBuild({
+      variantSpellings: true,
+      spellings: "# nothing confirmed any more\n",
+      removals: "Tim MacDougall\n",
+    });
+
+    expect(run.status).toBe(0);
+    expect(namesIn(run.outFile)).toContain("Tim MacDougal");
+    expect(run.stderr).toContain("possibly unfinished removal");
+    expect(run.stderr).toMatch(/on the list: Tim MacDougall\s+\/\s+still in the file: Tim MacDougal/);
+  });
+});
+
 describe("the committed roster and the README that describes it", () => {
   /**
    * past-executives.csv is generated output and the README's coverage table is a
@@ -1003,6 +1390,21 @@ describe("the committed roster and the README that describes it", () => {
       expect(row.sourceUrl.split(" | ")).toHaveLength(roles);
       expect(row.capturedAt.split(" | ")).toHaveLength(roles);
     }
+  });
+
+  /**
+   * The comment block is generated output too, and it is the part of the file
+   * that travels: it carries the handling rules and the pointer to where a
+   * superseded spelling's snapshot is kept. A rebuild writes exactly these
+   * bytes, so editing one copy and not the other would put a claim in the
+   * shipped file that the generator does not make.
+   */
+  test("the committed roster opens with the preamble the build writes", () => {
+    const committed = readFileSync(repoFile("config/alumni/past-executives.csv"), "utf8");
+    expect(committed.startsWith(CSV_PREAMBLE)).toBe(true);
+    expect(committed.slice(CSV_PREAMBLE.length).split("\n")[0]).toBe(
+      "name,role,years_active,source_url,captured_at,confidence",
+    );
   });
 });
 
@@ -1059,9 +1461,30 @@ describe("the source registry", () => {
     ["posts\tspotlight\tposts\tpattern\t-\t-", "a sweep with no post filter to match on"],
     ["a\tarchived\tx\tp\tu\t-\nb\tarchived\tx\tp\tu\t-", "two sources claiming one cache prefix"],
     ["a\tarchived\tx\tp\tu\t-\na\tlive\ty\tp\tu\t-", "the same key twice"],
+    ["a\tarchived\t../escape\tp\tu\t-", "a cache prefix that is a path rather than a name"],
+    ["a\tarchived\tteam page\tp\tu\t-", "a cache prefix with a space in it"],
+    [
+      "a\tarchived\tlive\tp\tu\t-\nb\tlive\tlive-team\t-\tu\t-",
+      "a prefix that would claim another source's pages",
+    ],
+    [
+      "a\tlive\tlive-team\t-\tu\t-\nb\tarchived\tlive\tp\tu\t-",
+      "the same clash, declared the other way round",
+    ],
     ["# only comments\n", "a registry declaring nothing"],
   ])("throws on %s", (contents) => {
     expect(() => parseSourceRegistry(contents)).toThrow();
+  });
+
+  test("the committed prefixes are names, and no two of them claim one page", () => {
+    const prefixes = declaredSources().map((source) => source.prefix);
+
+    for (const prefix of prefixes) expect(prefix).toMatch(/^[A-Za-z0-9][A-Za-z0-9-]*$/);
+    for (const prefix of prefixes) {
+      for (const other of prefixes) {
+        if (prefix !== other) expect(other.startsWith(`${prefix}-`)).toBe(false);
+      }
+    }
   });
 
   test("a cached page is claimed by the source whose prefix it carries", () => {
@@ -1179,12 +1602,14 @@ describe("refreshing what the README says about the roster", () => {
     dropYear = null,
     csvText = null,
     removals = null,
+    spellings = null,
     env = {},
   }: {
     dropRowsFor?: string | null;
     dropYear?: string | null;
     csvText?: string | null;
     removals?: string | null;
+    spellings?: string | null;
     env?: Record<string, string>;
   } = {}) {
     const root = mkdtempSync(path.join(tmpdir(), "alumni-refresh-"));
@@ -1204,6 +1629,7 @@ describe("refreshing what the README says about the roster", () => {
     writeFileSync(readme, readFileSync(README, "utf8"));
     // Beside the roster, where the student edits it.
     if (removals !== null) writeFileSync(path.join(root, "removed.txt"), removals);
+    if (spellings !== null) writeFileSync(path.join(root, "confirmed-spellings.tsv"), spellings);
 
     const before = { csv: readFileSync(csv, "utf8"), readme: readFileSync(readme, "utf8") };
     const run = spawnSync(
@@ -1325,6 +1751,115 @@ describe("refreshing what the README says about the roster", () => {
     expect(run.status).toBe(0);
     expect(run.stderr).not.toContain("unfinished removal");
     expect(readFileSync(run.readme, "utf8")).toBe(run.before.readme);
+  });
+
+  describe("a removal written under a spelling the roster settled", () => {
+    const CONFIRMED =
+      "Tim MacDougal\tTim MacDougall\thttps://web.archive.org/web/20260516055532id_/https://www.enactussfu.ca/competition\tcaptain\t2026-08-06\n";
+
+    test.each(["Tim MacDougal", "Tim MacDougall"])(
+      "written as %s it is the same unfinished removal as any other, and stops the refresh",
+      (written) => {
+        const run = runRefresh({ removals: `${written}\n`, spellings: CONFIRMED });
+
+        expect(run.status).not.toBe(0);
+        expect(run.stderr).toContain("unfinished removal");
+        // Names the row as the file spells it, so the student knows what to delete.
+        expect(run.stderr).toContain("Tim MacDougall");
+        expect(readFileSync(run.readme, "utf8")).toBe(run.before.readme);
+      },
+    );
+
+    test("the correction row left behind stops the refresh, and says which file holds it", () => {
+      // Step 1 done, and only half of step 2: the roster row is gone, the row in
+      // confirmed-spellings.tsv is not. This is the state the refresh used to
+      // pass silently on, leaving a removed person named in the directory.
+      const run = runRefresh({
+        dropRowsFor: "Tim MacDougall",
+        removals: "Tim MacDougal\nTim MacDougall\n",
+        spellings: CONFIRMED,
+      });
+
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain("unfinished removal");
+      expect(run.stderr).toContain("Tim MacDougall");
+      expect(run.stderr).toContain("confirmed-spellings.tsv");
+      expect(readFileSync(run.readme, "utf8")).toBe(run.before.readme);
+      expect(readFileSync(run.csv, "utf8")).toBe(run.before.csv);
+    });
+
+    test("one refusal names every record still holding them, not one file at a time", () => {
+      const run = runRefresh({ removals: "Tim MacDougall\n", spellings: CONFIRMED });
+
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain("past-executives.csv");
+      expect(run.stderr).toContain("confirmed-spellings.tsv");
+    });
+
+    test("passes once both rows are gone, with every spelling on the list", () => {
+      const run = runRefresh({
+        dropRowsFor: "Tim MacDougall",
+        removals: "Tim MacDougal\nTim MacDougall\n",
+        spellings: "# nothing confirmed any more\n",
+      });
+      const after = claimsIn(readFileSync(run.readme, "utf8"));
+
+      expect(run.status).toBe(0);
+      expect(run.stderr).not.toContain("unfinished removal");
+      expect(after.people).toBe(parseRosterCsv(readFileSync(run.csv, "utf8")).length);
+    });
+
+    test.each([
+      ["a list nobody is on", "# nobody yet\n"],
+      ["an empty list", ""],
+      ["no list at all", null],
+    ])("a correction row alongside %s leaves the refresh exactly as it was", (_case, removals) => {
+      // The committed state of this repository: a confirmed spelling for a
+      // person nobody has asked to remove must never refuse or warn.
+      const run = runRefresh({ removals, spellings: CONFIRMED });
+
+      expect(run.status).toBe(0);
+      expect(run.stderr).not.toContain("unfinished removal");
+      expect(readFileSync(run.readme, "utf8")).toBe(run.before.readme);
+    });
+
+    test("a removal for somebody with no correction row of their own still passes", () => {
+      const run = runRefresh({
+        dropRowsFor: "Minna Van",
+        removals: "Minna Van\n",
+        spellings: CONFIRMED,
+      });
+
+      expect(run.status).toBe(0);
+      expect(run.stderr).not.toContain("unfinished removal");
+    });
+
+    test("with nothing confirmed it is a warning naming the other spelling, never a refusal", () => {
+      const run = runRefresh({ removals: "Tim MacDougal\n" });
+
+      expect(run.status).toBe(0);
+      expect(run.stderr).toContain("possibly unfinished removal");
+      expect(run.stderr).toMatch(
+        /on the list: Tim MacDougal\s+\/\s+still in the file: Tim MacDougall/,
+      );
+      // A warning refreshes the README; only a refusal leaves it alone.
+      expect(readFileSync(run.readme, "utf8")).toBe(run.before.readme);
+    });
+
+    test.each([
+      ["a list nobody is on", "# nobody yet\n"],
+      ["an empty list", ""],
+      ["no list at all", null],
+      ["a removal correctly carried through", "Minna Van\n"],
+    ])("%s says nothing about near misses", (_case, removals) => {
+      const run = runRefresh({
+        dropRowsFor: removals === "Minna Van\n" ? "Minna Van" : null,
+        removals,
+      });
+
+      expect(run.status).toBe(0);
+      expect(run.stderr).not.toContain("possibly unfinished removal");
+    });
   });
 
   test("a roster it cannot read stops it rather than half-rewriting the README", () => {
@@ -1491,31 +2026,86 @@ describe("recording where a cached page came from", () => {
     new URL("../scripts/alumni-roster/fetch-snapshots.sh", import.meta.url),
   );
 
-  /** Stands in for curl: writes a body to whatever `-o` names, and succeeds. */
+  /**
+   * Stands in for curl: answers a CDX query with one capture and writes a body
+   * to whatever `-o` names. Enough for the archived path as well as the live
+   * one, which is where a cached page's provenance can go stale.
+   */
   const STUB_CURL = `#!/bin/sh
 out=""
+url=""
 while [ $# -gt 0 ]; do
-  case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    http://*|https://*) url="$1"; shift ;;
+    *) shift ;;
+  esac
 done
-[ -n "$out" ] && printf '<h3>a page</h3>' > "$out"
+case "$url" in
+  *cdx/search*)
+    if [ -n "$out" ]; then
+      printf '20260114044549 http://enactussfu.com/community-spotlight-ivy-so/ 200\\n' > "$out"
+    else
+      printf '20260114044549 200 DIGESTAAA\\n'
+    fi
+    ;;
+  *) [ -n "$out" ] && printf '<h3>a page</h3>' > "$out" ;;
+esac
 exit 0
 `;
 
-  /** The fetcher, run against a registry declaring one live source. */
-  function runFetch(cacheDir: string, url: string) {
+  /**
+   * The same stub with the page request rate-limited: the archive still answers
+   * the CDX query, so the capture is enumerated and re-fetched, and the fetch
+   * itself comes back with nothing. `curl -f` writes no file in that case.
+   */
+  const STUB_CURL_PAGE_FAILS = STUB_CURL.replace(
+    `  *) [ -n "$out" ] && printf '<h3>a page</h3>' > "$out" ;;`,
+    "  *) exit 22 ;;",
+  );
+
+  const liveRow = (url: string) => `team (live)\tlive\tlive-team\t-\t${url}\t-\n`;
+  const archivedRow = (url: string) =>
+    `executives\tarchived\texec\tenactussfu.com/executives/\t${url}\t-\n`;
+  const ARCHIVED_PAGE = "exec-20260114044549.html";
+  const archivedUrl = (url: string) => `https://web.archive.org/web/20260114044549id_/${url}`;
+
+  /** The fetcher, run against a registry declaring one source. */
+  function runFetch(
+    cacheDir: string,
+    url: string,
+    { row = liveRow, cwd = undefined as string | undefined, curl = STUB_CURL } = {},
+  ) {
     const root = mkdtempSync(path.join(tmpdir(), "alumni-fetch-"));
     const bin = path.join(root, "bin");
     mkdirSync(bin);
-    writeFileSync(path.join(bin, "curl"), STUB_CURL, { mode: 0o755 });
+    writeFileSync(path.join(bin, "curl"), curl, { mode: 0o755 });
 
     const script = path.join(root, "fetch-snapshots.sh");
     copyFileSync(FETCH_SCRIPT, script);
-    writeFileSync(path.join(root, "sources.tsv"), `team (live)\tlive\tlive-team\t-\t${url}\t-\n`);
+    writeFileSync(path.join(root, "sources.tsv"), row(url));
 
     return spawnSync("bash", [script, cacheDir], {
       encoding: "utf8",
+      cwd,
       env: { ...inheritedEnv, PATH: `${bin}:${process.env.PATH ?? ""}` },
     });
+  }
+
+  /**
+   * A repository that ignores `.cache/`, inside a plain directory that is not a
+   * repository at all — the two positions the guard has to tell apart, neither
+   * of which may be decided by where the command happened to be run from.
+   * Realpathed, because git answers in physical paths and a comparison against
+   * a symlinked `/var` would be deciding something else.
+   */
+  function scaffoldRepo() {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "alumni-guard-")));
+    const repo = path.join(root, "repo");
+    mkdirSync(repo);
+    writeFileSync(path.join(repo, ".gitignore"), ".cache/\n");
+    spawnSync("git", ["init", "-q"], { cwd: repo, encoding: "utf8" });
+    return { root, repo };
   }
 
   /** manifest.tsv is persisted state the build reads; the last line for a name wins. */
@@ -1550,6 +2140,84 @@ exit 0
     expect(lines).toHaveLength(1);
   });
 
+  test("a cached page keeps the URL it was actually fetched from, not the registry's latest", () => {
+    const cacheDir = mkdtempSync(path.join(tmpdir(), "alumni-cache-"));
+    const fetched = "http://enactussfu.com/executives/";
+
+    expect(runFetch(cacheDir, fetched, { row: archivedRow }).status).toBe(0);
+    expect(recordedUrl(cacheDir, ARCHIVED_PAGE)).toBe(archivedUrl(fetched));
+
+    // The maintainer edits that one registry row. The page is already on disk,
+    // so it is not downloaded again — and so it did not come from the new URL.
+    const second = runFetch(cacheDir, "https://www.enactussfu.ca/executives", { row: archivedRow });
+    expect(second.status).toBe(0);
+    expect(recordedUrl(cacheDir, ARCHIVED_PAGE)).toBe(archivedUrl(fetched));
+  });
+
+  test("a cached page the manifest forgot is fetched again, not stamped with a guess", () => {
+    const cacheDir = mkdtempSync(path.join(tmpdir(), "alumni-cache-"));
+    const fetched = "http://enactussfu.com/executives/";
+    runFetch(cacheDir, fetched, { row: archivedRow });
+
+    // build.ts drops a page the manifest does not know and says to re-run this
+    // script, so re-running has to genuinely record it.
+    writeFileSync(path.join(cacheDir, "manifest.tsv"), "");
+    expect(runFetch(cacheDir, fetched, { row: archivedRow }).status).toBe(0);
+    expect(recordedUrl(cacheDir, ARCHIVED_PAGE)).toBe(archivedUrl(fetched));
+  });
+
+  test("a cached page survives a re-fetch that fails, and is still reported", () => {
+    const cacheDir = mkdtempSync(path.join(tmpdir(), "alumni-cache-"));
+    const fetched = "http://enactussfu.com/executives/";
+    runFetch(cacheDir, fetched, { row: archivedRow });
+
+    const page = path.join(cacheDir, ARCHIVED_PAGE);
+    const before = readFileSync(page);
+
+    // The manifest was lost, so the page is re-fetched — and the archive is
+    // rate-limiting. A capture the archive may never serve again is the one
+    // thing here that cannot be re-created, so the bytes on disk must outlive
+    // the request that failed.
+    writeFileSync(path.join(cacheDir, "manifest.tsv"), "");
+    const second = runFetch(cacheDir, fetched, {
+      row: archivedRow,
+      curl: STUB_CURL_PAGE_FAILS,
+    });
+
+    expect(readFileSync(page)).toEqual(before);
+    expect(existsSync(`${page}.part`)).toBe(false);
+    // Still a gap: unrecorded, reported, and non-zero so re-running fills it.
+    expect(recordedUrl(cacheDir, ARCHIVED_PAGE)).toBeUndefined();
+    expect(second.stderr).toContain(`could not fetch ${ARCHIVED_PAGE}`);
+    expect(second.status).not.toBe(0);
+  });
+
+  test("a registry checked out with CRLF line endings is read, not reported twice", () => {
+    const cacheDir = mkdtempSync(path.join(tmpdir(), "alumni-cache-"));
+    const url = "https://www.enactussfu.ca/team";
+
+    // parseSourceRegistry trims every field, so a carriage return on the last
+    // column is one whitespace problem — not a malformed filter here and a
+    // malformed registry there.
+    const run = runFetch(cacheDir, url, { row: (u) => liveRow(u).replace(/\n/g, "\r\n") });
+
+    expect(run.status).toBe(0);
+    expect(run.stderr).not.toContain("line 1");
+    expect(recordedUrl(cacheDir, "live-team.html")).toBe(url);
+  });
+
+  test("both readers reject the same registry, so neither finds a source the other cannot", () => {
+    const cacheDir = mkdtempSync(path.join(tmpdir(), "alumni-cache-"));
+    const clashing = "a\tarchived\tlive\tp\thttps://example.invalid/a\t-\n" +
+      "b\tlive\tlive-team\t-\thttps://example.invalid/b\t-\n";
+
+    const fetched = runFetch(cacheDir, "unused", { row: () => clashing });
+
+    expect(fetched.status).not.toBe(0);
+    expect(fetched.stderr).toContain("would claim each other's pages");
+    expect(() => parseSourceRegistry(clashing)).toThrow(/would claim each other's pages/);
+  });
+
   test("a cache inside the repository that git does not ignore is refused, unwritten", () => {
     const inRepo = fileURLToPath(new URL("../not-ignored-cache", import.meta.url));
     rmSync(inRepo, { recursive: true, force: true });
@@ -1559,14 +2227,38 @@ exit 0
       expect(fetched.status).not.toBe(0);
       // Refused before anything was written, not warned about afterwards.
       expect(existsSync(inRepo)).toBe(false);
+    } finally {
+      rmSync(inRepo, { recursive: true, force: true });
+    }
+  });
+
+  test("the build refuses one too, and it is the guard that refuses it", () => {
+    const inRepo = fileURLToPath(new URL("../not-ignored-cache", import.meta.url));
+    const outDir = mkdtempSync(path.join(tmpdir(), "alumni-guard-out-"));
+    const outFile = path.join(outDir, "past-executives.csv");
+    rmSync(inRepo, { recursive: true, force: true });
+
+    try {
+      // A cache this build could otherwise read all the way through: a page, its
+      // manifest entry and a removal list beside the output. With the guard taken
+      // out the run gets past every other gate, so the refusal below is the
+      // guard's and not a missing manifest standing in for it.
+      mkdirSync(inRepo);
+      writeFileSync(path.join(inRepo, CACHED_PAGE), CACHED_HTML);
+      writeFileSync(path.join(inRepo, "manifest.tsv"), `${CACHED_PAGE}\t${CACHED_URL}\n`);
+      writeFileSync(path.join(outDir, "removed.txt"), "# nobody yet\n");
+      const registry = path.join(outDir, "sources.tsv");
+      writeFileSync(registry, `${TEAM_ROW}\n`);
 
       const built = spawnSync(
         process.execPath,
-        ["--experimental-strip-types", BUILD_SCRIPT, inRepo, path.join(tmpdir(), "unused.csv")],
+        ["--experimental-strip-types", BUILD_SCRIPT, inRepo, outFile, registry],
         { encoding: "utf8", env: inheritedEnv },
       );
+
       expect(built.status).not.toBe(0);
-      expect(existsSync(inRepo)).toBe(false);
+      expect(built.stderr).toContain("refusing to read a cache git does not ignore");
+      expect(existsSync(outFile)).toBe(false);
     } finally {
       rmSync(inRepo, { recursive: true, force: true });
     }
@@ -1582,5 +2274,66 @@ exit 0
     } finally {
       rmSync(ignored, { recursive: true, force: true });
     }
+  });
+
+  describe("the guard asks about the cache path, not the working directory", () => {
+    test("a run started outside any repository still cannot write into one", () => {
+      const { root, repo } = scaffoldRepo();
+      const target = path.join(repo, "holds-real-pages");
+
+      // Started from `root`, which is not a repository at all: the old guard
+      // asked git where it was, got no answer, and took that for permission.
+      const fetched = runFetch("repo/holds-real-pages", "https://www.enactussfu.ca/team", {
+        cwd: root,
+      });
+
+      expect(fetched.status).not.toBe(0);
+      expect(fetched.stderr).toContain("refusing to cache archived pages");
+      expect(existsSync(target)).toBe(false);
+    });
+
+    test("the build, started outside any repository, refuses the same path", () => {
+      const { root, repo } = scaffoldRepo();
+      const built = spawnSync(
+        process.execPath,
+        [
+          "--experimental-strip-types",
+          BUILD_SCRIPT,
+          path.join(repo, "holds-real-pages"),
+          path.join(root, "unused.csv"),
+        ],
+        { encoding: "utf8", cwd: root, env: inheritedEnv },
+      );
+
+      expect(built.status).not.toBe(0);
+      expect(built.stderr).toContain("refusing to read a cache git does not ignore");
+    });
+
+    test("an ignored path in that repository is still allowed from outside it", () => {
+      const { root, repo } = scaffoldRepo();
+      const run = runFetch("repo/.cache/alumni-roster", "https://www.enactussfu.ca/team", {
+        cwd: root,
+      });
+
+      expect(run.status).toBe(0);
+      expect(recordedUrl(path.join(repo, ".cache/alumni-roster"), "live-team.html")).toBe(
+        "https://www.enactussfu.ca/team",
+      );
+    });
+
+    test("a relative path that leaves the repository is not mistaken for one inside it", () => {
+      const { root, repo } = scaffoldRepo();
+
+      // "$PWD/../outside" spells a string starting with the repository's path
+      // while naming somewhere else entirely. Comparing the strings refused it
+      // with a diagnosis that was simply wrong.
+      const run = runFetch("../outside", "https://www.enactussfu.ca/team", { cwd: repo });
+
+      expect(run.status).toBe(0);
+      expect(run.stderr).not.toContain("refusing");
+      expect(recordedUrl(path.join(root, "outside"), "live-team.html")).toBe(
+        "https://www.enactussfu.ca/team",
+      );
+    });
   });
 });

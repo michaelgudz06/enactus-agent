@@ -48,10 +48,25 @@ They can. There is no threshold to meet, no form, and no reason required.
    itself is not optional: `build.ts` refuses to write a roster at all if
    `removed.txt` is missing, and prints how many names it read on every run,
    including zero. A list nobody is on is an empty file, never a deleted one.
-2. **Delete their row from `past-executives.csv`.** Just the line. (Rebuilding
+
+   **If their name appears in `confirmed-spellings.tsv`, every spelling in that
+   row goes on the list** — the one the club published *and* the one that was
+   confirmed, on separate lines. Removals match `nameKey` exactly, so a spelling
+   nobody registered is a spelling the next full rebuild puts straight back. That
+   row is where you learn the other spelling; read it before you write the list.
+2. **Delete their row from `past-executives.csv` — and from
+   `confirmed-spellings.tsv` if they have one there.** Just the lines. (Rebuilding
    also produces the correct file, but you do not need a working cache to honour
    a removal — that is the point.)
-3. **Run the refresh, then commit all three changes that day:**
+
+   **Order matters here, and it is the whole mechanism of the trap.** Step 1 has
+   to be finished before the `confirmed-spellings.tsv` row is deleted. While the
+   row is there, the build renames the published spelling to the confirmed one,
+   so one name covers the person everywhere; once it is gone nothing renames
+   anything, and a removal list carrying only the confirmed spelling no longer
+   reaches the sightings the club published under the other one. Every spelling
+   on the list first, then delete the rows.
+3. **Run the refresh, then commit every change that day:**
 
    ```bash
    node --experimental-strip-types scripts/alumni-roster/build.ts --refresh-readme
@@ -59,23 +74,52 @@ They can. There is no threshold to meet, no form, and no reason required.
 
    That rewrites the coverage report under "Gaps in the record" — the only place
    in this file that counts anybody — from the CSV you just edited. The only
-   other thing it reads is `removed.txt` beside it: no snapshot cache, no
-   network, no archive. It takes a second on a fresh clone, it never touches the
-   roster itself, and it is what keeps the tests passing so that honouring a
-   removal never leaves you with a red branch to explain. Do not wait for a
-   batch, a sprint, or a meeting.
+   other things it reads are `removed.txt` and `confirmed-spellings.tsv` beside
+   it: no snapshot cache, no network, no archive. It takes a second on a fresh
+   clone, it never touches the roster itself, and it is what keeps the tests
+   passing so that honouring a removal never leaves you with a red branch to
+   explain. Do not wait for a batch, a sprint, or a meeting.
 
    It reads the removal list to catch step 1 done without step 2: if a name on
-   `removed.txt` still has a row in the CSV, the refresh refuses to run and names
-   them, because adding the name without deleting the row leaves someone who
-   asked to be taken off the file still in it. Delete those rows and run it
-   again. It is not an extra step, only a check on the two above.
+   `removed.txt` still has a row in `past-executives.csv` **or in
+   `confirmed-spellings.tsv`**, the refresh refuses to run and names them,
+   listing every row still to go, because adding the name without deleting the
+   rows leaves someone who asked to be taken off these files still named in
+   them. Both are durable records of a person, so both refuse on the same terms;
+   this is an exact match on the name, not a guess, and the thing that clears it
+   is the deletion step 2 already asked for. Delete those rows and run it again.
+   It is not an extra step, only a check on the steps above.
+
+   It also says — as a warning, never a refusal — when a name on the list is one
+   character from a name **still in the file**. **The club's pages spell some
+   people two ways, and a removal matches exactly**, so registering one spelling
+   and deleting only that spelling's row leaves the other one behind. The
+   warning names it; add it to `removed.txt` too if it is them, and ignore it if
+   they are two people.
+
+   **Deleting both rows is the case this refresh cannot catch.** With neither
+   row left in the CSV there is nothing for the list to be one character away
+   from, so the refresh finds nothing and exits quietly — and the person comes
+   back at the next full rebuild under the spelling nobody registered. That
+   rebuild is where the warning finally appears, and step 3 above deliberately
+   does not ask you to run one. So a quiet refresh is not evidence that both
+   spellings were registered; if the club may have spelled the name two ways,
+   check the file for the other spelling yourself before you delete the rows.
+   Neither check can refuse, because one character apart is evidence and not
+   proof, and nothing here may ever stop a removal. Where the spelling has
+   already been settled in `confirmed-spellings.tsv`, the request lands under
+   either spelling **for as long as that row is there** — which is exactly why
+   step 1 registers both spellings before step 2 deletes it.
 4. **Reply to them and say it is done.** One line is enough. Do not ask why, do
    not ask them to reconsider, and do not offer to keep a reduced version of
    their entry.
 5. If they ask what was held about them, tell them exactly: their name, the role
-   the club published, the years, and the archived page it came from. That is the
-   whole record. Show them this file if it helps.
+   the club published, the years, and the archived page it came from. **If they
+   also had a row in `confirmed-spellings.tsv`, that row is part of the record
+   too** — the other spelling the club published, the snapshot that spelling was
+   read from, and the role that confirmed which one was right, with the date it
+   was confirmed. Between the two rows, that is the whole record. Show them this
+   file if it helps.
 
 Whoever holds the External Relations portfolio owns this. If you are reading this
 because you just inherited the role: this paragraph is the part of the handover
@@ -94,7 +138,7 @@ third-party directory, a data vendor, or a social network.
 | `enactussfu.com/program-managers/` | Wayback, 21 distinct bodies, 2012 → 2017 | Project leads, the layer below exec |
 | `enactussfu.com/project-managers/` | Wayback, 2017 → 2019 | The same page after it was renamed; the only source for project leads 2017-2019 |
 | `enactussfu.com/alumni/` | Wayback, 2012-2013 captures | The chapter's founder and the pre-2012 presidents, with their terms — the only source that reaches back before 2012 |
-| `enactussfu.com/…/community-spotlight-*` | Wayback, 7 posts, 2012-2013 | Alumni named in a post title, with no role and no term |
+| `enactussfu.com/…/community-spotlight-*` | Wayback, the 2012-2013 post series | Alumni named in a post title, with no role and no term |
 | `enactussfu.ca/our-team` | Wayback, 2023 capture | The 2022-23 executive, from the Wix-era site |
 | `enactussfu.ca/the-team` | Wayback, 2023-10 → 2024-04 | The 2023-24 executive, from the Squarespace-era site |
 | `enactussfu.ca/team` | Wayback (2026 captures) + live | The 2025-26 and 2026-27 executives |
@@ -152,7 +196,10 @@ three rather than quietly skipping any:
 1. **A row in `sources.tsv`** — six tab-separated columns: key, kind
    (`archived`, `spotlight` or `live`), cache prefix, CDX pattern, URL, and the
    post filter a `spotlight` sweep matches its posts by. Write `-` in a column
-   the kind does not use; an empty column is a malformed row.
+   the kind does not use; an empty column is a malformed row. The cache prefix
+   names files on disk and is claimed with a `startsWith`, so it is letters,
+   digits and dashes, and no prefix may be another one plus a dash: a row
+   prefixed `live` would claim `live-team.html` from the source that fetched it.
 2. **A parser for it in `build.ts`**, dispatched on the key. A declared source
    the build cannot parse is a hard failure, not a skip.
 3. **A fixture page in `tests/alumni-roster.test.ts`**, so the test that runs
@@ -162,10 +209,17 @@ The fetcher caches one snapshot per *unique content digest* — the Wayback CDX
 index reports a digest per capture, and captures with the same digest are
 byte-identical. `/executives/` has 88 archived captures but only 56 distinct
 bodies, so this is 32 requests it does not make against a service that
-rate-limits. It is resumable, so a page already in the cache is not re-fetched,
-and a page that will not download costs that page and nothing else: the run
-carries on, lists the failures at the end, and exits non-zero. Re-run to fill
-them. An HTTP error is a failed download like any other — every request is made
+rate-limits. It is resumable, so a page already in the cache **and recorded in
+`manifest.tsv`** is left completely alone — not re-fetched, and its recorded
+provenance not re-stamped from the registry row this run happens to read, which
+would claim a retrieval that never happened. A cached page the manifest does not
+know about is fetched again rather than stamped with a guess, because that is
+exactly the page `build.ts` drops. That re-fetch downloads beside the cached file
+and replaces it only once bytes have arrived, so a rate-limited retry cannot
+destroy an archived capture the archive may never serve again. A page that will
+not download costs that page and nothing else: the run carries on, lists the
+failures at the end, and exits non-zero. Re-run to fill them. An HTTP error is a
+failed download like any other — every request is made
 with `curl -f`, so a 404 or a rate-limit response leaves no file in the cache
 rather than a cached error page that would never be re-fetched.
 
@@ -217,10 +271,14 @@ The list fails closed and stays honest:
 `.cache/alumni-roster/` is gitignored, and must stay that way: the raw pages
 carry the role email addresses, phone numbers and employer detail that this file
 exists to leave behind. Both scripts enforce it rather than trusting it — each
-asks git, and refuses to write to or read from a cache directory inside this
-repository that git does not ignore, before a page is fetched or parsed. Point
-the cache somewhere else with the first argument to either script, or add that
-path to `.gitignore`.
+asks git **about the cache path itself**, and refuses to write to or read from a
+cache directory in **any** repository that git does not ignore, before a page is
+fetched or parsed. Asking about the cache path rather than about the directory
+the script was started from is what makes a run launched outside a repository
+refuse too, and committing someone's phone number to a different repository is
+the same commit. Point the cache somewhere else with the first argument to either
+script — a relative path leading out of the repository is fine — or add that path
+to `.gitignore`.
 
 The build is deterministic apart from `captured_at`, which defaults to today. Set
 `ROSTER_CAPTURED_AT=YYYY-MM-DD` to reproduce an earlier build exactly.
@@ -247,7 +305,7 @@ Then six columns:
 | `name` | As the club published it. ALL CAPS is title-cased; nothing else is changed. |
 | `role` | The role label the page carried. Where one person held several, each is listed with its own years: `Director of Program Innovation (2015-16); President (2016-17)`. Empty means the source named the person but stated no role. |
 | `years_active` | Academic years, `2016-17`. Consecutive years collapse to a run (`2015-16..2017-18`); a break in service is kept (`2022-23;2025-26..2026-27`). A bare `1991` is a single calendar year, because that is all the source stated. Empty means the source stated no year. |
-| `source_url` | The archived (or live) URL the row was read from — one URL per role, in the same order as `role`, `\|`-separated. |
+| `source_url` | The archived (or live) URL the row was read from — one URL per role, in the same order as `role`, `\|`-separated. Where the club spelled a name two ways, this is the snapshot the merged row was built from; the snapshot carrying the superseded spelling is kept in `confirmed-spellings.tsv`, not here. |
 | `captured_at` | The date **we** fetched the page, one entry per role in the same order as `role` and `source_url`, `\|`-separated — repeated even where two roles came off the same page on the same day, so the three columns can always be split and zipped by index. The date the *Internet Archive* captured it is the 14-digit stamp inside `source_url`. |
 | `confidence` | How firmly the name was recovered. See below. |
 
@@ -275,8 +333,8 @@ its "2026 Regionals" block to the 2025-26 season.
 | Level | What it means |
 |---|---|
 | `high` | Name **and** role read directly out of a structured roster record on a club page — a team card, a titled roster entry, a stated term. This is the great majority of the file. |
-| `medium` | The club named the person, but not as a structured roster record. Competition coaches (a comma-separated run inside a sentence, under a year heading) and one alumni-page entry whose role had to be read out of prose. |
-| `low` | The club named the person and nothing else. These are the "Community Spotlight" alumni: the post title gives a name, the post body is an interview we do not read, and no role or term is stated anywhere. `role` and `years_active` are empty for these, honestly. (The sweep yields one fewer row than it has posts: one of them names Anoop Aulakh, who is also on the alumni page as a president, so his row is `high` rather than `low`.) |
+| `medium` | The club named the person, but not as a structured roster record. Competition coaches (a comma-separated run inside a sentence, under a year heading) and an alumni-page entry whose role had to be read out of prose. |
+| `low` | The club named the person and nothing else. These are the "Community Spotlight" alumni: the post title gives a name, the post body is an interview we do not read, and no role or term is stated anywhere. `role` and `years_active` are empty for these, honestly. (Not every post in the sweep yields a `low` row: one of them names Anoop Aulakh, who is also on the alumni page as a president, so his row is `high` rather than `low`.) |
 
 A person seen more than once takes the **best** confidence of their sightings:
 one direct read off a roster page establishes the name, and a later weaker
@@ -326,7 +384,7 @@ that could quietly disagree with it:
 2008-09   1    2014-15  17    2018-19  16    2025-26  38
 2009-10   1    2015-16  36    2022-23   6    2026-27  33
 
-people 199    with no year 6    earliest 1991    latest 2026-27
+people 198    with no year 6    earliest 1991    latest 2026-27
 years covered 16 of the 36 academic years since the chapter was founded in 1991
 ```
 
@@ -376,12 +434,55 @@ These are the gaps we know about:
 
 The club's own pages spell some names two ways. These are **reported, never
 merged** — `build.ts` prints them at the end of every run — because picking which
-spelling is correct would be inventing a name.
+spelling is correct would be inventing a name. A human who knows the person can
+settle one, and `confirmed-spellings.tsv` below is where that settlement lives.
 
-- `Tim MacDougal` / `Tim MacDougall` — the competition page uses both, in
-  different years. Almost certainly one person; two rows until a human confirms.
 - `Eva Yueng` on the competition page is spelled `Eva Yeung` in the `enactus-org`
   research. The file follows the club's page, which is the source.
+
+### Settled: `confirmed-spellings.tsv`
+
+**One person, one row — but only once somebody who knows them has said so.**
+`confirmed-spellings.tsv` in this directory holds five tab-separated columns:
+the spelling the club published, the spelling that is right, the snapshot the
+published spelling was read from, the role that confirmed it, and the date.
+`build.ts` renames every matching sighting *before* removals and before the
+merge, so the two rows become one person everywhere — not just in the written
+file.
+
+It is a file rather than a hand edit for the same reason `removed.txt` is: the
+club's pages still spell the name both ways, so **merging the rows by hand is
+undone by the next rebuild.** It carries its own provenance because a spelling
+settled by a person is not derived from anything, and crediting it to the club
+page would credit the page that was wrong.
+
+A missing file means nothing has been confirmed — the strictest reading, and the
+one that keeps both rows. A malformed row stops the run, because a correction
+silently skipped is one person back as two rows. An entry nothing matches any
+more is reported as stale, like an entry on `expected-empty-sources.txt` — and
+that includes an entry left behind by a removal, because the check asks whether
+any sighting the roster *keeps* still carries the published spelling, not whether
+the cache ever held one.
+
+**A row here names a real person, so a removal deletes it.** It is a second
+durable record of them, not an index into the first: honouring a removal means
+both spellings on `removed.txt` and then both rows gone, in that order, exactly
+as steps 1 and 2 of the removal procedure above say. Leaving the row behind
+leaves somebody who asked to be taken out of this directory named in it.
+
+The file ships with one row:
+
+- `Tim MacDougal` → `Tim MacDougall`, confirmed by the captain on 2026-08-06.
+  The competition page spelled it both ways in different snapshots: the two-L
+  spelling in the January 2026 capture, the one-L spelling in May 2026. The
+  roster recorded both rather than guessing, which was right; a human then
+  settled it. The merged roster row cites the earliest snapshot, as every merged
+  row does; the May 2026 one is the `source_url` of the row here, so neither
+  page's evidence is lost.
+
+**Adding a row is a confirmation, not a tidy-up.** One character apart is
+evidence, not proof — `Ann Lee` and `Anna Lee` are two people. If nobody has
+confirmed it, leave both rows.
 
 ## Not yet wired into the pipeline
 

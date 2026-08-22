@@ -1,0 +1,43 @@
+# Spellings a human has confirmed, where the club's own pages published two.
+#
+# Five tab-separated columns, `#` starts a comment:
+#
+#   published	confirmed	source_url	confirmed_by	confirmed_on
+#
+# `published` is the spelling on a club page. `confirmed` is the spelling that
+# reaches past-executives.csv. `source_url` is the snapshot the published
+# spelling was read from — kept because it is the evidence that the club really
+# did publish it, and the evidence for whatever year that snapshot dates.
+# `confirmed_by` is the role that confirmed it and `confirmed_on` the day: a
+# spelling settled by a person is not derived from anything, and attributing it
+# to the club page would credit the page that was wrong.
+#
+# WHY THIS IS A FILE AND NOT A HAND EDIT. build.ts reads it and renames every
+# sighting before removals and before the merge, so the correction survives the
+# next rebuild. Editing the two rows into one in the CSV would not: the club's
+# pages still spell it both ways, so the next rebuild splits the person again —
+# the same failure removed.txt exists to prevent.
+#
+# It is also on the removal path, in both directions. A person holding two rows
+# can ask to be removed under either spelling; because the correction makes them
+# one name, `removed.txt` matches whichever one they wrote.
+#
+# AND A REMOVAL DELETES THEIR ROW HERE TOO. This file names a real person, so
+# leaving their row behind leaves them named in this directory after they asked
+# not to be. Put EVERY spelling in their row on `removed.txt` FIRST, then delete
+# the row: once it is gone nothing renames the published spelling, and a list
+# carrying only the confirmed one — removals match exactly — lets the next
+# rebuild restore them under the spelling nobody registered. See "If someone asks
+# to be removed" in README.md, which is the authoritative procedure.
+#
+# ADDING A ROW IS A HUMAN CONFIRMATION, NOT A GUESS. One character apart is
+# evidence, not proof. Only add a row when somebody who knows the person has
+# said which spelling is right. If nobody has, leave both rows: the roster
+# reporting a discrepancy it will not resolve is the correct outcome, and a
+# missing file simply means nothing has been confirmed.
+#
+# Record no contact detail here, and name a role rather than a person in
+# `confirmed_by`. See README.md in this directory.
+#
+# published	confirmed	source_url	confirmed_by	confirmed_on
+Tim MacDougal	Tim MacDougall	https://web.archive.org/web/20260516055532id_/https://www.enactussfu.ca/competition	captain	2026-08-06
