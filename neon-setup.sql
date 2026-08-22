@@ -192,3 +192,18 @@ create index if not exists enactus_leads_geocode_queue_idx
 -- clear the old one in every write path.
 create unique index if not exists enactus_email_templates_one_default
   on enactus_email_templates ((true)) where is_default;
+
+-- Append-only ledger of what the agent has spent at the API providers. One row
+-- per paid call. `month` is the calendar month in America/Vancouver (see
+-- src/lib/budget.ts), stored rather than derived so the monthly total is a
+-- plain indexed equality scan and does not depend on the server's timezone.
+create table if not exists enactus_spend (
+  id bigserial primary key,
+  month text not null,
+  provider text not null,
+  detail text,
+  cost_usd numeric(12, 6) not null check (cost_usd >= 0),
+  created_at timestamptz not null default now()
+);
+
+create index if not exists enactus_spend_month_idx on enactus_spend (month);

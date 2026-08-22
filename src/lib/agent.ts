@@ -9,6 +9,7 @@ import {
   REASONER,
   STRUCTURER,
   STRUCTURER_PROVIDER,
+  type Usage,
 } from "./llm";
 import { exaSearch, dedupeByDomain, ExaResult } from "./exa";
 import { placesSearch, hasPlacesKey } from "./places";
@@ -29,6 +30,14 @@ import { db, hasDatabaseUrl } from "./db";
 import { MAX_COUNT, parsedCount, requestedCount } from "./count";
 import { ENACTUS_ORG, ENACTUS_PROJECTS, ENACTUS_VENTURES } from "./enactus";
 import { scoreLead, boardOrderFor } from "./score";
+import {
+  budgetStopMessage,
+  exaSearchCostUsd,
+  openRouterCostUsd,
+  overBudget,
+  tokensFromChars,
+} from "./budget";
+import { budgetState, ledgerWriteProblem, recordSpend } from "./spend";
 
 type Emit = (e: AgentEvent) => void;
 
@@ -133,6 +142,31 @@ export async function runAgent(
   // Stop our own work at 52s so there is room to persist the leads and flush
   // the stream. Overrunning it loses the whole run.
   const RUN_DEADLINE = Date.now() + 52_000;
+
+  // The $20 CAD monthly cap. Checked before any paid call and again before the
+  // structuring stage, so a run that crosses the line mid-flight stops instead
+  // of finishing on money it does not have. It is announced when it stops:
+  // this pipeline has been repaired four times for degrading silently, and a
+  // run that just ends looks exactly like the bug.
+  const budgetBlocked = async (): Promise<boolean> => {
+    const state = await budgetState();
+    if (!overBudget(state)) return false;
+    emit({ type: "error", message: budgetStopMessage(state) });
+    return true;
+  };
+  if (await budgetBlocked()) return;
+
+  // Charges one OpenRouter call. The provider reports real usage on a completed
+  // call; a stream the deadline aborted has none, so the char counts stand in.
+  const charge = (u: Usage) => {
+    const input = u.inputTokens ?? tokensFromChars(u.inputChars);
+    const output = u.outputTokens ?? tokensFromChars(u.outputChars);
+    void recordSpend({
+      provider: "openrouter",
+      detail: u.model,
+      costUsd: openRouterCostUsd(u.model, input, output),
+    });
+  };
   // Do NOT tune this from a one-off measurement. The same structuring call has
   // been measured at 1.0s and at over 20s within the same hour, on the same
   // model and provider -- two separate sessions have now sized this budget from
@@ -283,7 +317,12 @@ export async function runAgent(
   let found: ExaResult[] = [];
   try {
     const exaBatches = Promise.all(
-      queries.map((q) => exaSearch(q, { numResults: perQuery, excludeDomains }).catch(() => []))
+      queries.map((q) => {
+        // Charged per request, not per result, and billed whether or not the
+        // search returns anything -- so it is recorded before the .catch().
+        void recordSpend({ provider: "exa", detail: "search", costUsd: exaSearchCostUsd(perQuery) });
+        return exaSearch(q, { numResults: perQuery, excludeDomains }).catch(() => []);
+      })
     );
     // Places returns actual businesses rather than pages about businesses, so
     // it is the better source for local storefront sponsors. Shaped into the
@@ -472,7 +511,13 @@ Reason candidate by candidate: how would each be approached and why might they s
         onReasoning: (d) => emit({ type: "reasoning", text: d }),
         onContent: (d) => emit({ type: "reasoning", text: d }),
       },
-      { model: REASONER, maxTokens: 1200, signal: controller.signal, fastProvider: true }
+      {
+        model: REASONER,
+        maxTokens: 1200,
+        signal: controller.signal,
+        fastProvider: true,
+        onUsage: charge,
+      }
     );
     reasoningText = (r.reasoning || r.content || "").trim();
   } catch {
@@ -545,6 +590,13 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
   mark(`structure start (allowance ${structureAllowance}ms, ${nChunks} chunks x ${wantPerChunk} leads, ${structureTokens} tok)`);
   const structureTimer = setTimeout(() => structureCtl.abort(), structureAllowance);
 
+  // Second gate. The reasoning stage above has now been charged, so a run that
+  // started just under the cap can be over it by here.
+  if (await budgetBlocked()) {
+    clearTimeout(structureTimer);
+    return;
+  }
+
   const runChunk = async (idx: number): Promise<RawLead[]> => {
     const startIdx = idx * perChunk;
     const slice = candidates.slice(startIdx, startIdx + perChunk);
@@ -569,6 +621,7 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
           signal: structureCtl.signal,
           temperature: 0.3,
           json: true,
+          onUsage: charge,
         }
       );
       body = s.content;
@@ -755,6 +808,12 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
     }
   }
 
+  // A cap that is not being recorded is not a cap. If the ledger could not be
+  // written this run, say so rather than let the next run believe the total.
+  const ledgerProblem = ledgerWriteProblem();
+  if (ledgerProblem) {
+    emit({ type: "status", step: "budget", message: `Budget tracking degraded -- ${ledgerProblem}` });
+  }
   emit({ type: "done", count: finalized.length, searchId });
 }
 

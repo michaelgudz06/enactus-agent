@@ -15,6 +15,20 @@ import { classifyLocation, normalizeLocation } from "../src/lib/geocode.ts";
 import { greet, isRoleInbox, lint, projectNames } from "../src/lib/email-lint.ts";
 import { ENACTUS_ORG, ENACTUS_PROJECTS } from "../src/lib/enactus.ts";
 import { logoUrl, monogram } from "../src/lib/logo.ts";
+import {
+  DEFAULT_CAP_CAD,
+  budgetStopMessage,
+  capCad,
+  exaSearchCostUsd,
+  openRouterCostUsd,
+  overBudget,
+  priceFor,
+  tokensFromChars,
+  toCad,
+  billingMonth,
+  EXA_SEARCH_USD,
+  OPENROUTER_PRICES,
+} from "../src/lib/budget.ts";
 import { setClause } from "../src/lib/db.ts";
 import { applyEvent, newTurn, takeLines, type RunTurn } from "../src/lib/run-events.ts";
 import { nextAction, quietDaysFor } from "../src/lib/next-action.ts";
@@ -1080,5 +1094,58 @@ eq(
   true,
   "a chain whose name carries the neighbourhood is no longer buried by its parent's headcount"
 );
+
+// ── budget: the $20 CAD monthly cap ──────────────────────────────────────
+//
+// The cap is the one number a volunteer cannot be allowed to overspend by
+// accident, so every rule that could quietly disable it is pinned here.
+
+// An unpriced model is charged at the MOST expensive rate known, never zero.
+// Free-by-default would let a new model pin in llm.ts spend the month invisibly.
+const dearest = Math.max(...Object.values(OPENROUTER_PRICES).map((p) => p.output));
+eq(priceFor("some/model-nobody-priced").output, dearest, "an unpriced model is charged at the dearest known rate");
+eq(priceFor("deepseek/deepseek-r1").output, 2.5, "R1 keeps its real OpenRouter output price");
+
+// Cost is per MILLION tokens; getting the divisor wrong by 10^6 is the whole
+// difference between stopping at $20 and stopping never.
+eq(openRouterCostUsd("deepseek/deepseek-r1", 1_000_000, 0), 0.7, "a million input tokens of R1 costs its input price");
+eq(openRouterCostUsd("deepseek/deepseek-r1", 0, 1_000_000), 2.5, "a million output tokens of R1 costs its output price");
+eq(openRouterCostUsd("deepseek/deepseek-r1", -5, -5), 0, "negative token counts cannot credit the ledger");
+
+// Exa bills per request with ten results included, not per result.
+eq(exaSearchCostUsd(6), EXA_SEARCH_USD, "a six-result search is the flat request price");
+eq(exaSearchCostUsd(10), EXA_SEARCH_USD, "the tenth result is still included");
+eq(exaSearchCostUsd(12) > EXA_SEARCH_USD, true, "results past the tenth cost extra");
+
+// The environment may SET the cap, never remove it. A typo in .env.local must
+// not turn the budget off.
+for (const bad of ["0", "-5", "not-a-number", "", "  ", "Infinity"]) {
+  process.env.API_BUDGET_CAD = bad;
+  eq(capCad(), DEFAULT_CAP_CAD, `API_BUDGET_CAD="${bad}" falls back to the default cap`);
+}
+process.env.API_BUDGET_CAD = "35";
+eq(capCad(), 35, "a valid API_BUDGET_CAD is honoured");
+delete process.env.API_BUDGET_CAD;
+eq(capCad(), DEFAULT_CAP_CAD, "the cap returns to the default when unset");
+
+// The stop is >=, not >: spending exactly the cap is spent.
+eq(overBudget({ spentUsd: 10, capUsd: 10, month: "2026-08" }), true, "spending exactly the cap is over budget");
+eq(overBudget({ spentUsd: 9.99, capUsd: 10, month: "2026-08" }), false, "just under the cap still runs");
+
+// A run that stops must say the number, the month and the knob.
+const stopMsg = budgetStopMessage({ spentUsd: 20, capUsd: 14.26, month: "2026-08" }, new Date("2026-08-21T12:00:00Z"));
+eq(/\$20\.00 CAD/.test(stopMsg), true, "the stop message names the cap");
+eq(/August 2026/.test(stopMsg), true, "the stop message names the billing month");
+eq(/API_BUDGET_CAD/.test(stopMsg), true, "the stop message names the knob that raises it");
+
+eq(tokensFromChars(0), 0, "no characters is no tokens");
+eq(tokensFromChars(-100), 0, "a negative char count cannot credit the estimate");
+eq(tokensFromChars(4), 1, "four characters is one token");
+eq(toCad(10) > 10, true, "CAD is the larger number");
+
+// Billing month is the club's own timezone: a run at 11pm on the 31st in
+// Vancouver counts against the month the student thinks it does, not UTC's.
+eq(billingMonth(new Date("2026-09-01T05:00:00Z")), "2026-08", "late-evening Vancouver on the 31st bills to August");
+eq(billingMonth(new Date("2026-09-01T08:00:00Z")), "2026-09", "after midnight Vancouver bills to September");
 
 console.log(`selfcheck: ${checks} assertions passed`);

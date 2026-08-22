@@ -64,11 +64,36 @@ function headers() {
   };
 }
 
+/**
+ * What one OpenRouter call consumed. Reported through a callback rather than
+ * returned, because both calls already have a return value and the budget must
+ * see a stream that aborted halfway just as much as one that finished.
+ *
+ * Token counts are null when the provider never sent a usage chunk -- which is
+ * exactly what happens when the time budget aborts a stream. The char counts
+ * are always present so the caller can fall back to an estimate; the
+ * chars-per-token rule lives in src/lib/budget.ts, not here, because this file
+ * carries no imports and must not grow a second copy of a pricing constant.
+ */
+export interface Usage {
+  model: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  inputChars: number;
+  outputChars: number;
+}
+
 // Non-streaming JSON completion (used for planning + scoring synthesis when we
 // don't need to show reasoning live).
 export async function chatJSON<T = unknown>(
   messages: Msg[],
-  opts: { model?: string; maxTokens?: number; signal?: AbortSignal; provider?: unknown } = {}
+  opts: {
+    model?: string;
+    maxTokens?: number;
+    signal?: AbortSignal;
+    provider?: unknown;
+    onUsage?: (u: Usage) => void;
+  } = {}
 ): Promise<T> {
   // Timing is logged because this call is the one that must fit inside the
   // function cap, and identical payloads have measured 1s standalone versus
@@ -96,6 +121,13 @@ export async function chatJSON<T = unknown>(
       `provider=${data?.provider} finish=${data?.choices?.[0]?.finish_reason} out=${data?.usage?.completion_tokens}`
   );
   const content: string = data?.choices?.[0]?.message?.content ?? "";
+  opts.onUsage?.({
+    model: opts.model ?? CHAT,
+    inputTokens: data?.usage?.prompt_tokens ?? null,
+    outputTokens: data?.usage?.completion_tokens ?? null,
+    inputChars: messages.reduce((n, m) => n + m.content.length, 0),
+    outputChars: content.length,
+  });
   return extractJSON<T>(content);
 }
 
@@ -116,6 +148,7 @@ export async function streamReasoner(
     provider?: unknown;
     temperature?: number;
     json?: boolean;
+    onUsage?: (u: Usage) => void;
   } = {}
 ): Promise<{ reasoning: string; content: string }> {
   const body: Record<string, unknown> = {
@@ -125,6 +158,9 @@ export async function streamReasoner(
     temperature: opts.temperature ?? 0.4,
     stream: true,
   };
+  // Ask for the usage chunk. It arrives last, so an aborted stream still has
+  // none -- that is what the char-count fallback in Usage is for.
+  body.stream_options = { include_usage: true };
   if (opts.json) body.response_format = { type: "json_object" };
   if (opts.provider) body.provider = opts.provider;
   // Route to the highest-throughput provider so R1 finishes within our time budget.
@@ -145,6 +181,7 @@ export async function streamReasoner(
   let buffer = "";
   let reasoning = "";
   let content = "";
+  let usage: { prompt_tokens?: number; completion_tokens?: number } | null = null;
 
   try {
     while (true) {
@@ -161,6 +198,7 @@ export async function streamReasoner(
         if (payload === "[DONE]") continue;
         try {
           const json = JSON.parse(payload);
+          if (json?.usage) usage = json.usage;
           const delta = json?.choices?.[0]?.delta ?? {};
           const r: string | undefined = delta.reasoning ?? delta.reasoning_content;
           const c: string | undefined = delta.content;
@@ -182,6 +220,15 @@ export async function streamReasoner(
     // let the caller proceed to structuring. Re-throw genuine errors.
     if (!(opts.signal?.aborted || (e as Error)?.name === "AbortError")) throw e;
   }
+  // Reported even on an aborted stream: those tokens were generated and the
+  // provider bills for them, so a run that times out must still be charged.
+  opts.onUsage?.({
+    model: opts.model ?? REASONER,
+    inputTokens: usage?.prompt_tokens ?? null,
+    outputTokens: usage?.completion_tokens ?? null,
+    inputChars: messages.reduce((n, m) => n + m.content.length, 0),
+    outputChars: reasoning.length + content.length,
+  });
   return { reasoning, content };
 }
 
