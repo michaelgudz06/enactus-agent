@@ -1,9 +1,9 @@
 name: CI
 
-# Every check here must pass with NO credentials. The app reads Supabase and
-# OpenRouter keys from the environment; none of them are available to CI and
-# none may be added. `vitest.config.mts` pins SUPABASE_SERVICE_ROLE_KEY to ""
-# so the suite structurally cannot reach the live project.
+# Every check here must pass with NO credentials. The app reads its Neon,
+# OpenRouter, Apollo and Google keys from the environment; none of them are
+# available to CI and none may be added. Nothing below touches the network at
+# runtime, so the suite structurally cannot reach the live database.
 
 on:
   pull_request:
@@ -21,17 +21,13 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # No `engines` field, no `.nvmrc`, and no Vercel project exists for this repo,
-  # so there is no configured runtime to inherit. 22.x is the active LTS that
-  # satisfies every dependency (next >=20.9.0, vitest ^20 || ^22 || >=24) and
-  # matches the version the project is actually developed on.
-  # If this app is ever deployed, align this with the deployment's Node version.
+  # Matches the Node version the Vercel project builds on. Keep the two aligned:
+  # a green build here that fails on deploy is worse than no CI at all.
   NODE_VERSION: "22.x"
 
 jobs:
   # Four separate jobs, not one job with four steps, deliberately: each reports
-  # its own check so a failure names the thing that broke. It also means the
-  # known-red lint job cannot mask a genuine build or test regression.
+  # its own check so a failure names the thing that broke.
   typecheck:
     name: typecheck
     runs-on: ubuntu-latest
@@ -44,6 +40,9 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
 
+  # `npm run check` is the selfcheck: a single script of plain assertions run
+  # under --experimental-strip-types. That is why the libraries it covers carry
+  # no static imports and why it is not a test framework -- see scripts/selfcheck.ts.
   test:
     name: test
     runs-on: ubuntu-latest
@@ -54,7 +53,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
-      - run: npm test
+      - run: npm run check
 
   build:
     name: build
@@ -76,11 +75,6 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-  # KNOWN RED. Two pre-existing react-hooks/set-state-in-effect errors in
-  # src/app/(app)/board/page.tsx and src/components/EmailModal.tsx fail this job
-  # today. They are owned by a separate change and are not silenced here:
-  # weakening the config or ignoring those files would defeat the point of
-  # adding CI. This job goes green on its own once that fix lands.
   lint:
     name: lint
     runs-on: ubuntu-latest
