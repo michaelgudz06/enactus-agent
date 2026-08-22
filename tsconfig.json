@@ -13,7 +13,6 @@
     // build also be loaded straight by `node --experimental-strip-types`, which
     // resolves only explicit .ts specifiers -- that mismatch is what used to
     // force hand-copied twins of shared helpers into scripts/-reachable files.
-    "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
     // scripts/alumni-roster/*.ts run under `node --experimental-strip-types`,
