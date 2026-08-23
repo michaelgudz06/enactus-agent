@@ -11,7 +11,6 @@ import { disqualify, provinceFromRequest, grounded, type ApolloOrg } from "../sr
 import { salvageObjects, pluck } from "../src/lib/llm.ts";
 import { nameMatchesDomain, companyKey } from "../src/lib/apollo.ts";
 import { baseName, companyEmails, emailBelongsTo, extractPeople, isBannedHost, isComplaintInbox, pickEmail, rankUrls } from "../src/lib/firecrawl.ts";
-import { classifyLocation, normalizeLocation } from "../src/lib/geocode.ts";
 import { greet, isRoleInbox, lint, projectNames } from "../src/lib/email-lint.ts";
 import { ENACTUS_ORG, ENACTUS_PROJECTS } from "../src/lib/enactus.ts";
 import { logoUrl, monogram } from "../src/lib/logo.ts";
@@ -432,90 +431,6 @@ for (const [a, b] of different)
 // such lead would dedupe against every other.
 eq(companyKey("Grosvenor") !== "", true, "real name survives");
 eq(companyKey("  Acme  Inc.  ") , "acme", "whitespace and suffix trimmed");
-
-// ── classifyLocation: what is allowed onto the map ────────────────────────
-// Every string below is a real value from the live `location` column (198
-// non-null, 80 distinct). The column is LLM-written free text, so the map's
-// honesty rests entirely on this function: anything classified 'city' or
-// 'address' gets a pin, and a pin is a claim that a sponsor is THERE.
-const p = (raw: string | null) => classifyLocation(raw).precision;
-const q = (raw: string) => classifyLocation(raw).query;
-
-// The 81 clean rows, and the 51 that spell the province out.
-eq(p("Burnaby, BC"), "city", "clean City, PROV");
-eq(p("Burnaby, British Columbia"), "city", "province spelled out");
-eq(p("Burnaby, British Columbia, Canada"), "city", "spelled out plus country");
-eq(p("Langley, B.C."), "city", "province with periods");
-eq(q("Langley, British Columbia"), "Langley, BC, Canada", "canonical query, not the raw text");
-eq(q("Vancouver, Canada"), "Vancouver, BC, Canada", "trailing country dropped, province restored");
-
-// The 34 with no comma at all.
-eq(p("Burnaby"), "city", "bare city");
-eq(p("Vancouver"), "city", "bare city, no province");
-
-// The 41 parentheticals. All commentary, and stripping it early is also what
-// stops the city names hidden inside asides from being read as the location.
-eq(p("Burnaby, BC (Headquarters)"), "city", "parenthetical qualifier ignored");
-eq(q("Burnaby, BC (based on context of supporting Burnaby Pride)"), "Burnaby, BC, Canada", "long aside ignored");
-eq(q("Surrey, BC (Headquartered in Surrey)"), "Surrey, BC, Canada", "repeated city in aside");
-eq(p("Canada (Headquarters in Vancouver, BC)"), "region", "city inside an aside must NOT promote a country");
-eq(p("International (with local operations in Burnaby, BC)"), "region", "same trap, other wording");
-eq(p("Canada (Likely BC, based on 604 phone number)"), "region", "a guess in prose is still a country");
-
-// The 4 street addresses.
-eq(p("7442 Fraser Park Drive, Burnaby, BC V5J 5B9"), "address", "street number means address");
-eq(p("26688-56 Ave, Langley, BC V4W 3X5"), "address", "hyphenated civic number");
-eq(q("5318 271 Street, Aldergrove, BC V4W 3Y7"), "5318 271 Street, Aldergrove, BC V4W 3Y7", "address geocoded verbatim");
-
-// The 13 region-level rows. These are the ones that must never get a pin --
-// "Global (Swiss HQ)" on a Lower Mainland centroid is the map telling a lie.
-eq(p("Global (Swiss HQ)"), "region", "global HQ is not a Lower Mainland sponsor");
-eq(q("Global (Swiss HQ)"), null, "and it is never geocoded");
-eq(p("Canada-wide"), "region", "hyphen must not hide the country token");
-eq(p("Canada-wide (Oakville, ON HQ; strong BC presence)"), "region", "national chain stays unplaced");
-eq(p("Coastal British Columbia (assumed Lower Mainland)"), "region", "an assumption is not a location");
-eq(p("Ontario (with corporate giving programs; check for Lower Mainland store presence)"), "region", "province-level");
-eq(p("British Columbia"), "region", "province alone");
-eq(p("BC / Canada"), "region", "province or country");
-eq(p("Fraser Valley, BC / National"), "region", "sub-region is not a municipality");
-
-// Region phrases that CONTAIN a city name are the sharpest edge here: pinning
-// "Greater Vancouver" (2.6M people) on Vancouver city hall is exactly the
-// false precision this whole module exists to prevent.
-eq(p("Greater Vancouver"), "region", "Greater Vancouver is not Vancouver");
-eq(p("Metro Vancouver"), "region", "Metro Vancouver is not Vancouver");
-eq(p("Vancouver Island, BC"), "region", "Vancouver Island is not Vancouver");
-eq(p("Lower Mainland, BC (Vancouver)"), "region", "region name wins over a city in an aside");
-
-// ...but the same phrase alongside a real municipality must not suppress it.
-eq(q("Maple Ridge, Tri-Cities, Greater Vancouver"), "Maple Ridge, BC, Canada", "region phrase removed, city kept");
-eq(q("Metrotown, Burnaby & Greater Vancouver"), "Burnaby, BC, Canada", "neighbourhood, city, region -> the city");
-eq(q("Langley, BC (Lower Mainland)"), "Langley, BC, Canada", "region qualifier does not demote a city");
-
-// Longest-first matching. "North Vancouver" contains "Vancouver", and matching
-// the shorter one pins every North Van lead downtown, across an inlet.
-eq(q("North Vancouver, BC"), "North Vancouver, BC, Canada", "North Vancouver is its own city");
-
-// Out-of-province rows are real and must keep their own province, or Toronto
-// and Montreal land in BC.
-eq(q("Toronto, ON (Major operations in Lower Mainland)"), "Toronto, ON, Canada", "Ontario city stays in Ontario");
-eq(q("Calgary, AB (with community focus in client/team locations)"), "Calgary, AB, Canada", "Alberta city");
-// Two municipalities in one string is arbitrary by construction -- the longest
-// name wins, because that is the rule that keeps North Vancouver off Vancouver.
-// One live row does this ("Metrotown, Burnaby & Greater Vancouver") and it
-// lands on Burnaby, which is right; there is no data to justify more than that.
-eq(q("Montréal, QC and Burnaby, BC"), "Montreal, QC, Canada", "accents folded, longest name wins");
-
-// Nothing at all.
-eq(p(null), "none", "null location");
-eq(p(""), "none", "empty location");
-eq(p("   "), "none", "whitespace only");
-eq(q("Greater Vancouver"), null, "unplaceable rows never carry a query");
-
-// normalizeLocation on its own, since the route logs it.
-eq(normalizeLocation("Burnaby, BC (Headquarters)"), "Burnaby, BC", "aside stripped");
-eq(normalizeLocation("Burnaby, British Columbia, Canada"), "Burnaby, BC", "province collapsed, country dropped");
-eq(normalizeLocation(null), "", "null normalizes to empty");
 
 
 // ── email lint ────────────────────────────────────────────────────────────

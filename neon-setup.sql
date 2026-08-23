@@ -79,7 +79,7 @@ create index if not exists enactus_email_drafts_lead_idx
   on enactus_email_drafts (lead_id);
 
 -- ══════════════════════════════════════════════════════════════════
--- CRM tables — timeline, templates, map. Additive: every statement is
+-- CRM tables — timeline, senders, templates. Additive: every statement is
 -- if-not-exists so this file stays runnable against a live database.
 -- ══════════════════════════════════════════════════════════════════
 
@@ -121,27 +121,6 @@ create table if not exists enactus_email_templates (
   updated_at timestamptz default now()
 );
 
--- Areas to sweep, not a geometry system: a centre and a radius is enough to
--- ask "who have we not covered in Coquitlam yet". lead_count is stored rather
--- than counted live because the sweep endpoint recomputes it on demand.
-create table if not exists enactus_territories (
-  id uuid primary key default gen_random_uuid(),
-  name text not null unique,
-  lat double precision not null,
-  lng double precision not null,
-  radius_m integer not null default 8000,
-  swept_at timestamptz,
-  swept_by_name text,
-  lead_count integer not null default 0
-);
-
--- Map pins. geocoded_at is stamped even when nothing is found, so an
--- unplaceable location is not retried forever.
-alter table enactus_leads add column if not exists lat double precision;
-alter table enactus_leads add column if not exists lng double precision;
-alter table enactus_leads add column if not exists geo_precision text;
-alter table enactus_leads add column if not exists geocoded_at timestamptz;
-
 alter table enactus_email_drafts add column if not exists template_id uuid;
 alter table enactus_email_drafts add column if not exists sender_id uuid;
 
@@ -181,12 +160,9 @@ do $$ begin
     check (status in ('prospects','researched','outreach_sent','in_conversation','closed_won','closed_lost'));
 exception when duplicate_object then null; end $$;
 
--- The timeline is always read newest-first for one lead; the geocode queue is
--- always "located but not yet placed".
+-- The timeline is always read newest-first for one lead.
 create index if not exists enactus_lead_activity_lead_idx
   on enactus_lead_activity (lead_id, created_at desc);
-create index if not exists enactus_leads_geocode_queue_idx
-  on enactus_leads (geocoded_at) where location is not null;
 
 -- One default template, enforced by the database rather than by remembering to
 -- clear the old one in every write path.
@@ -207,3 +183,9 @@ create table if not exists enactus_spend (
 );
 
 create index if not exists enactus_spend_month_idx on enactus_spend (month);
+
+-- Note for anyone rebuilding: the live database still carries enactus_territories
+-- and the lat/lng/geo_precision/geocoded_at columns from the map, which was
+-- removed. Nothing reads them any more. They are left in place rather than
+-- dropped because dropping a column cannot be undone and an unused one costs
+-- nothing; drop them by hand if you want the schema tidy.
