@@ -21,7 +21,6 @@ used to live in one outgoing VP's head. This keeps them in a database instead.
 | `/agent` | Describe a target ("bakeries in Burnaby that sponsor student events"). Streams its reasoning while it works. |
 | `/board` | Kanban pipeline: Prospects → Researched → Outreach Sent → In Conversation → Closed. Drag to advance; closing a win asks for the dollar value. |
 | `/leads` | Flat CRM list with sort, search, and filters by industry, owner, status, and missing contact info. |
-| `/map` | Every geocoded lead as a pin, coloured by pipeline stage, plus territories to sweep. |
 | `/settings` | Sender identities, outreach templates, CSV export. |
 
 Drafting an email opens it as a Gmail draft in the sender's own account. Nothing
@@ -48,9 +47,6 @@ These are enforced in code, not in prompts, because a prompt is a suggestion:
 - **No invented facts.** A name, email, or number survives only if it appears
   verbatim in fetched evidence. Every figure on screen is computed in TypeScript
   from stored values — none is model output.
-- **No guessed map pins.** `src/lib/geocode.ts` decides precision before
-  anything is geocoded, and only street- and city-level matches are pinned.
-  "Global (Swiss HQ)" is shown as unplaceable rather than dropped into Vancouver.
 - **No scraping LinkedIn.** Public pages via Exa, company sites via Firecrawl,
   and search links for a human to click. That is the whole contact pipeline.
 
@@ -87,8 +83,8 @@ obvious thing to replace first if the team grows.
 npm run check
 ```
 
-`scripts/selfcheck.ts` asserts the pure logic — count parsing, geocode
-precision, filtering and sorting, email linting, money parsing — with no test
+`scripts/selfcheck.ts` asserts the pure logic — count parsing, filtering and
+sorting, email linting, money parsing — with no test
 framework and no database. Everything it covers is dependency-free by design, so
 it runs in about a second.
 
@@ -100,10 +96,10 @@ npx tsc --noEmit
 ## Layout
 
 ```
-src/app/(app)/     the five pages
+src/app/(app)/     the four pages
 src/app/api/       route handlers
 src/lib/           the actual logic — agent pipeline, providers, pure helpers
-scripts/           selfcheck, territory seed
+scripts/           selfcheck, score backtest, lead rescore
 neon-setup.sql     schema (7 tables, all prefixed enactus_)
 ```
 
@@ -114,4 +110,4 @@ arrive as arguments instead.
 ## Stack
 
 Next.js 16 (App Router) · React 19 · TypeScript · Tailwind v4 · Neon Postgres ·
-Leaflet + OpenStreetMap · deployed on Vercel.
+deployed on Vercel.
