@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Sparkles, ArrowUp, Brain, History, Lightbulb, CircleDashed, CheckCircle2, AlertTriangle, ChevronDown } from "lucide-react";
+import { Sparkles, ArrowUp, Brain, History, Lightbulb, CircleDashed, CheckCircle2, AlertTriangle, ChevronDown, Plus, FastForward, Square } from "lucide-react";
 import { useApp } from "@/components/AppShell";
-import { useRun, Turn } from "@/components/RunProvider";
+import { MAX_ROUNDS, useRun, Turn } from "@/components/RunProvider";
 import { Lead, SearchRow } from "@/lib/types";
 import LeadCard from "@/components/LeadCard";
 import EmailModal from "@/components/EmailModal";
@@ -29,7 +29,7 @@ export default function AgentPage() {
   const { mode } = useApp();
   // The run itself lives in RunProvider, mounted by the (app) layout, so that
   // navigating to the board does not unmount it and kill the stream.
-  const { turns, setTurns, prompt, setPrompt, running, send: startRun } = useRun();
+  const { turns, setTurns, prompt, setPrompt, running, send: startRun, more, chain, stop, skip, chaining, round, canContinue } = useRun();
   const [history, setHistory] = useState<SearchRow[]>([]);
   const [emailLead, setEmailLead] = useState<Lead | null>(null);
 
@@ -132,9 +132,33 @@ export default function AgentPage() {
                 running={running && i === turns.length - 1}
                 onEmail={setEmailLead}
                 onDismiss={(id) => dismiss(i, id)}
+                onSkip={i === turns.length - 1 ? () => skip(mode) : undefined}
               />
             </div>
           ))}
+
+          {/* Re-running the same prompt is not a no-op: agent.ts hands every
+              domain already on the board to Exa as an exclusion, so each round
+              reaches past the last one. That is the whole trick behind these. */}
+          {canContinue && !running && !chaining && last?.done && !last.clarify && !last.answer && (
+            <div className="flex gap-2 pl-10">
+              <button onClick={() => more(mode)} className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold" style={{ background: "var(--surface)", borderColor: "var(--border)" }}>
+                <Plus size={13} style={{ color: "var(--gold)" }} /> Find more
+              </button>
+              <button onClick={() => chain(mode)} className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold" style={{ background: "var(--surface)", borderColor: "var(--border)" }}>
+                <FastForward size={13} style={{ color: "var(--gold)" }} /> Keep going
+              </button>
+            </div>
+          )}
+
+          {chaining && (
+            <div className="flex items-center gap-3 pl-10 text-xs">
+              <span style={{ color: "var(--muted)" }}>Round {round} of {MAX_ROUNDS} — each round searches past what is already on the board.</span>
+              <button onClick={stop} className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 font-semibold" style={{ background: "var(--surface)", borderColor: "var(--border)" }}>
+                <Square size={11} style={{ color: "var(--accent)" }} /> Stop after this round
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -175,12 +199,14 @@ export default function AgentPage() {
 }
 
 function AgentTurn({
-  turn, running, onEmail, onDismiss,
+  turn, running, onEmail, onDismiss, onSkip,
 }: {
   turn: Turn;
   running: boolean;
   onEmail: (lead: Lead) => void;
   onDismiss: (id: string) => void;
+  /** Absent on older turns: only the newest clarify card can still be skipped. */
+  onSkip?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const reasonRef = useRef<HTMLDivElement>(null);
@@ -256,7 +282,14 @@ function AgentTurn({
             <ul className="text-xs space-y-1" style={{ color: "var(--muted)" }}>
               {turn.clarify.map((q, i) => <li key={i}>• {q}</li>)}
             </ul>
-            <div className="text-[11px] mt-2.5" style={{ color: "var(--faint)" }}>Reply below and the agent picks up where it left off.</div>
+            <div className="flex items-center gap-3 mt-2.5">
+              <div className="text-[11px]" style={{ color: "var(--faint)" }}>Reply below and the agent picks up where it left off.</div>
+              {onSkip && (
+                <button onClick={onSkip} className="text-[11px] font-semibold ml-auto shrink-0 hover:underline" style={{ color: "var(--gold)" }}>
+                  Skip, just search
+                </button>
+              )}
+            </div>
           </div>
         )}
 
@@ -282,12 +315,6 @@ function AgentTurn({
               DELETE /api/leads/:id does on both pages. */}
           {visible.map((l) => <LeadCard key={l.id} lead={l} onEmail={onEmail} onDelete={onDismiss} />)}
         </div>
-
-        {running && turn.leads.length === 0 && !turn.clarify && !turn.answer && (
-          <div className="grid sm:grid-cols-2 gap-3">
-            {[0, 1].map((i) => <div key={i} className="h-40 rounded-xl shimmer" />)}
-          </div>
-        )}
 
         {turn.done && turn.leads.length === 0 && !turn.clarify && !turn.error && !turn.answer && (
           <div className="rounded-xl border p-4 text-sm" style={{ background: "var(--surface)", borderColor: "var(--border)" }}>

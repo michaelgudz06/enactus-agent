@@ -27,7 +27,7 @@ import {
   companyKey,
 } from "./apollo";
 import { db, hasDatabaseUrl } from "./db";
-import { MAX_COUNT, parsedCount, requestedCount } from "./count";
+import { MAX_COUNT, parsedCount, requestedCount, unbounded } from "./count";
 import { ENACTUS_ORG, ENACTUS_PROJECTS, ENACTUS_VENTURES } from "./enactus";
 import { scoreLead, boardOrderFor } from "./score";
 import { boardLines } from "./table";
@@ -307,7 +307,10 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
     message: `Understanding your request. Target: ${targetCount} lead${targetCount === 1 ? "" : "s"}${capNote}`,
   });
 
-  if (plan.needClarification && !answers && !input.skipClarify && plan.questions?.length) {
+  // "as many as you can" is already an answer to "how narrow do you want this?"
+  // -- stopping to ask spends the whole 60s budget on a question the user
+  // pre-empted, and they get zero leads for the round.
+  if (plan.needClarification && !answers && !input.skipClarify && !unbounded(fullPrompt) && plan.questions?.length) {
     emit({ type: "clarify", questions: plan.questions.slice(0, 2) });
     return;
   }
@@ -646,9 +649,13 @@ Reason candidate by candidate: how would each be approached and why might they s
   // for more leads than it has candidates simply under-delivers.
   const nChunks = Math.max(
     1,
-    Math.min(4, Math.floor(candidates.length / LEADS_PER_CHUNK), Math.ceil(targetCount / LEADS_PER_CHUNK))
+    Math.min(6, Math.floor(candidates.length / LEADS_PER_CHUNK), Math.ceil(targetCount / LEADS_PER_CHUNK))
   );
   const perChunk = Math.ceil(candidates.length / nChunks);
+  // Deliberately NOT clamped to LEADS_PER_CHUNK. On a big ask every chunk is
+  // cut off by the deadline and salvaged mid-stream either way, so the ask size
+  // only decides how many leads are in flight when the cut lands: measured on
+  // the same prompt, 6 chunks x 5 salvaged 11 leads, 6 x 3 salvaged 8.
   const wantPerChunk = Math.ceil(targetCount / nChunks);
 
   const structureUserFor = (slice: Candidate[], startIdx: number, want: number) => `User request: ${fullPrompt}

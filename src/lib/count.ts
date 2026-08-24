@@ -82,7 +82,32 @@ export function parsedCount(prompt: string): number | null {
   return null;
 }
 
+/**
+ * Did the user ask for as many as we can get, without naming a number?
+ *
+ * Every unbounded phrasing used to fall through parsedCount to DEFAULT_COUNT,
+ * so "find me as many leads as you can in the cpg industry" -- the loudest
+ * possible ask -- ran as 6, the smallest default the app has, and then
+ * delivered 4. Nothing in the funnel was broken; it was never asked for more.
+ *
+ * Two shapes, because they disambiguate differently. "as many X as you can"
+ * brackets itself: the trailing "as you can" is what turns it into a quantity,
+ * so no noun test is needed. The bare quantifiers are ordinary English that can
+ * land anywhere in a sentence, so they reuse the same positional GAP +
+ * COUNT_NOUN test the digits use -- "every bakery in Burnaby" is a count,
+ * "businesses that supported every local school" is not.
+ */
+const AS_MANY = /\bas many\b[^.?!]{0,40}?\bas (?:possible|(?:you|we|i) (?:can|could))\b/i;
+const BULK = "(?:lots of|a bunch of|a ton of|tons of|loads of|plenty of|every|all the)";
+
+export function unbounded(prompt: string): boolean {
+  if (AS_MANY.test(prompt)) return true;
+  return new RegExp(`\\b${BULK}\\s+${GAP}${COUNT_NOUN}\\b`, "i").test(prompt);
+}
+
 export function requestedCount(prompt: string, fallback: number = DEFAULT_COUNT): number {
   const n = parsedCount(prompt);
-  return n === null ? fallback : Math.max(1, Math.min(MAX_COUNT, n));
+  if (n !== null) return Math.max(1, Math.min(MAX_COUNT, n));
+  // An unbounded ask is a real request for the ceiling, not an absent one.
+  return unbounded(prompt) ? MAX_COUNT : fallback;
 }

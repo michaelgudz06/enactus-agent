@@ -32,7 +32,24 @@ interface RunCtx {
   /** True once a run has been started in this session, for the board's refresh. */
   leadSignal: number;
   send: (text: string, mode: Mode, awaitingAnswers: boolean) => void;
+  /** Re-run the last search for a fresh batch. The board-domain exclusion in
+   *  agent.ts is what makes an identical prompt return different companies. */
+  more: (mode: Mode) => void;
+  /** Run `more` back to back until it stops paying, or until stop() is called. */
+  chain: (mode: Mode) => void;
+  stop: () => void;
+  /** Skip the clarifying questions and search on what was already typed. */
+  skip: (mode: Mode) => void;
+  /** True while chain() is mid-sequence, including between rounds. */
+  chaining: boolean;
+  /** Which round chain() is on, 1-based, for the button label. */
+  round: number;
+  /** Is there a finished search to continue from? */
+  canContinue: boolean;
 }
+
+/** One click of "Keep going" is at most this many 60s runs. */
+export const MAX_ROUNDS = 5;
 
 const Ctx = createContext<RunCtx | null>(null);
 
@@ -54,15 +71,25 @@ export default function RunProvider({ children }: { children: React.ReactNode })
   // Read synchronously by send() so two clicks in one tick cannot both start a
   // reader; `running` alone is a render behind and would let the second through.
   const busy = useRef(false);
+  // chain() state. chainRef guards re-entry the same way busy does for run():
+  // `chaining` is a render behind, so two fast clicks would both start a loop.
+  const chainRef = useRef(false);
+  const stopRef = useRef(false);
+  const [chaining, setChaining] = useState(false);
+  const [round, setRound] = useState(0);
 
-  const run = useCallback(async (mode: Mode, answers?: string) => {
+  const run = useCallback(async (mode: Mode, answers?: string, forceSkip?: boolean): Promise<number> => {
     busy.current = true;
     setRunning(true);
+    // Counted here rather than read off `turns` afterwards: chain() needs to
+    // know whether THIS round produced anything, and the state update is a
+    // render behind by the time the loop would look.
+    let produced = 0;
     try {
       const res = await fetch("/api/agent/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: askedRef.current, mode, answers, skipClarify: Boolean(answers) }),
+        body: JSON.stringify({ prompt: askedRef.current, mode, answers, skipClarify: Boolean(answers) || Boolean(forceSkip) }),
       });
       if (!res.ok || !res.body) {
         const d = await res.json().catch(() => ({}));
@@ -84,6 +111,7 @@ export default function RunProvider({ children }: { children: React.ReactNode })
           setTurns((ts) => applyEvent(ts, ev));
           // A lead is emitted after the insert has been attempted, so this is
           // the earliest honest moment to tell the board to read again.
+          if (ev.type === "lead") produced++;
           if (ev.type === "lead" || ev.type === "done") setLeadSignal((n) => n + 1);
         }
       }
@@ -93,6 +121,7 @@ export default function RunProvider({ children }: { children: React.ReactNode })
       busy.current = false;
       setRunning(false);
     }
+    return produced;
   }, []);
 
   const send = useCallback((text: string, mode: Mode, awaitingAnswers: boolean) => {
@@ -104,8 +133,57 @@ export default function RunProvider({ children }: { children: React.ReactNode })
     else { askedRef.current = t; void run(mode); }
   }, [run]);
 
+  // Every continuation below re-sends the ORIGINAL prompt with skipClarify on.
+  // Without the skip, round two can be met with the same clarifying questions
+  // the user already answered, which ends the sequence instead of extending it.
+  const again = useCallback((mode: Mode) => {
+    setTurns((ts) => [...ts, newTurn<Lead>(askedRef.current)]);
+    return run(mode, undefined, true);
+  }, [run]);
+
+  const more = useCallback((mode: Mode) => {
+    if (!askedRef.current || busy.current) return;
+    void again(mode);
+  }, [again]);
+
+  const skip = useCallback((mode: Mode) => {
+    if (!askedRef.current || busy.current) return;
+    void again(mode);
+  }, [again]);
+
+  // Rounds run one after another, never concurrently: each is its own 60s
+  // function and they share the same board, so two in flight would discover
+  // the same companies and race to insert them.
+  const chain = useCallback(async (mode: Mode) => {
+    if (!askedRef.current || busy.current || chainRef.current) return;
+    chainRef.current = true;
+    stopRef.current = false;
+    setChaining(true);
+    try {
+      for (let i = 0; i < MAX_ROUNDS; i++) {
+        if (stopRef.current) break;
+        setRound(i + 1);
+        // A round that adds nothing means the exclusion list has caught up with
+        // what these queries can reach. Four more rounds of that is four
+        // minutes and real money spent re-reading pages we already rejected.
+        if ((await again(mode)) === 0) break;
+      }
+    } finally {
+      chainRef.current = false;
+      stopRef.current = false;
+      setChaining(false);
+      setRound(0);
+    }
+  }, [again]);
+
+  const stop = useCallback(() => { stopRef.current = true; }, []);
+
   return (
-    <Ctx.Provider value={{ turns, setTurns, prompt, setPrompt, running, leadSignal, send }}>
+    <Ctx.Provider value={{
+      turns, setTurns, prompt, setPrompt, running, leadSignal, send,
+      more, chain, stop, skip, chaining, round,
+      canContinue: Boolean(askedRef.current),
+    }}>
       {children}
     </Ctx.Provider>
   );
