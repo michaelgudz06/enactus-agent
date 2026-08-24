@@ -30,6 +30,7 @@ import { db, hasDatabaseUrl } from "./db";
 import { MAX_COUNT, parsedCount, requestedCount } from "./count";
 import { ENACTUS_ORG, ENACTUS_PROJECTS, ENACTUS_VENTURES } from "./enactus";
 import { scoreLead, boardOrderFor } from "./score";
+import { boardLines } from "./table";
 import {
   budgetStopMessage,
   exaSearchCostUsd,
@@ -141,12 +142,7 @@ async function boardSummary(mode: Mode): Promise<string> {
         from enactus_leads where mode = ${mode}
        group by status`) as { status: string; n: number; total: number; companies: string }[];
     if (!rows.length) return `The ${mode} board is empty -- no leads have been found yet.`;
-    const label = new Map(STATUS_COLUMNS.map((c) => [c.id as string, c.label]));
-    const lines = rows.map((r) => {
-      const money = r.total > 0 ? `, $${r.total.toLocaleString()} total` : "";
-      return `- ${label.get(r.status) ?? r.status}: ${r.n} lead${r.n === 1 ? "" : "s"}${money} (${(r.companies ?? "").slice(0, 400)})`;
-    });
-    return `The club's current ${mode} board:\n${lines.join("\n")}`;
+    return `The club's current ${mode} board:\n${boardLines(STATUS_COLUMNS, rows).join("\n")}`;
   } catch {
     // A board that cannot be read is worth answering the Enactus half of the
     // question anyway -- the alternative is failing a "what is our mission"
@@ -176,7 +172,7 @@ async function answerRequest(
 
 Answer the question directly and briefly, in plain prose. No markdown headings, no list longer than four items, two short paragraphs at most.
 
-Answer ONLY from what follows. If it does not cover the question, say so in one sentence and name where the answer would come from -- a lead search, the board's lead detail panel, or a person on the team. Never invent a sponsor, a number, or a project.
+Answer ONLY from what follows. When it covers part of the question and not the rest, answer the part it covers and say in one sentence what you do not have -- refusing a whole question over one missing half is worse than a partial answer. When it covers none of it, say so and name where the answer would come from: a lead search, the board's lead detail panel, or a person on the team. A stage listed with 0 leads IS the answer for that stage, not missing data. Never invent a sponsor, a number, or a project.
 
 ${ENACTUS_ORG}
 
@@ -265,11 +261,13 @@ export async function runAgent(
   const mark = (label: string) => console.log(`[agent] ${label} @${Date.now() - t0}ms`);
 
   // ── 1. Understand + plan ────────────────────────────────────────────────
-  emit({
-    type: "status",
-    step: "understand",
-    message: `Understanding your request. Target: ${targetCount} lead${targetCount === 1 ? "" : "s"}${capNote}`,
-  });
+  // The status announcing a lead target is emitted AFTER the intent branch
+  // below, never here: measured live, asking "how many of our 40 leads are
+  // still in prospects?" put "Target: 25 leads (you asked for 40; 25 is the
+  // most one run can do -- run it again to keep going)" above a prose answer
+  // that searched nothing and capped nothing, telling the user to re-run a
+  // request that had not been truncated. The page renders "Starting..." while
+  // `steps` is empty, so the planning wait is still covered.
   // Wider ask needs more angles, or every query returns the same few pages.
   const queryCount = targetCount <= 6 ? 3 : targetCount <= 12 ? 4 : 5;
   let plan: Plan;
@@ -286,7 +284,9 @@ export async function runAgent(
                 : 'AT LEAST 2 and up to 4 short local-business queries suited to a maps search (e.g. "coffee shops Burnaby", "climbing gyms near SFU"). A maps search returns the businesses themselves rather than pages written about them, which is the only channel that reliably finds the independent storefronts this club actually wins, so never leave it empty'
             }. ALWAYS populate searchQueries, criteria and location, even when needClarification is true -- the user can skip the questions and those fields are still used. Only set needClarification true (with up to 2 short questions) if the request is too vague to search well. altAngle is a different angle to try if this search was already done before.
 
-intent is "answer" ONLY when the user is asking a question rather than asking to find businesses -- about Enactus SFU itself, its mission, projects or ventures, about what is already on their board, or a plain conversational question. Use "leads" for anything that asks to find, search for, list, or add companies, and when in doubt. When intent is "answer" the other fields are ignored, so leave them empty.` },
+intent is "answer" for exactly three things: greetings, thanks and small talk ("hi", "thanks!"); questions about Enactus SFU, its mission, projects or ventures; and questions about what is already on their board. Running a search on a greeting costs real money and puts junk on the board, so those three never search.
+
+intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kind of business to go after -- "credit unions and banks in the Lower Mainland with community grant programs" and "catering companies in Burnaby" are search requests with the verb left off, not questions, and so is "20 more" or "same thing for Richmond". When you cannot tell which it is, choose "leads": a needless search costs money, but answering a search request hands the user nothing they asked for. When intent is "answer" the other fields are ignored, so leave them empty.` },
         { role: "user", content: fullPrompt },
       ],
       { model: STRUCTURER, provider: STRUCTURER_PROVIDER, maxTokens: 800 }
@@ -300,6 +300,12 @@ intent is "answer" ONLY when the user is asking a question rather than asking to
     await answerRequest(fullPrompt, mode, userName, emit, charge);
     return;
   }
+
+  emit({
+    type: "status",
+    step: "understand",
+    message: `Understanding your request. Target: ${targetCount} lead${targetCount === 1 ? "" : "s"}${capNote}`,
+  });
 
   if (plan.needClarification && !answers && !input.skipClarify && plan.questions?.length) {
     emit({ type: "clarify", questions: plan.questions.slice(0, 2) });

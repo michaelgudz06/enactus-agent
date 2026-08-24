@@ -33,7 +33,7 @@ import { applyEvent, newTurn, takeLines, type RunTurn } from "../src/lib/run-eve
 import { nextAction, quietDaysFor } from "../src/lib/next-action.ts";
 import { amountQuestion, inKindQuestion, parseAmount } from "../src/lib/amount.ts";
 import { csvCell, toCsv } from "../src/lib/csv.ts";
-import { facets, filterLeads, industryFacets, industryMatches, matchesQuery, personKey, sortLeads } from "../src/lib/table.ts";
+import { boardLines, facets, filterLeads, industryFacets, industryMatches, matchesQuery, personKey, sortLeads } from "../src/lib/table.ts";
 import { companyPoints, contactPoints, isBranchAddress, isDecisionInbox, isGenericInbox, isPersonalEmail, namesLocalOutlet, scoreLead, boardOrderFor, WEIGHTS } from "../src/lib/score.ts";
 import { actorKey, buildScoreboard, civilDate, monthOf, sent, weekStartOf, type ScoreEvent } from "../src/lib/scoreboard.ts";
 import { winMessage } from "../src/lib/slack.ts";
@@ -1234,5 +1234,22 @@ ok(!winMessage({ ...win, company: "<script>" }).includes("<script>"), "company n
 ok(amountQuestion("Bloom").includes("blank"), "the amount question offers a way out");
 ok(inKindQuestion("Bloom").includes("Bloom"), "the follow-up names the company being asked about");
 ok(inKindQuestion("Bloom").toLowerCase().includes("cancel"), "and says what cancelling means");
+
+// boardLines -- the board as prompt text. A stage the query returned nothing for
+// must still state "0 leads": an absent line reads to the model as missing data,
+// which is what made "have we closed any sponsors?" refuse on a board whose
+// honest answer was "none yet".
+const STAGES = [{ id: "prospects", label: "Prospects" }, { id: "closed_won", label: "Closed / Won" }];
+eq(boardLines(STAGES, []), ["- Prospects: 0 leads", "- Closed / Won: 0 leads"],
+   "every stage reports, even when the query returned no rows at all");
+eq(boardLines(STAGES, [{ status: "prospects", n: 2, total: 0, companies: "A, B" }]),
+   ["- Prospects: 2 leads (A, B)", "- Closed / Won: 0 leads"],
+   "a stage missing from the rows still states zero");
+eq(boardLines(STAGES, [{ status: "closed_won", n: 1, total: 1500, companies: "A" }])[1],
+   "- Closed / Won: 1 lead, $1,500 total (A)", "money and singular agreement");
+eq(boardLines(STAGES, [{ status: "prospects", n: 3, total: 0, companies: "AAA, BBB, CCC" }], 5)[0],
+   "- Prospects: 3 leads (AAA, )", "the company list is clipped, the count never is");
+eq(boardLines(STAGES, [{ status: "prospects", n: 1, total: 0 }])[0],
+   "- Prospects: 1 lead ()", "a null company list does not throw");
 
 console.log(`selfcheck: ${checks} assertions passed`);
