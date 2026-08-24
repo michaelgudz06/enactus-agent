@@ -3,7 +3,7 @@
 import { createContext, useContext } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Sparkles, LayoutGrid, List, LogOut, Settings } from "lucide-react";
+import { Sparkles, LayoutGrid, List, LogOut, Settings, Trophy } from "lucide-react";
 import { Mode } from "@/lib/types";
 
 interface Ctx {
@@ -37,6 +37,10 @@ export default function AppShell({ name, children }: { name: string; children: R
     // ever did: 0 senders, 0 templates. Until a sender exists the From and
     // Template pickers stay hidden (EmailModal.tsx:229) and outreach is signed
     // with whatever name was typed at the login box.
+    // Only counts work a person did: sends, replies earned, contacts typed in
+    // by hand, sponsorships closed. The agent's own finds are excluded on
+    // purpose -- a leaderboard the robot wins is not a leaderboard.
+    { href: "/scoreboard", label: "Scoreboard", icon: Trophy },
     { href: "/settings", label: "Settings", icon: Settings },
   ];
 

@@ -21,7 +21,8 @@ used to live in one outgoing VP's head. This keeps them in a database instead.
 | `/agent` | Describe a target ("bakeries in Burnaby that sponsor student events"). Streams its reasoning while it works. |
 | `/board` | Kanban pipeline: Prospects → Researched → Outreach Sent → In Conversation → Closed. Drag to advance; closing a win asks for the dollar value. |
 | `/leads` | Flat CRM list with sort, search, and filters by industry, owner, status, and missing contact info. |
-| `/settings` | Sender identities, outreach templates, CSV export. |
+| `/scoreboard` | Who did what: messages sent, replies earned, contacts added by hand, sponsorships closed. Weekly, monthly, all-time. |
+| `/settings` | Club mailbox, sender identities, outreach templates, CSV export. |
 
 ### Outreach
 
@@ -36,6 +37,33 @@ you, so it offers *Mark as sent* and logs that instead of pretending.
 
 Nothing is ever sent automatically. Every send is a person reading the message
 and clicking the button.
+
+**Replies** are the one thing the app cannot see happen — they land in Gmail.
+*Check for replies* on the scoreboard walks the threads of messages that were
+sent and stamps the first inbound one. Credit goes to whoever sent it, not to
+whoever pressed the button.
+
+### Scoreboard
+
+Counts only what a person did: messages sent on either channel, replies those
+messages earned, contacts typed in by hand, and sponsorships closed. The
+agent's own contact lookups are deliberately excluded — a leaderboard the robot
+wins is not a leaderboard.
+
+Names are grouped case-insensitively, because the login box takes free text and
+the board already held `michael` and `Michael` as two different people.
+
+### Slack
+
+Closing a sponsorship as **in-kind** posts an announcement naming the company,
+what was given, and who landed it. In-kind wins are the ones that otherwise go
+unnoticed: no invoice, no number on the board, just someone who talked a bakery
+into donating.
+
+It fires on `won_type`, which the person closing the deal sets — never on
+`sponsorship_type`, which is what the model guessed at discovery time. Set
+`SLACK_WEBHOOK_URL` to an incoming webhook; without it, closing still works and
+nothing is posted.
 
 ## How a run works
 
@@ -81,6 +109,7 @@ GOOGLE_CLIENT_ID=        # club mailbox: sending from the board (optional)
 GOOGLE_CLIENT_SECRET=    #
 GOOGLE_REDIRECT_URI=     # <APP_URL>/api/gmail/callback
 APP_URL=                 # where the app is served from
+SLACK_WEBHOOK_URL=       # in-kind win announcements (optional)
 SESSION_SECRET=          # any long random string
 APP_TEAM_PASSWORD=       # shared team login
 ```
@@ -105,8 +134,8 @@ npm run check
 ```
 
 `scripts/selfcheck.ts` asserts the pure logic — count parsing, filtering and
-sorting, email linting, money parsing — with no test
-framework and no database. Everything it covers is dependency-free by design, so
+sorting, email linting, money parsing, scoreboard bucketing and the Slack
+announcement wording — with no test framework and no database. Everything it covers is dependency-free by design, so
 it runs in about a second.
 
 ```bash

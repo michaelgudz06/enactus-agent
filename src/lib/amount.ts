@@ -29,3 +29,15 @@ export function parseAmount(raw: string | null | undefined): number | null {
 export function amountQuestion(company: string): string {
   return `What is ${company} worth in CAD? Whole dollars — leave blank if it is in-kind or not settled yet.`;
 }
+
+/**
+ * Asked only when the amount came back blank, because that is the one answer
+ * the amount question cannot tell apart: "in-kind" and "not settled yet" both
+ * leave the box empty, and only one of them is a win worth announcing.
+ *
+ * confirm() rather than a third prompt: it is a yes/no, and a text box for a
+ * yes/no invites "yes!!" and "in kind".
+ */
+export function inKindQuestion(company: string): string {
+  return `Is the ${company} sponsorship in-kind — goods, services or space rather than cash?\n\nCancel if it just is not settled yet.`;
+}
