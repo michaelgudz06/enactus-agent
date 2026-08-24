@@ -197,6 +197,97 @@ function readDraft(): Draft | null {
   }
 }
 
+interface MailboxStatus {
+  configured: boolean;
+  mailbox: { email: string; connected_by_name: string | null; connected_at: string | null } | null;
+}
+
+// One shared club address rather than each volunteer's own inbox: outreach has
+// to survive the person who sent it. Executives turn over every year, and a
+// reply that lands in a graduate's personal Gmail is gone.
+function MailboxCard() {
+  const [status, setStatus] = useState<MailboxStatus | null>(null);
+  const [result, setResult] = useState("");
+
+  const load = useCallback(async () => {
+    const data = (await api("/api/gmail/mailbox")) as ApiResult & Partial<MailboxStatus>;
+    if (data.error) return;
+    setStatus({ configured: !!data.configured, mailbox: data.mailbox ?? null });
+  }, []);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    load();
+    // The OAuth callback comes back as a full page load, so its outcome arrives
+    // in the URL. Read once and strip it, or a refresh replays a stale banner.
+    const q = new URLSearchParams(window.location.search).get("mailbox");
+    if (!q) return;
+    setResult(
+      q === "connected"
+        ? "Mailbox connected. Sending from the board is live."
+        : q === "norefresh"
+          ? "Google did not return a refresh token, which means this account had already granted access. Remove the app at myaccount.google.com/permissions, then connect again."
+          : "Could not connect that account. Try again."
+    );
+    window.history.replaceState({}, "", window.location.pathname);
+  }, [load]);
+
+  const box = status?.mailbox;
+  return (
+    <section>
+      <div className="flex items-center gap-2 mb-3">
+        <Mail size={15} style={{ color: "var(--gold)" }} />
+        <h2 className="text-sm font-semibold">Club mailbox</h2>
+        <span className="text-xs" style={{ color: "var(--faint)" }}>
+          {box ? "connected" : "not connected"}
+        </span>
+      </div>
+
+      <div className="rounded-xl border p-3 text-xs" style={{ background: "var(--surface)", borderColor: "var(--border)" }}>
+        {status && !status.configured ? (
+          <p style={{ color: "var(--muted)" }}>
+            Google is not configured on this deployment. Add <code>GOOGLE_CLIENT_ID</code>,{" "}
+            <code>GOOGLE_CLIENT_SECRET</code> and <code>GOOGLE_REDIRECT_URI</code> to send from the board. Until then
+            everything still works through <strong>Open in Gmail</strong>.
+          </p>
+        ) : (
+          <>
+            <p style={{ color: "var(--muted)" }}>
+              {box ? (
+                <>
+                  Sending as <strong style={{ color: "var(--text)" }}>{box.email}</strong>
+                  {box.connected_by_name ? `, connected by ${box.connected_by_name}` : ""}
+                  {box.connected_at ? ` on ${new Date(box.connected_at).toLocaleDateString()}` : ""}. Everyone on the
+                  team sends and replies from this one address.
+                </>
+              ) : (
+                <>
+                  Connect the shared Enactus address once and the whole team can send from the board. Sign in with the
+                  club account, not your own — whoever connects it is only the person who set it up.
+                </>
+              )}
+            </p>
+            <div className="mt-2.5 flex items-center gap-2">
+              <button
+                onClick={() => {
+                  // Full navigation, not a popup: consent screens break out of
+                  // small windows and the callback needs to land on this page.
+                  window.location.href = "/api/gmail/auth";
+                }}
+                className="px-2.5 py-1.5 rounded-lg font-medium"
+                style={{ background: box ? "var(--surface3)" : "var(--gold)", color: box ? "var(--text)" : "#000" }}
+              >
+                {box ? "Reconnect" : "Connect club mailbox"}
+              </button>
+              {result && <span style={{ color: "var(--muted)" }}>{result}</span>}
+            </div>
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
 export default function SettingsPage() {
   const [senders, setSenders] = useState<Sender[]>([]);
   const [templates, setTemplates] = useState<EmailTemplate[]>([]);
@@ -415,6 +506,8 @@ export default function SettingsPage() {
       )}
 
       <div className="flex-1 overflow-y-auto px-5 py-5 space-y-7">
+        <MailboxCard />
+
         <section>
           <div className="flex items-center gap-2 mb-3">
             <UserRound size={15} style={{ color: "var(--gold)" }} />

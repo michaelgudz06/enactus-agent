@@ -23,8 +23,19 @@ used to live in one outgoing VP's head. This keeps them in a database instead.
 | `/leads` | Flat CRM list with sort, search, and filters by industry, owner, status, and missing contact info. |
 | `/settings` | Sender identities, outreach templates, CSV export. |
 
-Drafting an email opens it as a Gmail draft in the sender's own account. Nothing
-is ever sent automatically.
+### Outreach
+
+Every lead opens a composer with two channels. **Email** drafts a subject and
+body, both editable, and sends from the shared club Gmail with one button —
+behind a confirm that names the recipient, because a send has no undo. Sending
+stamps the draft row, moves the card to Outreach Sent, and writes the timeline
+entry; sending the same draft twice reports the first send instead of
+delivering a duplicate. **LinkedIn DM** writes a short message with no subject
+and no links, plus a search link to find the person; nothing can send a DM for
+you, so it offers *Mark as sent* and logs that instead of pretending.
+
+Nothing is ever sent automatically. Every send is a person reading the message
+and clicking the button.
 
 ## How a run works
 
@@ -66,11 +77,21 @@ EXA_API_KEY=             # candidate search
 APOLLO_API_KEY=          # qualification (optional; run degrades, never breaks)
 FIRECRAWL_API_KEY=       # contact lookup (optional)
 GOOGLE_PLACES_API_KEY=   # local business lookup (optional)
+GOOGLE_CLIENT_ID=        # club mailbox: sending from the board (optional)
+GOOGLE_CLIENT_SECRET=    #
+GOOGLE_REDIRECT_URI=     # <APP_URL>/api/gmail/callback
+APP_URL=                 # where the app is served from
 SESSION_SECRET=          # any long random string
 APP_TEAM_PASSWORD=       # shared team login
 ```
 
-Only the first three are required for a run to work. Apply `neon-setup.sql` to
+Only the first three are required for a run to work. Without the `GOOGLE_*`
+trio the composer still writes and copies outreach; only in-app sending is off.
+
+The club mailbox is connected once, from **Settings → Club mailbox**, using the
+shared Enactus Google account rather than anyone's personal one — the whole
+point is that outreach outlives the executive who sent it. Its refresh token is
+stored server-side and never reaches the browser. Apply `neon-setup.sql` to
 your database once before the first start.
 
 Access is a single shared team password rather than per-user accounts —

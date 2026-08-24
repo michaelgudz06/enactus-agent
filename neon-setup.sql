@@ -184,6 +184,42 @@ create table if not exists enactus_spend (
 
 create index if not exists enactus_spend_month_idx on enactus_spend (month);
 
+-- ══════════════════════════════════════════════════════════════════
+-- Sending. One shared club mailbox rather than a Google account per
+-- volunteer: replies have to land somewhere that outlives the person
+-- who sent the email, and External Relations turns over every year.
+-- ══════════════════════════════════════════════════════════════════
+
+-- Exactly one row, enforced by the key rather than by remembering to delete the
+-- old one: `id` can only ever be true, so reconnecting is an upsert.
+--
+-- The refresh token is the entire credential. Anything that can read this table
+-- can send mail as the club, which is the same trust level DATABASE_URL already
+-- carries -- but it is newly true of OUTBOUND MAIL, so treat a leak of this
+-- table as a leak of the club's voice, not just of its data.
+create table if not exists enactus_mailbox (
+  id boolean primary key default true check (id),
+  email text not null,
+  refresh_token text not null,
+  connected_by_name text,
+  connected_at timestamptz default now(),
+  last_synced_at timestamptz
+);
+
+-- What actually left the building, and who sent it.
+--
+-- status was 'draft' | 'created_in_gmail'; 'sent' is the new terminal value.
+-- gmail_thread_id is stored at send time because reply detection walks it, and
+-- it cannot be recovered afterwards without searching the whole mailbox.
+--
+-- channel splits the LinkedIn composer's output from the email one. Without it
+-- the two share a row per lead and each regeneration overwrites the other.
+alter table enactus_email_drafts add column if not exists channel text not null default 'email';
+alter table enactus_email_drafts add column if not exists sent_at timestamptz;
+alter table enactus_email_drafts add column if not exists sent_by_name text;
+alter table enactus_email_drafts add column if not exists gmail_thread_id text;
+alter table enactus_email_drafts add column if not exists gmail_message_id text;
+
 -- Note for anyone rebuilding: the live database still carries enactus_territories
 -- and the lat/lng/geo_precision/geocoded_at columns from the map, which was
 -- removed. Nothing reads them any more. They are left in place rather than

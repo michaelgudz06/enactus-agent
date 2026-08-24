@@ -11,7 +11,7 @@ export async function GET() {
   if (!session) return Response.redirect(new URL("/login", process.env.APP_URL || "http://localhost:3000"));
   if (!hasGoogleConfig()) {
     return new Response(
-      "Gmail is not connected yet. Add GOOGLE_CLIENT_SECRET (and confirm the redirect URI) to enable one-click Gmail drafts. Until then, use ‘Open in Gmail’.",
+      "Google is not configured. Add GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI to connect the club mailbox. Until then, use ‘Open in Gmail’ and send by hand.",
       { status: 200, headers: { "Content-Type": "text/plain" } }
     );
   }
