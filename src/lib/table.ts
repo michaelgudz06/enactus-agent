@@ -232,3 +232,32 @@ export function facets<T extends object>(rows: T[], field: string, blankLabel = 
     })
     .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
 }
+
+/**
+ * The board, as one line per stage, for a prompt rather than a screen.
+ *
+ * Driven by `stages` and not by `rows`: a `group by status` returns nothing at
+ * all for a stage holding nothing, and to a model reading the result an absent
+ * line is indistinguishable from missing data. Asked "have we closed any
+ * sponsors and for how much", it answered "I cannot answer that from the
+ * provided information" on a board whose true answer was "none yet". So every
+ * stage states its count even when that count is zero.
+ *
+ * Company lists are clipped because the point is the shape of a stage, not an
+ * inventory -- an untruncated one would be most of the prompt.
+ * ponytail: a fixed character clip can land mid-name; trim back to the last
+ * separator if a garbled trailing company ever reaches a user.
+ */
+export function boardLines(
+  stages: { id: string; label: string }[],
+  rows: { status: string; n: number; total: number; companies?: string | null }[],
+  clip = 400
+): string[] {
+  const found = new Map(rows.map((r) => [r.status, r]));
+  return stages.map((s) => {
+    const r = found.get(s.id);
+    if (!r || !r.n) return `- ${s.label}: 0 leads`;
+    const money = r.total > 0 ? `, $${r.total.toLocaleString()} total` : "";
+    return `- ${s.label}: ${r.n} lead${r.n === 1 ? "" : "s"}${money} (${(r.companies ?? "").slice(0, clip)})`;
+  });
+}
