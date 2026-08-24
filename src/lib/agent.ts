@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { AgentEvent, ConnectionType, Lead, Mode } from "./types";
+import { AgentEvent, ConnectionType, Lead, Mode, STATUS_COLUMNS } from "./types";
 import {
   chatJSON,
   streamReasoner,
@@ -42,6 +42,10 @@ import { budgetState, ledgerWriteProblem, recordSpend } from "./spend";
 type Emit = (e: AgentEvent) => void;
 
 interface Plan {
+  // Which of the two things this run is. Optional and defaulted to a search by
+  // the branch that reads it: a planner that forgets the field must fall back
+  // to the pipeline that was here before it, never to answering silently.
+  intent?: "leads" | "answer";
   needClarification: boolean;
   questions: string[];
   searchQueries: string[];
@@ -118,6 +122,86 @@ Turn the user's request into effective web-search queries and a crisp ideal-spon
 Only look for real businesses that could give money, product, or vouchers. NEVER target other student clubs, university clubs or associations (at SFU or elsewhere), or organizations whose "sponsorship" is actually a paid membership, paid directory listing, or a fee the club would have to pay. Word the search queries to find businesses, not clubs or memberships.`;
 }
 
+/**
+ * What the board looks like right now, in one query, as a few lines of prose.
+ *
+ * Grouped in SQL rather than pulled row by row: a real board is a couple of
+ * hundred leads and the answer only ever needs the shape of it. Each company
+ * list is truncated because the point is "here is what is in this stage", not a
+ * complete inventory -- an untruncated one would be most of the prompt.
+ */
+async function boardSummary(mode: Mode): Promise<string> {
+  if (!hasDatabaseUrl()) return "";
+  try {
+    const rows = (await db()`
+      select status,
+             count(*)::int as n,
+             coalesce(sum(amount), 0)::int as total,
+             string_agg(company, ', ' order by updated_at desc) as companies
+        from enactus_leads where mode = ${mode}
+       group by status`) as { status: string; n: number; total: number; companies: string }[];
+    if (!rows.length) return `The ${mode} board is empty -- no leads have been found yet.`;
+    const label = new Map(STATUS_COLUMNS.map((c) => [c.id as string, c.label]));
+    const lines = rows.map((r) => {
+      const money = r.total > 0 ? `, $${r.total.toLocaleString()} total` : "";
+      return `- ${label.get(r.status) ?? r.status}: ${r.n} lead${r.n === 1 ? "" : "s"}${money} (${(r.companies ?? "").slice(0, 400)})`;
+    });
+    return `The club's current ${mode} board:\n${lines.join("\n")}`;
+  } catch {
+    // A board that cannot be read is worth answering the Enactus half of the
+    // question anyway -- the alternative is failing a "what is our mission"
+    // on a database error.
+    return "";
+  }
+}
+
+/**
+ * Answer, instead of searching.
+ *
+ * Everything here is already in memory or one query away, so this path spends a
+ * single cheap model call and none of the search budget. STRUCTURER rather than
+ * the reasoner on purpose: there is nothing to rank, and R1's visible-reasoning
+ * stream would put a scratchpad in front of a two-sentence answer.
+ */
+async function answerRequest(
+  prompt: string,
+  mode: Mode,
+  userName: string,
+  emit: Emit,
+  charge: (u: Usage) => void
+): Promise<void> {
+  emit({ type: "status", step: "answer", message: "Answering from Enactus context and your board" });
+  const board = await boardSummary(mode);
+  const system = `You are the Enactus SFU sponsorship agent, talking to ${userName} on the club's External Relations team.
+
+Answer the question directly and briefly, in plain prose. No markdown headings, no list longer than four items, two short paragraphs at most.
+
+Answer ONLY from what follows. If it does not cover the question, say so in one sentence and name where the answer would come from -- a lead search, the board's lead detail panel, or a person on the team. Never invent a sponsor, a number, or a project.
+
+${ENACTUS_ORG}
+
+${ENACTUS_PROJECTS}
+
+${ENACTUS_VENTURES}
+
+${board}`;
+
+  try {
+    const { content } = await streamReasoner(
+      [{ role: "system", content: system }, { role: "user", content: prompt }],
+      { onContent: (d) => emit({ type: "answer", text: d }) },
+      { model: STRUCTURER, provider: STRUCTURER_PROVIDER, maxTokens: 700, onUsage: charge }
+    );
+    // A stream that produced nothing looks identical to a finished answer once
+    // `done` lands, and this pipeline has been repaired four times for exactly
+    // that shape of silence.
+    if (!content.trim()) emit({ type: "error", message: "The model returned an empty answer. Try rephrasing." });
+  } catch (e) {
+    emit({ type: "error", message: `Could not answer that: ${(e as Error).message}` });
+  }
+  emit({ type: "done", count: 0, searchId: null });
+}
+
 export async function runAgent(
   input: { prompt: string; mode: Mode; answers?: string; userName: string; skipClarify?: boolean },
   emit: Emit
@@ -192,7 +276,7 @@ export async function runAgent(
   try {
     plan = await chatJSON<Plan>(
       [
-        { role: "system", content: `${planPrompt(mode)}\n\nRespond ONLY with JSON of shape: {"needClarification": boolean, "questions": string[], "searchQueries": string[], "criteria": string, "altAngle": string, "location": string, "placesQueries": string[]}. Provide ${queryCount} DISTINCT searchQueries that attack the request from different angles (neighbourhood plus business category, local-news coverage of independent businesses, business-improvement-association and neighbourhood directory listings, "supported a local school or team" phrasing) so they do not all return the same pages.${
+        { role: "system", content: `${planPrompt(mode)}\n\nRespond ONLY with JSON of shape: {"intent": "leads" | "answer", "needClarification": boolean, "questions": string[], "searchQueries": string[], "criteria": string, "altAngle": string, "location": string, "placesQueries": string[]}. Provide ${queryCount} DISTINCT searchQueries that attack the request from different angles (neighbourhood plus business category, local-news coverage of independent businesses, business-improvement-association and neighbourhood directory listings, "supported a local school or team" phrasing) so they do not all return the same pages.${
               mode === "sales"
                 ? ""
                 : ` The target is organisations that GIVE money or goods. Do not write queries that surface charities, foundations seeking donations, non-profits, or community groups looking for sponsors -- those compete with Enactus for the same donor dollars rather than funding it. Words like "non-profit", "charity" and "fundraiser" in a query reliably return the wrong side of the transaction, and words like "corporate social responsibility", "community investment" and "philanthropy" reliably return large companies that have never given this club anything.`
@@ -200,13 +284,20 @@ export async function runAgent(
               mode === "sales"
                 ? 'up to 3 short local-business queries suited to a maps search (e.g. "gift shops Vancouver", "yarn shops Burnaby"), or [] if the request is not about local storefront businesses'
                 : 'AT LEAST 2 and up to 4 short local-business queries suited to a maps search (e.g. "coffee shops Burnaby", "climbing gyms near SFU"). A maps search returns the businesses themselves rather than pages written about them, which is the only channel that reliably finds the independent storefronts this club actually wins, so never leave it empty'
-            }. ALWAYS populate searchQueries, criteria and location, even when needClarification is true -- the user can skip the questions and those fields are still used. Only set needClarification true (with up to 2 short questions) if the request is too vague to search well. altAngle is a different angle to try if this search was already done before.` },
+            }. ALWAYS populate searchQueries, criteria and location, even when needClarification is true -- the user can skip the questions and those fields are still used. Only set needClarification true (with up to 2 short questions) if the request is too vague to search well. altAngle is a different angle to try if this search was already done before.
+
+intent is "answer" ONLY when the user is asking a question rather than asking to find businesses -- about Enactus SFU itself, its mission, projects or ventures, about what is already on their board, or a plain conversational question. Use "leads" for anything that asks to find, search for, list, or add companies, and when in doubt. When intent is "answer" the other fields are ignored, so leave them empty.` },
         { role: "user", content: fullPrompt },
       ],
       { model: STRUCTURER, provider: STRUCTURER_PROVIDER, maxTokens: 800 }
     );
   } catch (e) {
     emit({ type: "error", message: `Planning failed: ${(e as Error).message}` });
+    return;
+  }
+
+  if (plan.intent === "answer") {
+    await answerRequest(fullPrompt, mode, userName, emit, charge);
     return;
   }
 
