@@ -6,7 +6,7 @@
 // No test framework on purpose: these are asserts over pure functions.
 
 import assert from "node:assert/strict";
-import { parsedCount, requestedCount, DEFAULT_COUNT, MAX_COUNT } from "../src/lib/count.ts";
+import { parsedCount, requestedCount, unbounded, DEFAULT_COUNT, MAX_COUNT } from "../src/lib/count.ts";
 import { disqualify, provinceFromRequest, grounded, type ApolloOrg } from "../src/lib/apollo.ts";
 import { salvageObjects, pluck } from "../src/lib/llm.ts";
 import { nameMatchesDomain, companyKey } from "../src/lib/apollo.ts";
@@ -116,6 +116,27 @@ eq(requestedCount("find 5 foundations that fund student entrepreneurship"), 5, "
 // ...without the noun list swallowing things we do not deliver.
 eq(requestedCount("we have 3 events this term, find sponsors"), DEFAULT_COUNT, "events is not a count noun");
 eq(requestedCount("find sponsors for our 2 campus projects"), DEFAULT_COUNT, "projects is not a count noun");
+
+// ── unbounded ─────────────────────────────────────────────────────────────
+// "as many as you can" is a real number -- the ceiling -- not an absent one.
+// It used to fall through to DEFAULT_COUNT, so the broadest ask a volunteer can
+// type produced the same 6 leads as typing nothing.
+ok(unbounded("find me as many leads as you can in the cpg industry"), "as many as you can");
+ok(unbounded("get as many sponsors as possible"), "as many as possible");
+ok(unbounded("give me as many local businesses as we can get to"), "as many ... as we can");
+ok(unbounded("find lots of catering companies in Burnaby"), "lots of");
+ok(unbounded("a ton of coffee shops near campus"), "a ton of");
+ok(unbounded("every bakery in Burnaby that could donate"), "every + noun");
+eq(requestedCount("find me as many leads as you can in the cpg industry that could be sponsors for us"), MAX_COUNT, "unbounded asks get the ceiling");
+eq(requestedCount("find lots of breweries in Port Moody"), MAX_COUNT, "bulk quantifier gets the ceiling");
+// A stated number still wins over the ceiling when the prompt carries both.
+eq(requestedCount("find as many bakeries as you can, at least 10 leads"), 10, "a stated number beats the ceiling");
+// The quantifier only counts when it is quantifying what we deliver. These are
+// ordinary English that happens to contain "every" or "all the".
+ok(!unbounded("businesses that supported every local school team"), "every + non-count noun is not a request");
+ok(!unbounded("sponsors who came to all the events last year"), "all the events is not a request");
+ok(!unbounded("find sponsors in Burnaby"), "a plain ask is not unbounded");
+eq(requestedCount("businesses that supported every local school team"), DEFAULT_COUNT, "false positive would silently 4x the spend");
 
 for (const p of ["give me 10 leads from Burnaby", "find 3 bakeries in Burnaby", "get me five marketing agencies downtown"]) {
   eq(parsedCount(p), requestedCount(p), `parsed and requested agree under the cap: ${p}`);
