@@ -5,7 +5,7 @@ import { Search, RefreshCw } from "lucide-react";
 import { useApp } from "@/components/AppShell";
 import { useRun } from "@/components/RunProvider";
 import { Lead, Status, STATUS_COLUMNS } from "@/lib/types";
-import { amountQuestion, parseAmount } from "@/lib/amount";
+import { amountQuestion, inKindQuestion, parseAmount } from "@/lib/amount";
 import { nextAction } from "@/lib/next-action";
 import LeadCard from "@/components/LeadCard";
 import EmailModal from "@/components/EmailModal";
@@ -103,15 +103,24 @@ export default function BoardPage() {
   async function moveTo(id: string, status: Status) {
     const prev = leads;
     const lead = leads.find((l) => l.id === id);
-    const body: { status: Status; amount?: number } = { status };
+    const body: { status: Status; amount?: number; won_type?: string } = { status };
 
     // The only hand-typed value in the app, asked at the one moment it is known
     // and the volunteer's hand is already on the card. A cancel, a blank, or
     // anything that is not a whole dollar amount leaves it unset and the card
     // still moves -- a drag must never be held hostage to a number.
+    //
+    // A blank amount is ambiguous on its own: in-kind and not-settled-yet look
+    // identical. One confirm separates them, and only then does Slack get told
+    // -- announcing a guess to the whole club is worse than announcing nothing.
     if (status === "closed_won" && lead && lead.amount == null) {
       const n = parseAmount(window.prompt(amountQuestion(lead.company)));
-      if (n !== null) body.amount = n;
+      if (n !== null) {
+        body.amount = n;
+        body.won_type = "monetary";
+      } else if (window.confirm(inKindQuestion(lead.company))) {
+        body.won_type = "in_kind";
+      }
     }
 
     setLeads((ls) => ls.map((l) => (l.id === id ? { ...l, ...body } : l)));

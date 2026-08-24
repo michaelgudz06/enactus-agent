@@ -31,14 +31,22 @@ import {
 import { setClause } from "../src/lib/db.ts";
 import { applyEvent, newTurn, takeLines, type RunTurn } from "../src/lib/run-events.ts";
 import { nextAction, quietDaysFor } from "../src/lib/next-action.ts";
-import { amountQuestion, parseAmount } from "../src/lib/amount.ts";
+import { amountQuestion, inKindQuestion, parseAmount } from "../src/lib/amount.ts";
 import { csvCell, toCsv } from "../src/lib/csv.ts";
 import { facets, filterLeads, industryFacets, industryMatches, matchesQuery, personKey, sortLeads } from "../src/lib/table.ts";
 import { companyPoints, contactPoints, isBranchAddress, isDecisionInbox, isGenericInbox, isPersonalEmail, namesLocalOutlet, scoreLead, boardOrderFor, WEIGHTS } from "../src/lib/score.ts";
+import { actorKey, buildScoreboard, civilDate, monthOf, sent, weekStartOf, type ScoreEvent } from "../src/lib/scoreboard.ts";
+import { winMessage } from "../src/lib/slack.ts";
 
 let checks = 0;
 const eq = (actual: unknown, expected: unknown, msg: string) => {
   assert.deepEqual(actual, expected, `${msg}\n  got ${JSON.stringify(actual)}, want ${JSON.stringify(expected)}`);
+  checks++;
+};
+// For assertions whose failure message reads better as a sentence than as a
+// pair of values. Counts toward the total; assert.ok on its own does not.
+const ok = (actual: unknown, msg: string) => {
+  assert.ok(actual, msg);
   checks++;
 };
 
@@ -1085,5 +1093,139 @@ eq(
   2,
   "a truncated wrapped array still salvages the finished leads"
 );
+
+
+// ── scoreboard: whose work, and which week ───────────────────────────────
+//
+// The board is in Burnaby and the database is in UTC, so an email sent at
+// 7pm Pacific on a Sunday is stamped Monday UTC. Bucketed naively it lands in
+// the wrong week -- the one thing a scoreboard must never get wrong, because
+// the person who did the work is the one who notices.
+eq(civilDate("2026-08-24T02:30:00Z"), "2026-08-23", "a Sunday evening in Vancouver is still Sunday");
+eq(civilDate("2026-08-23T18:00:00Z"), "2026-08-23", "a Sunday morning UTC is the same Sunday");
+// January, when Vancouver is on standard time and the offset is an hour wider.
+eq(civilDate("2026-01-05T07:30:00Z"), "2026-01-04", "PST, not PDT, at the turn of the year");
+
+// Monday starts the week, so Sunday belongs to the Monday six days behind it
+// rather than the one arriving in the morning.
+eq(weekStartOf("2026-08-17"), "2026-08-17", "a Monday is its own week start");
+eq(weekStartOf("2026-08-23"), "2026-08-17", "Sunday closes the week that began six days earlier");
+eq(weekStartOf("2026-08-24"), "2026-08-24", "the next Monday opens a new week");
+eq(weekStartOf("2026-01-01"), "2025-12-29", "a week may start in the previous year");
+eq(monthOf("2026-08-23"), "2026-08", "month key is the first seven characters");
+
+// The login box takes free text, and the live database already holds "michael"
+// (13 rows) and "Michael" (1). Grouped by the raw string that is two people
+// with the work split between them.
+eq(actorKey(" Michael "), "michael", "case and space are noise in a name");
+eq(actorKey("michael"), actorKey("MICHAEL"), "the same person, however they typed it");
+eq(actorKey(null), "", "a missing name is not a person");
+eq(actorKey("Michael G") === actorKey("Michael"), false, "different names stay different people");
+
+const wk = (d: string, actor: string, kind: ScoreEvent["kind"] = "email"): ScoreEvent =>
+  ({ actor, kind, at: `${d}T19:00:00Z` });
+const SB_NOW = "2026-08-20T19:00:00Z"; // a Thursday; week of Aug 17, month of Aug
+
+const sb = buildScoreboard(
+  [
+    wk("2026-08-18", "michael"),
+    wk("2026-08-19", "Michael"),
+    wk("2026-08-19", "michael", "reply"),
+    wk("2026-08-03", "michael"),          // earlier in the same month
+    wk("2026-07-30", "michael"),          // last month
+    wk("2026-08-18", "Priya", "contact"),
+    wk("2026-08-18", "priya", "dm"),
+  ],
+  SB_NOW
+);
+eq(sb.weekStart, "2026-08-17", "the scoreboard reports the week it bucketed into");
+eq(sb.monthKey, "2026-08", "and the month");
+eq(sb.members.length, 2, "two spellings of one name are one member");
+
+const mike = sb.members.find((m) => m.key === "michael")!;
+eq(mike.name, "michael", "display name is the spelling used most often");
+eq(mike.all.emails, 4, "all-time counts every email regardless of week");
+eq(mike.month.emails, 3, "the July send is outside this month");
+eq(mike.week.emails, 2, "and only two landed in this week");
+eq(mike.all.replies, 1, "replies are counted apart from sends");
+eq(mike.replyRate, 0.25, "reply rate is replies over messages sent");
+
+const priya = sb.members.find((m) => m.key === "priya")!;
+eq(sent(priya.all), 1, "a DM is a message sent");
+eq(priya.all.emails, 0, "but it is not an email");
+eq(priya.all.contacts, 1, "hand-added contacts are their own count");
+eq(priya.replyRate, 0, "nothing has come back yet, which is a rate, not unknown");
+
+eq(sb.team.emails, 4, "team totals sum the members");
+eq(sb.team.dms, 1, "across both channels");
+
+// Attribution is the whole point, so work with no name on it is counted for the
+// team and given to nobody.
+const orphan = buildScoreboard([{ actor: "  ", kind: "email", at: "2026-08-18T19:00:00Z" }], SB_NOW);
+eq(orphan.members.length, 0, "a blank name does not create a member");
+eq(orphan.team.emails, 1, "but the team total still sees the work");
+eq(buildScoreboard([{ actor: "michael", kind: "email", at: null }], SB_NOW).team.emails, 0, "an undated event cannot be placed and is dropped");
+
+// Achievements are all-time facts about work, so they must not appear on an
+// empty board and must not be handed to the wrong person.
+eq(mike.achievements.includes("first-send"), true, "the earliest sender holds First Send");
+eq(priya.achievements.includes("first-send"), false, "and nobody else does");
+eq(mike.achievements.includes("first-reply"), true, "one reply earns First Reply");
+eq(priya.achievements.includes("first-reply"), false, "zero replies does not");
+eq(mike.achievements.includes("sent-10"), false, "four sends is not ten");
+eq(
+  buildScoreboard(
+    Array.from({ length: 10 }, () => wk("2026-08-18", "michael")),
+    SB_NOW
+  ).members[0].achievements.includes("sent-10"),
+  true,
+  "ten is"
+);
+eq(buildScoreboard([], SB_NOW).members.length, 0, "an empty board has no members and no badges");
+eq(buildScoreboard([], SB_NOW).team.wins, 0, "and no phantom wins");
+
+// Ranking is by this week first: the scoreboard's job is to show what is
+// happening now, not to freeze last term's leader at the top forever.
+const ranked = buildScoreboard(
+  [wk("2026-07-01", "Old"), wk("2026-07-02", "Old"), wk("2026-07-03", "Old"), wk("2026-08-18", "New")],
+  SB_NOW
+);
+eq(ranked.members[0].key, "new", "this week outranks a bigger all-time total");
+
+
+// ── the Slack announcement ───────────────────────────────────────────────
+//
+// This goes to the whole club, so it must never say something the database
+// does not know. The two failure modes that matter are naming the wrong person
+// and printing a number that was never entered.
+const win = { company: "Bloom Bakery", owner: "Priya", amount: null, wonType: "in_kind", what: "200 pastries for the launch" };
+ok(winMessage(win).includes("Priya"), "the announcement names who landed it");
+ok(winMessage(win).includes("Bloom Bakery"), "and the sponsor");
+ok(winMessage(win).includes("200 pastries"), "an in-kind win says what was given");
+ok(winMessage(win).includes("in-kind"), "and calls it in-kind");
+ok(!winMessage(win).includes("$"), "an in-kind win never prints a dollar figure");
+ok(
+  !winMessage({ ...win, what: null }).includes("undefined"),
+  "a win with nothing written about it still reads as a sentence"
+);
+ok(winMessage({ ...win, owner: null }).includes("the External team"), "an unowned win credits the team, not nobody");
+ok(winMessage({ ...win, owner: "   " }).includes("the External team"), "and a whitespace name is no name");
+eq(
+  winMessage({ ...win, wonType: "monetary", amount: 2500 }).includes("$2,500 CAD"),
+  true,
+  "a monetary win prints the amount that was actually entered"
+);
+ok(
+  !winMessage({ ...win, wonType: "monetary", amount: null }).includes("$"),
+  "and prints no amount when none was"
+);
+// Slack's mrkdwn eats raw angle brackets as link syntax.
+ok(!winMessage({ ...win, company: "<script>" }).includes("<script>"), "company names are escaped, not interpreted");
+
+// The amount question already tells people to leave it blank for in-kind, which
+// is why a blank cannot mean in-kind on its own -- it also means "not settled".
+ok(amountQuestion("Bloom").includes("blank"), "the amount question offers a way out");
+ok(inKindQuestion("Bloom").includes("Bloom"), "the follow-up names the company being asked about");
+ok(inKindQuestion("Bloom").toLowerCase().includes("cancel"), "and says what cancelling means");
 
 console.log(`selfcheck: ${checks} assertions passed`);

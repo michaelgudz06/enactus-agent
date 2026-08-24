@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 export default function Login() {
@@ -9,6 +9,20 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  // The scoreboard groups by name, and the live board already holds "michael"
+  // (13 rows) and "Michael" (1) as two people. actorKey folds the case; this
+  // stops the rest of the drift, because the reliable fix for a free-text
+  // identity field is not having to retype it.
+  //
+  // localStorage rather than a list of known names from the server: /login is
+  // the one page anyone on the internet can load, and the team's names are not
+  // something to hand out to whoever asks for it.
+  useEffect(() => {
+    const saved = localStorage.getItem("enactus.name");
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (saved) setName(saved);
+  }, []);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -26,6 +40,7 @@ export default function Login() {
         setLoading(false);
         return;
       }
+      localStorage.setItem("enactus.name", name.trim());
       router.push("/agent");
     } catch {
       setError("Network error");

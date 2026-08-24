@@ -184,3 +184,49 @@ export async function sendMessage(
   const d = await gmailPost(accessToken, "messages/send", { raw }, "send");
   return { id: String(d.id), threadId: String(d.threadId) };
 }
+
+/**
+ * Did anyone other than us write in this thread?
+ *
+ * format=metadata with a single header keeps the payload to a few hundred bytes
+ * per thread -- the alternative pulls every message body in the conversation
+ * back over the wire to answer a yes/no question.
+ *
+ * Returns the timestamp of the first inbound message, or null. Only the first
+ * matters: "they replied" is a fact with one date, and a thread that ran for
+ * three weeks should not read as three weeks of replies.
+ */
+export async function firstReplyAt(
+  accessToken: string,
+  threadId: string,
+  clubEmail: string
+): Promise<string | null> {
+  const res = await fetch(
+    `https://gmail.googleapis.com/gmail/v1/users/me/threads/${encodeURIComponent(threadId)}` +
+      `?format=metadata&metadataHeaders=From`,
+    { headers: { Authorization: `Bearer ${accessToken}` }, cache: "no-store" }
+  );
+  // A 404 means the thread was deleted in Gmail. That is not an error worth
+  // failing a sync over, and retrying it every run forever is worse.
+  if (!res.ok) return null;
+  const d = (await res.json()) as {
+    messages?: { internalDate?: string; payload?: { headers?: { name: string; value: string }[] } }[];
+  };
+  const mine = clubEmail.toLowerCase();
+  for (const m of d.messages ?? []) {
+    const from = m.payload?.headers?.find((h) => h.name.toLowerCase() === "from")?.value ?? "";
+    // The From header is "Name <addr>", and an alias or a plus-address is still
+    // us. Matching on the address being present anywhere in the header is the
+    // cheap version and errs toward "not a reply", which is the safe direction:
+    // an uncounted reply is a missing number, a miscounted one is a wrong one.
+    if (from.toLowerCase().includes(mine)) continue;
+    if (!m.internalDate) continue;
+    return new Date(Number(m.internalDate)).toISOString();
+  }
+  return null;
+}
+
+/** Stamped after a sync so the page can say when it last looked. */
+export async function touchSynced(): Promise<void> {
+  await db()`update enactus_mailbox set last_synced_at = now() where id = true`;
+}

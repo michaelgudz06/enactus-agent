@@ -220,6 +220,20 @@ alter table enactus_email_drafts add column if not exists sent_by_name text;
 alter table enactus_email_drafts add column if not exists gmail_thread_id text;
 alter table enactus_email_drafts add column if not exists gmail_message_id text;
 
+-- Reply detection stamps this from the Gmail thread, and the scoreboard counts
+-- it. On the draft row rather than the lead because a lead can be emailed six
+-- times and "did they write back" is a question about one message.
+alter table enactus_email_drafts add column if not exists replied_at timestamptz;
+
+-- What kind of win it was, set by the person closing it.
+--
+-- sponsorship_type on enactus_leads is a MODEL PREDICTION made at discovery
+-- time -- it currently reads 156 monetary and 115 in-kind across a board with
+-- zero closed deals, so it says what the agent guessed, never what happened.
+-- The Slack announcement fires on this column and only this one, because
+-- announcing a guess to the whole club is worse than announcing nothing.
+alter table enactus_leads add column if not exists won_type text;
+
 -- Note for anyone rebuilding: the live database still carries enactus_territories
 -- and the lat/lng/geo_precision/geocoded_at columns from the map, which was
 -- removed. Nothing reads them any more. They are left in place rather than

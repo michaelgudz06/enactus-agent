@@ -2,6 +2,7 @@ import { after } from "next/server";
 import { route } from "@/lib/auth";
 import { db, setClause } from "@/lib/db";
 import { findContactFor } from "@/lib/contact";
+import { announceWin } from "@/lib/slack";
 import { STATUS_COLUMNS } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -13,8 +14,12 @@ export const maxDuration = 30;
 const EDITABLE = new Set([
   "company", "website", "industry", "description", "contact_name", "contact_role",
   "contact_email", "location", "connection_type", "connection_note", "sponsorship_type",
-  "why_fit", "status", "board_order", "amount", "owner_name",
+  "why_fit", "status", "board_order", "amount", "owner_name", "won_type",
 ]);
+
+// Set by the person closing the deal. Deliberately NOT sponsorship_type, which
+// is what the model guessed at discovery time -- see neon-setup.sql.
+const WON_TYPES = new Set(["monetary", "in_kind"]);
 
 // closed_at and owner_name are deliberately absent from EDITABLE above: both are
 // stamped by this route from the stage move and the session, never accepted from
@@ -47,14 +52,21 @@ export const PATCH = route(async (session, req: Request, { params }: Ctx) => {
       { status: 400 }
     );
   }
+  if ("won_type" in b && b.won_type !== null && !WON_TYPES.has(b.won_type)) {
+    return Response.json({ error: `won_type must be monetary, in_kind, or null` }, { status: 400 });
+  }
   const { sets, values } = setClause(b, EDITABLE, { sponsorship_type: "::text[]" });
   values.push(id);
 
-  // "from" is only knowable before the write, and only worth a round-trip
-  // when this patch actually carries a status.
-  const from = "status" in b
-    ? (await db()`select status from enactus_leads where id = ${id}`)[0]?.status
+  // Only knowable before the write, and only worth a round-trip when this patch
+  // carries something whose PREVIOUS value matters: the stage it moved from, and
+  // whether this lead already had an email on it.
+  const hasStatus = "status" in b;
+  const touchesContact = "contact_email" in b;
+  const before = hasStatus || touchesContact
+    ? (await db()`select status, contact_email from enactus_leads where id = ${id}`)[0]
     : undefined;
+  const from = before?.status;
 
   const rows = await db().query(
     `update enactus_leads set ${sets.join(", ")} where id = $${values.length} returning *`,
@@ -62,7 +74,21 @@ export const PATCH = route(async (session, req: Request, { params }: Ctx) => {
   );
   if (!rows.length) return Response.json({ error: "Lead not found" }, { status: 404 });
 
-  if (from !== undefined && from !== rows[0].status) {
+  // The scoreboard counts contacts a person found, so this fires only on a hand
+  // edit that fills an empty email. findContactFor writes the lead directly and
+  // logs 'contact_found', so the agent's own lookups can never reach this line
+  // -- which is the distinction the count is asked to make.
+  if (touchesContact && !before?.contact_email && rows[0].contact_email) {
+    try {
+      await db()`
+        insert into enactus_lead_activity (lead_id, kind, body, actor_name)
+        values (${id}, 'contact_added', ${`Added ${rows[0].contact_email}`}, ${session.name})`;
+    } catch (e) {
+      console.error("contact_added log failed:", (e as Error).message);
+    }
+  }
+
+  if (hasStatus && from !== rows[0].status) {
     // The move is the user's action and has already committed. Losing its
     // timeline entry is worth a log line, never a failed drag.
     try {
@@ -105,6 +131,32 @@ export const PATCH = route(async (session, req: Request, { params }: Ctx) => {
     // function on Vercel and the write silently never happens. The result
     // goes straight onto the row the board re-reads, so the card fills in on
     // its own.
+    // The whole point of an in-kind announcement is that it is the one win the
+    // club celebrates and nobody sees: no invoice, no number on the board, just
+    // a volunteer who talked a bakery into donating 200 pastries. Fires on
+    // won_type, which a person set at close, never on the model's guess.
+    //
+    // after(), so the drag lands instantly and the post still runs -- a
+    // floating promise gets frozen with the function on Vercel. announceWin
+    // never throws, and this is wrapped anyway: nothing about a Slack message
+    // is worth a failed close.
+    if (rows[0].status === "closed_won" && rows[0].won_type === "in_kind") {
+      const won = rows[0];
+      after(async () => {
+        try {
+          await announceWin({
+            company: won.company,
+            owner: won.owner_name ?? session.name,
+            amount: won.amount,
+            wonType: won.won_type,
+            what: won.why_fit,
+          });
+        } catch (e) {
+          console.error("slack announce failed:", (e as Error).message);
+        }
+      });
+    }
+
     if (from === "prospects" && rows[0].status !== "prospects" && !rows[0].contact_email) {
       after(async () => {
         try {
