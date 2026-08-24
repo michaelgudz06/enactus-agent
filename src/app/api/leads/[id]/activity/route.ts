@@ -5,8 +5,12 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // status_change and contact_found are written by other routes, never by a
-// client, so the composer can only ever post the three human kinds.
-const KINDS = new Set(["note", "call", "email"]);
+// client, so the composer can only ever post the human kinds. 'linkedin' is
+// here rather than in the Gmail route because nothing automated happens: the
+// platform cannot send a LinkedIn message, so a person clicking "Mark as sent"
+// after pasting it IS the event, and this is the endpoint for a human saying
+// what they did.
+const KINDS = new Set(["note", "call", "email", "linkedin"]);
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -36,5 +40,37 @@ export const POST = route(async (session, req: Request, { params }: Ctx) => {
     insert into enactus_lead_activity (lead_id, kind, body, actor_name)
     values (${id}, ${kind}, ${body}, ${session.name})
     returning *`;
-  return Response.json({ activity });
+
+  // A sent LinkedIn message is outreach, and has to move the card and close out
+  // its draft row exactly as a sent email does -- otherwise the same work
+  // counts on one channel and vanishes on the other.
+  let moved = false;
+  if (kind === "linkedin") {
+    try {
+      await db()`
+        update enactus_email_drafts
+           set status = 'sent', sent_at = now(), sent_by_name = ${session.name}
+         where id = (select id from enactus_email_drafts
+                      where lead_id = ${id} and channel = 'linkedin'
+                      order by created_at desc limit 1)`;
+      const advanced = await db()`
+        update enactus_leads set status = 'outreach_sent'
+         where id = ${id} and status in ('prospects', 'researched')
+         returning id`;
+      moved = advanced.length > 0;
+      if (moved) {
+        await db()`
+          insert into enactus_lead_activity (lead_id, kind, meta, actor_name)
+          values (${id}, 'status_change',
+                  ${JSON.stringify({ to: "outreach_sent", via: "linkedin" })}::jsonb,
+                  ${session.name})`;
+      }
+    } catch (e) {
+      // The message really was sent and the timeline already says so. Losing
+      // the stage move is worth a log line, never a failed request.
+      console.error("linkedin stamp failed:", (e as Error).message);
+    }
+  }
+
+  return Response.json({ activity, moved });
 });

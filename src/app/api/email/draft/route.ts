@@ -38,6 +38,29 @@ Hard rules:
 - Every claim, number, name and program must appear word for word in the facts or the material above, including anything you say about an Enactus project. Do not add a headquarters, a city, a dollar figure, or past work with SFU.
 - Do NOT write a sign-off. It is appended for you.`;
 
+// A LinkedIn DM is a chat message, not a letter. Same honesty rules, a third
+// of the length, and no subject line -- the shape differs enough that sharing
+// STYLE and asking the model to "make it shorter" produced emails with the
+// greeting deleted rather than messages.
+const LINKEDIN_STYLE = `Write a LinkedIn direct message. It appears in a chat window, not an inbox.
+
+Reply with the message and nothing else. No subject line.
+
+<1 sentence naming something specific and true about THIS company, taken from the facts you are given.>
+
+<1 to 2 sentences on what Enactus SFU is and the one thing you are asking them for.>
+
+<One short question they can answer in a sentence.>
+
+Hard rules:
+- Under 90 words. A LinkedIn message longer than a phone screen does not get read.
+- Keep the blank lines between the paragraphs above.
+- NEVER use em dashes or en dashes. Short sentences, commas, periods.
+- No corporate filler: no "I hope this finds you well", "reach out", "leverage", "synergy", "excited to partner", "circle back".
+- Plain text only. No markdown, no bullets, no links.
+- Every claim, number, name and program must appear word for word in the facts or the material above. Do not add a headquarters, a city, a dollar figure, or past work with SFU.
+- Do NOT write a sign-off. It is appended for you.`;
+
 // Models append a sign-off however firmly the prompt forbids it, and the real
 // name and title must not come from the model, so the block is cut and rebuilt.
 const SIGNOFF = /\n+[ \t]*(best|best regards|thanks|thank you|sincerely|regards|kind regards|warmly|cheers)[,.!]?[ \t]*(\n[\s\S]*)?$/i;
@@ -67,7 +90,7 @@ function tidy(body: string): string {
 }
 
 type DraftEvent =
-  | { type: "meta"; to: string | null; draftId: string | null }
+  | { type: "meta"; to: string | null; draftId: string | null; sentAt?: string | null }
   | { type: "subject"; text: string }
   | { type: "delta"; text: string }
   | { type: "done"; draftId: string | null; subject: string; body: string; warnings?: string[] }
@@ -112,7 +135,7 @@ function ndjson(produce: (emit: (e: DraftEvent) => void) => Promise<void>): Resp
  */
 async function saveDraft(
   sql: NeonQueryFunction<false, false>,
-  p: { id: string | null; leadId: string; subject: string; body: string; name: string; senderId: string | null; templateId: string | null }
+  p: { id: string | null; leadId: string; subject: string; body: string; name: string; senderId: string | null; templateId: string | null; channel: string }
 ): Promise<string | null> {
   const attempt = async (extras: boolean) => {
     const cols = extras ? ["sender_id", "template_id"] : [];
@@ -125,9 +148,9 @@ async function saveDraft(
           [p.subject, p.body, p.id, ...vals]
         )
       : await sql.query(
-          `insert into enactus_email_drafts (lead_id, subject, body, status, created_by_name${cols.map((c) => `, ${c}`).join("")})` +
-            ` values ($1, $2, $3, 'draft', $4${cols.map((_, i) => `, $${i + 5}`).join("")}) returning id`,
-          [p.leadId, p.subject, p.body, p.name, ...vals]
+          `insert into enactus_email_drafts (lead_id, subject, body, status, created_by_name, channel${cols.map((c) => `, ${c}`).join("")})` +
+            ` values ($1, $2, $3, 'draft', $4, $5${cols.map((_, i) => `, $${i + 6}`).join("")}) returning id`,
+          [p.leadId, p.subject, p.body, p.name, p.channel, ...vals]
         );
     return (rows[0] as { id: string } | undefined)?.id ?? null;
   };
@@ -152,6 +175,10 @@ export const POST = route(async (session, req: Request) => {
   const leadId = b.leadId;
   if (!leadId) return Response.json({ error: "leadId required" }, { status: 400 });
   const force = Boolean(b.force);
+  // Email and LinkedIn keep separate rows for the same lead. Sharing one, each
+  // regeneration silently overwrote the other channel's message.
+  const channel = b.channel === "linkedin" ? "linkedin" : "email";
+  const isDm = channel === "linkedin";
   const senderId = str(b.senderId, 64) || null;
   const templateId = str(b.templateId, 64) || null;
   const senderName = str(b.senderName, 80) || session.name;
@@ -166,11 +193,13 @@ export const POST = route(async (session, req: Request) => {
   if (!lead) return Response.json({ error: "Lead not found" }, { status: 404 });
   const l = lead as Lead;
 
-  let prev: { id: string; subject: string | null; body: string | null } | null = null;
+  type PrevDraft = { id: string; subject: string | null; body: string | null; status: string | null; sent_at: string | null };
+  let prev: PrevDraft | null = null;
   try {
     const rows = (await sql`
-      select id, subject, body from enactus_email_drafts
-      where lead_id = ${l.id} order by created_at desc limit 1`) as { id: string; subject: string | null; body: string | null }[];
+      select id, subject, body, status, sent_at from enactus_email_drafts
+      where lead_id = ${l.id} and channel = ${channel}
+      order by created_at desc limit 1`) as PrevDraft[];
     prev = rows[0] ?? null;
   } catch (e) {
     console.error("draft lookup failed:", (e as Error).message);
@@ -229,9 +258,14 @@ export const POST = route(async (session, req: Request) => {
   // gets linted -- this is the path the user is on at the moment they hit send,
   // so it is the one that most needs the warnings.
   const cached = prev;
+  // A row that has already gone out is history, not a draft: it is shown, but
+  // never updated in place. Regenerating past it inserts a new row so the
+  // follow-up cannot overwrite the message the sponsor actually received --
+  // and so the "emails sent" count cannot be quietly reversed by an edit.
+  const editableId = prev && prev.status !== "sent" ? prev.id : null;
   if (!force && !preBody && cached?.body) {
     return ndjson(async (emit) => {
-      emit({ type: "meta", to: l.contact_email, draftId: cached.id });
+      emit({ type: "meta", to: l.contact_email, draftId: cached.id, sentAt: cached.sent_at });
       emit({ type: "subject", text: cached.subject ?? "" });
       emit({ type: "delta", text: cached.body ?? "" });
       emit({
@@ -245,7 +279,7 @@ export const POST = route(async (session, req: Request) => {
   }
 
   return ndjson(async (emit) => {
-    emit({ type: "meta", to: l.contact_email, draftId: prev?.id ?? null });
+    emit({ type: "meta", to: l.contact_email, draftId: editableId, sentAt: null });
 
     let subject = "";
     let body = "";
@@ -262,11 +296,18 @@ export const POST = route(async (session, req: Request) => {
       let inBody = false;
       await streamReasoner(
         [
-          { role: "system", content: `${goal}\n\n${STYLE}` },
-          { role: "user", content: `Draft a first-touch outreach email to this lead.\n\n${facts}` },
+          { role: "system", content: `${goal}\n\n${isDm ? LINKEDIN_STYLE : STYLE}` },
+          { role: "user", content: `Draft a first-touch ${isDm ? "LinkedIn message" : "outreach email"} for this lead.\n\n${facts}` },
         ],
         {
           onContent: (d) => {
+            // A DM has no subject line, so there is no header to split off:
+            // every token is body from the first one.
+            if (isDm) {
+              body += d;
+              emit({ type: "delta", text: d });
+              return;
+            }
             if (inBody) {
               body += d;
               emit({ type: "delta", text: d });
@@ -292,12 +333,14 @@ export const POST = route(async (session, req: Request) => {
         { model: STRUCTURER, provider: STRUCTURER_PROVIDER, maxTokens: 600, temperature: 0.6 }
       );
       // Single-line answer: no newline ever arrived, so nothing was classified.
-      if (!inBody) {
+      if (!isDm && !inBody) {
         if (/^\s*subject\s*:/i.test(head)) subject = head.replace(/^\s*subject\s*:\s*/i, "").trim();
         else body = head;
       }
 
-      subject = stripEmDashes(subject) || `Enactus SFU sponsorship request for ${l.company}`;
+      // A LinkedIn row keeps an empty subject rather than a placeholder one:
+      // the column is what the modal reads to decide whether to show the field.
+      subject = isDm ? "" : stripEmDashes(subject) || `Enactus SFU sponsorship request for ${l.company}`;
       // `done` carries the whole body, so the client's streamed copy is replaced
       // by this one and never keeps a model-written sign-off.
       // emailBelongsTo already encodes the address forms the contact lookup
@@ -307,18 +350,23 @@ export const POST = route(async (session, req: Request) => {
       const ownAddress = Boolean(
         l.contact_email && l.contact_name && emailBelongsTo(l.contact_email, l.contact_name)
       );
-      body = signOff(greet(tidy(stripEmDashes(body)), l.contact_name ?? "", l.contact_email, ownAddress), senderName, senderTitle);
+      const greeted = greet(tidy(stripEmDashes(body)), l.contact_name ?? "", l.contact_email, ownAddress);
+      // A chat message signs off with a name, not with a letter's closing block.
+      body = isDm
+        ? `${greeted.replace(SIGNOFF, "").trimEnd()}\n\n${senderName}`
+        : signOff(greeted, senderName, senderTitle);
       warnings = lint(body, { facts, goal, connection: l.connection_type, recentProjects, projectNames: PROJECT_NAMES, email: l.contact_email });
     }
 
     const draftId = await saveDraft(sql, {
-      id: prev?.id ?? null,
+      id: editableId,
       leadId: l.id,
       subject,
       body,
       name: session.name,
       senderId,
       templateId,
+      channel,
     });
     emit({ type: "done", draftId, subject, body, warnings });
   });
