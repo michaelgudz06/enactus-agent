@@ -25,6 +25,7 @@ export interface RunTurn<L> {
   prompt: string;
   steps: RunStep[];
   reasoning: string;
+  answer: string;
   similar: { message: string; suggestion: string } | null;
   clarify: string[] | null;
   leads: L[];
@@ -37,6 +38,7 @@ export interface RunTurn<L> {
 export type RunEvent<L> =
   | { type: "status"; step: string; message: string }
   | { type: "reasoning"; text: string }
+  | { type: "answer"; text: string }
   | { type: "similar"; message: string; suggestion: string; pastPrompt?: string }
   | { type: "clarify"; questions: string[] }
   | { type: "lead"; lead: L }
@@ -47,6 +49,7 @@ export const newTurn = <L>(prompt: string): RunTurn<L> => ({
   prompt,
   steps: [],
   reasoning: "",
+  answer: "",
   similar: null,
   clarify: null,
   leads: [],
@@ -82,6 +85,10 @@ export function applyEvent<L>(turns: RunTurn<L>[], ev: RunEvent<L>): RunTurn<L>[
       return patch({ steps: [...t.steps, { step: ev.step, message: ev.message }] });
     case "reasoning":
       return patch({ reasoning: t.reasoning + ev.text });
+    // Appended, not replaced: this arrives as stream deltas, one event per
+    // chunk, exactly like reasoning above.
+    case "answer":
+      return patch({ answer: t.answer + ev.text });
     case "similar":
       return patch({ similar: { message: ev.message, suggestion: ev.suggestion } });
     case "clarify":

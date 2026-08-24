@@ -13,6 +13,12 @@ const EXAMPLES_SPONSOR = [
   "SFU alumni-founded tech startups in Vancouver open to giving back",
   "Credit unions and banks in the Lower Mainland with community grant programs",
 ];
+// Shown in both modes. The pipeline is unchanged for these -- they route to the
+// answering branch in agent.ts, which reads enactus.ts and the board.
+const EXAMPLES_ASK = [
+  "What does Enactus SFU actually do?",
+  "What's on our board right now?",
+];
 const EXAMPLES_SALES = [
   "Mid-size Vancouver construction firms that might need project management software",
   "Burnaby manufacturing companies expanding their operations this year",
@@ -30,7 +36,7 @@ export default function AgentPage() {
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
 
-  const examples = mode === "sales" ? EXAMPLES_SALES : EXAMPLES_SPONSOR;
+  const examples = [...(mode === "sales" ? EXAMPLES_SALES : EXAMPLES_SPONSOR), ...EXAMPLES_ASK];
   const last = turns[turns.length - 1];
   const awaitingAnswers = Boolean(last?.clarify && !running);
 
@@ -75,11 +81,12 @@ export default function AgentPage() {
             <div className="pt-6">
               <div className="flex items-center gap-2 mb-1">
                 <Sparkles size={18} style={{ color: "var(--gold)" }} />
-                <h1 className="text-lg font-bold">Find sponsors</h1>
+                <h1 className="text-lg font-bold">Find sponsors, or just ask</h1>
               </div>
               <p className="text-sm mb-4 ml-7" style={{ color: "var(--muted)" }}>
-                Describe the kind of sponsor you want. The agent finds real Lower Mainland companies, checks for SFU ties,
+                Describe the kind of sponsor you want and the agent finds real Lower Mainland companies, checks for SFU ties,
                 matches each to an Enactus project, and adds them to your board. Anything that isn’t a fit, hit ✕ and it’s gone.
+                Ask it a question instead — about Enactus, a project, or what’s on the board — and it just answers.
               </p>
 
               <div className="flex flex-wrap gap-2">
@@ -140,8 +147,8 @@ export default function AgentPage() {
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
               placeholder={
                 awaitingAnswers ? "Answer the questions above…"
-                : mode === "sales" ? "Describe the customers you want to find…"
-                : "Describe the sponsors you want to find…"
+                : mode === "sales" ? "Describe the customers you want to find, or ask a question…"
+                : "Describe the sponsors you want to find, or ask a question…"
               }
               rows={2}
               className="grow-text flex-1 bg-transparent outline-none text-sm resize-none px-2 py-1.5"
@@ -224,6 +231,13 @@ function AgentTurn({
           </div>
         )}
 
+        {turn.answer && (
+          <div className="text-sm leading-relaxed whitespace-pre-wrap" style={{ color: "var(--text)" }}>
+            {turn.answer}
+            {running && <span className="dot-pulse">▋</span>}
+          </div>
+        )}
+
         {turn.similar && (
           <div className="rounded-xl border p-3 flex gap-2.5" style={{ background: "rgba(245,200,66,.08)", borderColor: "rgba(245,200,66,.35)" }}>
             <History size={16} style={{ color: "var(--gold)" }} className="shrink-0 mt-0.5" />
@@ -269,13 +283,13 @@ function AgentTurn({
           {visible.map((l) => <LeadCard key={l.id} lead={l} onEmail={onEmail} onDelete={onDismiss} />)}
         </div>
 
-        {running && turn.leads.length === 0 && !turn.clarify && (
+        {running && turn.leads.length === 0 && !turn.clarify && !turn.answer && (
           <div className="grid sm:grid-cols-2 gap-3">
             {[0, 1].map((i) => <div key={i} className="h-40 rounded-xl shimmer" />)}
           </div>
         )}
 
-        {turn.done && turn.leads.length === 0 && !turn.clarify && !turn.error && (
+        {turn.done && turn.leads.length === 0 && !turn.clarify && !turn.error && !turn.answer && (
           <div className="rounded-xl border p-4 text-sm" style={{ background: "var(--surface)", borderColor: "var(--border)" }}>
             <div className="font-semibold mb-1">No sponsors matched this one.</div>
             <div style={{ color: "var(--muted)" }}>

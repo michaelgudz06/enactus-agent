@@ -79,6 +79,10 @@ export const CONNECTION_META: Record<ConnectionType, { label: string; color: str
 export type AgentEvent =
   | { type: "status"; step: string; message: string }
   | { type: "reasoning"; text: string }
+  // Prose, streamed in deltas, for a request the agent answers instead of
+  // searching. Separate from "reasoning" on purpose: reasoning is the model's
+  // scratchpad behind a collapsed toggle, this is the reply itself.
+  | { type: "answer"; text: string }
   | { type: "similar"; message: string; suggestion: string; pastPrompt: string }
   | { type: "clarify"; questions: string[] }
   | { type: "lead"; lead: Lead }

@@ -577,6 +577,13 @@ eq(last(applyEvent(t0(), { type: "status", step: "search", message: "Searching" 
    [{ step: "search", message: "Searching" }], "status appends a step");
 eq(last(applyEvent(applyEvent(t0(), { type: "reasoning", text: "Look" }), { type: "reasoning", text: "ing" })).reasoning,
    "Looking", "reasoning tokens concatenate, never replace");
+eq(last(applyEvent(applyEvent(t0(), { type: "answer", text: "We are " }), { type: "answer", text: "a club." })).answer,
+   "We are a club.", "answer accumulates deltas");
+// The answering branch emits `done` with no leads, which is the exact shape the
+// agent page uses to render "No sponsors matched this one." An answer must not
+// be able to land under that heading.
+eq(last(applyEvent(applyEvent(t0(), { type: "answer", text: "Hi" }), { type: "done" })).leads, [],
+   "an answered turn carries no leads");
 eq(last(applyEvent(t0(), { type: "lead", lead: { id: "a" } })).leads, [{ id: "a" }], "lead appends");
 eq(last(applyEvent(t0(), { type: "done" })).done, true, "done marks the turn finished");
 eq(last(applyEvent(t0(), { type: "clarify", questions: ["Which industry?"] })).clarify, ["Which industry?"], "clarify carries the questions");
