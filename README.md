@@ -146,6 +146,19 @@ npm run lint
 npx tsc --noEmit
 ```
 
+### Reading the runs back
+
+```bash
+node --experimental-strip-types scripts/run-report.ts
+```
+
+Every run writes down what it did -- the queries it ran, what discovery
+returned, where the funnel lost candidates, what it cost -- and the leads and
+the API spend both carry the run's id. That makes two questions answerable
+that were not before: what a qualified lead costs, and which search query
+found the lead that eventually replied. Read-only; runs from before the
+run-log migration have no trace.
+
 ## Layout
 
 ```
@@ -154,7 +167,7 @@ src/app/api/       route handlers
 src/lib/           the actual logic — agent pipeline, providers, pure helpers
 src/lib/targeting  who the club targets: one file holding the prose the
                    prompts are built from and the patterns the code matches on
-scripts/           selfcheck, score backtest, lead rescore
+scripts/           selfcheck, score backtest, lead rescore, run report
 neon-setup.sql     schema (7 tables, all prefixed enactus_)
 ```
 

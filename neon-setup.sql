@@ -239,3 +239,38 @@ alter table enactus_leads add column if not exists won_type text;
 -- removed. Nothing reads them any more. They are left in place rather than
 -- dropped because dropping a column cannot be undone and an unused one costs
 -- nothing; drop them by hand if you want the schema tidy.
+
+-- ── Run log ─────────────────────────────────────────────────────────────────
+-- enactus_searches grows from "what was typed" into "what the run actually
+-- did". It already had an unused params jsonb column and a uuid primary key,
+-- so this is five added columns rather than a new table.
+--
+-- Why it is worth the columns: the club has an outcome table -- leads move to
+-- Outreach Sent, replies get stamped, wins get closed with a dollar value --
+-- and nothing connected an outcome back to the run that produced it. So the
+-- two questions that should drive every tuning decision were unanswerable:
+-- which search query found the lead that replied, and what does a qualified
+-- lead cost. Both need the run and its leads and its spend to share an id.
+--
+-- The row is now written when the run STARTS and updated when it ends, so a
+-- run that died at discovery leaves a record saying so. Previously nothing was
+-- written unless the run reached the last step, which meant the failures --
+-- the runs worth reading -- were the ones that left no trace.
+alter table enactus_searches add column if not exists kind text not null default 'leads';
+alter table enactus_searches add column if not exists status text not null default 'done';
+alter table enactus_searches add column if not exists finished_at timestamptz;
+alter table enactus_searches add column if not exists cost_usd numeric(12, 6) not null default 0;
+alter table enactus_searches add column if not exists error text;
+
+-- Which run produced this lead, and which run paid for this call. Deliberately
+-- NOT foreign keys: a run row that could not be written must never be able to
+-- fail a lead insert or a ledger write, and both of those already degrade
+-- gracefully on their own.
+alter table enactus_leads add column if not exists search_id uuid;
+alter table enactus_spend add column if not exists search_id uuid;
+
+create index if not exists enactus_leads_search_idx on enactus_leads (search_id);
+create index if not exists enactus_spend_search_idx on enactus_spend (search_id);
+-- The similar-search check reads this; it must not start matching answer turns
+-- against lead searches now that both are logged here.
+create index if not exists enactus_searches_kind_idx on enactus_searches (mode, kind, created_at desc);
