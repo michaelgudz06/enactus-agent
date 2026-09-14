@@ -149,6 +149,8 @@ npx tsc --noEmit
 src/app/(app)/     the four pages
 src/app/api/       route handlers
 src/lib/           the actual logic — agent pipeline, providers, pure helpers
+src/lib/targeting  who the club targets: one file holding the prose the
+                   prompts are built from and the patterns the code matches on
 scripts/           selfcheck, score backtest, lead rescore
 neon-setup.sql     schema (7 tables, all prefixed enactus_)
 ```

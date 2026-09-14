@@ -24,6 +24,10 @@
 // directories, and grounded() correctly refuses to invent a person. So a lead
 // is scored when it lands and re-scored when a contact is found.
 
+// .ts specifier on purpose: scripts/selfcheck.ts loads this module under
+// `node --experimental-strip-types`, which resolves only explicit extensions.
+import { PROMO_SUPPLIER, STOREFRONT, WRONG_SIDE } from "./targeting.ts";
+
 export type ScoreFacts = {
   company?: string | null;
   industry?: string | null;
@@ -62,27 +66,17 @@ export const WEIGHTS = {
   wrongSide: -50, // they receive money, they do not give it
 } as const;
 
+// STOREFRONT, WRONG_SIDE and PROMO_SUPPLIER now live in src/lib/targeting.ts,
+// alongside the prompt wording that states the same rules to the model. They
+// were duplicated here and in three prompts, and the prompt half of the museum
+// carve-out drifted out of step with the regex half for months.
+//
 // A LinkedIn URL on the row was worth 1.68x in the history, but the leads table
 // has no column for one, so it is not scored. Add the field first if it matters.
 
 const BC = /\b(british columbia|b\.?c\.?|vancouver|burnaby|surrey|richmond|coquitlam|langley|delta|new westminster|north shore|lower mainland|metro vancouver|fraser valley|port moody|maple ridge|white rock|tsawwassen|ladner|pitt meadows)\b/i;
 
-// Consumer-facing categories: an allowlist of what has actually converted,
-// rather than a blocklist of what has not.
-//
-// Leading \b only, no trailing one -- these are PREFIX matches on purpose, so
-// "brewer" catches "Brewery", "museum" catches "Museums", "theat" catches both
-// spellings of theatre. A trailing \b silently breaks every one of them. The
-// short tokens that would over-match as prefixes ("spa" in "space", "toy" in
-// "Toyota", "pet" in "petroleum") are pinned with an explicit boundary instead.
-const STOREFRONT = /\b(restaurant|food|beverage|caf[eé]|coffee|baker|brewer|distiller|grocer|retail|apparel|clothing|footwear|fitness|gym\b|yoga|climbing|wellness|spa\b|day spa|salon|beauty|cosmetic|entertainment|recreation|sporting goods|sports\b|leisure|hospitality|hotel|tourism|museum|theat|bookstore|books\b|toys?\b|pets?\b|florist|flower|furniture|consumer)/i;
 
-// Wrong side of the transaction: these raise money, they do not sponsor.
-// Prefix matches for the same reason as above ("universit" must catch
-// "universities"). Museums are deliberately absent -- the Museum of Vancouver
-// and the Maritime Museum are both confirmed sponsors, and they would be caught
-// by a naive "non-profit" rule.
-const WRONG_SIDE = /\b(government|municipal|city of|public administration|higher education|universit|college|school district|non.?profit|charit|\bngo\b)/i;
 
 // Neighbourhood and municipality names as they appear inside a MAILBOX or an
 // outlet's name, where punctuation and spacing are unreliable. The text is
@@ -94,11 +88,6 @@ const BRANCH_PLACE =
 
 const squash = (s: string) => s.toLowerCase().replace(/[^a-z]/g, "");
 
-// Promotional-products suppliers: their product IS branded merchandise, so
-// donating it is a free sample shown to a room of future buyers. Structurally
-// the best fit in the whole history and only one was ever asked.
-const PROMO_SUPPLIER =
-  /(promotional product|promotional apparel|promo product|branded merchandise|branded apparel|corporate gift|screen print|screenprint|embroider|print shop|signage|trophies)/i;
 
 const HR_ROLE = /(\bhuman resources|\bhr\b|\brecruit|\btalent|\bpeople (and|&) culture|\bpeople operations|\bcampus)/i;
 

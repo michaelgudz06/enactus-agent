@@ -7,11 +7,12 @@
 // once, sending "credit unions ... with community grant programs" to the
 // answer branch while every other example chip still searched.
 //
-//   node scripts/intent-cases.mjs          # 5 samples per case
-//   node scripts/intent-cases.mjs 9        # more samples, for a close call
+//   node --experimental-strip-types scripts/intent-cases.ts      # 5 samples
+//   node --experimental-strip-types scripts/intent-cases.ts 9    # more, for a close call
 //
 // Costs one cheap STRUCTURER call per sample and writes nothing.
 import fs from "node:fs";
+import { QUERY_GUARDRAILS, planPrompt } from "../src/lib/targeting.ts";
 
 const src = fs.readFileSync("src/lib/agent.ts", "utf8");
 const env = Object.fromEntries(
@@ -20,21 +21,26 @@ const env = Object.fromEntries(
     .map((l) => [l.slice(0, l.indexOf("=")).trim(), l.slice(l.indexOf("=") + 1).trim().replace(/^["']|["']$/g, "")])
 );
 
-// Read the shipped strings out of the source rather than restating them here,
-// so editing the prompt cannot leave this file quietly testing the old wording.
-const planPrompt = "You help Enactus SFU" + src.split("  return `You help Enactus SFU")[1].split("`;\n}")[0];
+// The planner's own system prompt, imported rather than restated, so editing
+// the policy cannot leave this file quietly testing the old wording. It used to
+// be recovered by splitting agent.ts on a literal prefix; the prompt now lives
+// in one module and can simply be called.
+//
+// The JSON-shape instruction is still scraped, because it is built inline at
+// the call site out of run-specific values (queryCount, the mode branches). The
+// guard below fails loudly if that template stops resolving.
 const shape = ("Respond ONLY with JSON of shape:" + src.split("Respond ONLY with JSON of shape:")[1].split("` },")[0])
   .replace(/\$\{queryCount\}/g, "3")
-  .replace(/\$\{\s*\n?\s*mode === "sales"\s*\n?\s*\?\s*""\s*\n?\s*:\s*`([\s\S]*?)`\s*\n?\s*\}/, "$1")
+  .replace(/\$\{\s*\n?\s*mode === "sales"\s*\n?\s*\?\s*""\s*\n?\s*:\s*QUERY_GUARDRAILS\s*\n?\s*\}/, QUERY_GUARDRAILS)
   .replace(/\$\{\s*\n?\s*mode === "sales"[\s\S]*?:\s*'([\s\S]*?)'\s*\n?\s*\}/, "$1");
 if (shape.includes("${")) {
   console.error("Could not resolve the prompt template -- agent.ts changed shape:");
-  console.error(shape.match(/\$\{[^]{0,120}/)[0]);
+  console.error(shape.match(/\$\{[^]{0,120}/)?.[0] ?? shape.slice(0, 120));
   process.exit(1);
 }
-const system = `${planPrompt}\n\n${shape}`;
+const system = `${planPrompt("sponsor")}\n\n${shape}`;
 
-async function intentOf(prompt) {
+async function intentOf(prompt: string): Promise<string> {
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: { Authorization: `Bearer ${env.OPENROUTER_API_KEY}`, "Content-Type": "application/json" },

@@ -28,8 +28,17 @@ import {
 } from "./apollo";
 import { db, hasDatabaseUrl } from "./db";
 import { MAX_COUNT, parsedCount, requestedCount } from "./count";
-import { looksConversational } from "./intent";
 import { ENACTUS_ORG, ENACTUS_PROJECTS, ENACTUS_VENTURES } from "./enactus";
+import { looksConversational } from "./intent";
+// Every rule about who the club targets -- in prose for the prompts and as
+// patterns for the code -- lives in one file. See its header for why.
+import {
+  QUERY_GUARDRAILS,
+  STRUCTURE_EXCLUSION_RULE,
+  analystSystemPrompt,
+  isOwnOrganisation,
+  planPrompt,
+} from "./targeting";
 import { scoreLead, boardOrderFor } from "./score";
 import { boardLines } from "./table";
 import {
@@ -113,22 +122,6 @@ interface Candidate {
   org: ApolloOrg | null;
 }
 
-function planPrompt(mode: Mode): string {
-  if (mode === "sales") {
-    return `You help a project manager find customers, stockists and supply partners for an Enactus SFU student venture. Turn their request into effective web-search queries and a crisp ideal-customer description.
-
-The partnerships that have actually worked were independent Metro Vancouver retailers and suppliers who agreed to stock a student-made product or supply materials at cost: an independent bookstore acting as a sales channel, a neighbourhood yarn shop, an organic seed company, a local grocer. Favour owner-operated shops in the venture's own category over chains and distributors -- a named owner can say yes to a shelf trial, a buying department cannot.`;
-  }
-  return `You help Enactus SFU, a student social-entrepreneurship club at Simon Fraser University (Burnaby / Vancouver, BC), find local businesses willing to donate a raffle prize, gift card, product sample, or small cash gift for a student event.
-
-What actually converts, measured across three years of this club's own outreach: independent consumer-facing businesses in Metro Vancouver -- restaurants and cafes, gyms and yoga and climbing studios, escape rooms, museums and small attractions, neighbourhood retail -- of roughly 2 to 200 staff, where a single owner or store manager can approve a $25-$300 giveaway without asking anyone. Businesses whose own customers are students convert best, because what they give (a free class, a voucher, a product trial) costs them very little and wins them a regular customer who lives nearby. Promotional-products and branded-merchandise suppliers are the same shape and are badly under-used: their product is swag, so donating it is a free sample.
-
-For a chain, target the SPECIFIC LOCAL BRANCH -- the Burnaby location, the Kitsilano store -- never head office. Do NOT write queries aimed at corporate social responsibility, community investment, philanthropy, or grant programs: roughly fifty attempts at large companies through that door produced not one donation.
-
-Turn the user's request into effective web-search queries and a crisp ideal-sponsor description.
-
-Only look for real businesses that could give money, product, or vouchers. NEVER target other student clubs, university clubs or associations (at SFU or elsewhere), or organizations whose "sponsorship" is actually a paid membership, paid directory listing, or a fee the club would have to pay. Word the search queries to find businesses, not clubs or memberships.`;
-}
 
 /**
  * What the board looks like right now, in one query, as a few lines of prose.
@@ -309,7 +302,7 @@ async function runPipeline(
         { role: "system", content: `${planPrompt(mode)}\n\nRespond ONLY with JSON of shape: {"intent": "leads" | "answer", "needClarification": boolean, "questions": string[], "searchQueries": string[], "criteria": string, "altAngle": string, "location": string, "placesQueries": string[]}. Provide ${queryCount} DISTINCT searchQueries that attack the request from different angles (neighbourhood plus business category, local-news coverage of independent businesses, business-improvement-association and neighbourhood directory listings, "supported a local school or team" phrasing) so they do not all return the same pages.${
               mode === "sales"
                 ? ""
-                : ` The target is organisations that GIVE money or goods. Do not write queries that surface charities, foundations seeking donations, non-profits, or community groups looking for sponsors -- those compete with Enactus for the same donor dollars rather than funding it. Words like "non-profit", "charity" and "fundraiser" in a query reliably return the wrong side of the transaction, and words like "corporate social responsibility", "community investment" and "philanthropy" reliably return large companies that have never given this club anything.`
+                : QUERY_GUARDRAILS
             } placesQueries: ${
               mode === "sales"
                 ? 'up to 3 short local-business queries suited to a maps search (e.g. "gift shops Vancouver", "yarn shops Burnaby"), or [] if the request is not about local storefront businesses'
@@ -635,12 +628,7 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
       .join("\n\n");
   const context = renderContext(candidates, 0);
 
-  const scoreSystem =
-    mode === "sales"
-      ? `You are a sales-lead analyst. Assess each candidate organization as a potential CUSTOMER, STOCKIST or SUPPLY PARTNER for the user's product. Prefer independent owner-operated retailers and suppliers in the product's own category -- the partnerships that have worked were a shelf trial agreed by a shop owner, not a listing won from a buying department -- and prefer a candidate whose page names an actual person over an equally good one that names nobody.\n\n${ENACTUS_VENTURES}`
-      : `You are a sponsorship-lead analyst for Enactus SFU. Assess each candidate organization as a potential SPONSOR. Detect any Simon Fraser University (SFU) or Enactus alumni connection, or past-sponsor / SFU-ecosystem tie, strictly from the provided text.\n\n${ENACTUS_ORG}\n\n${ENACTUS_PROJECTS}\n\nFor each strong sponsor, identify which specific Enactus SFU project best matches their industry or values, so outreach can pitch that project.\n\nHARD EXCLUSIONS — drop these candidates entirely (do not output them at all): other student clubs, university clubs, or student associations (at SFU or any school); anything that would require Enactus to PAY (paid memberships, paid directory or association listings, ticketed programs, fee-based accelerators); and charities, hospital or arts foundations, and community non-profits that RAISE money rather than give it — they are competing for the same donors, not funding Enactus. and grant-making foundations, whose money arrives through a months-long written application owned by a different team, not through sponsor outreach. Enactus is asking a business to hand over a gift card, a voucher or a product, not to join, pay, fundraise alongside, or run a grant round. IMPORTANT CARVE-OUT: a museum, gallery, theatre or attraction that SELLS ADMISSION is not in that category and must be kept -- two museums and a cinema are confirmed past sponsors, because they can donate tickets. The test is whether the organisation has something to sell you, not how it is incorporated.
-
-RANK BY WHO CAN SAY YES. Every sponsorship this club has ever landed was approved by one owner, franchisee or store manager acting alone, and roughly half of all past outreach went to HR and campus-recruiting contacts who converted nothing at all. Prefer a candidate whose page names an actual person -- an owner, founder, or store manager -- over an equally good company that names nobody. For a chain, prefer the specific local branch over the national brand: reaching a store has worked, reaching head office never has. Independent businesses of roughly 2 to 200 staff are the target; a large national employer contacted at corporate is not, however well known its name.`;
+  const scoreSystem = analystSystemPrompt(mode);
 
   // Stage A — R1 reasons out loud (visible), no JSON. Capped so it stays snappy.
   const reasoningUser = `User request: ${fullPrompt}
@@ -737,7 +725,7 @@ Rules:
 - Where a candidate has a VERIFIED line, take industry and location from it verbatim. Never invent an employee count, revenue figure or founding year.
 - reasoning: ONE sentence under 200 characters about THIS company ONLY -- the single strongest piece of concrete evidence from the research, then the first ask it justifies${mode === "sales" ? "" : " and the Enactus SFU project it funds"}. Never mention, compare, or rank other candidates in it. If the evidence is thin, say so instead of padding.
 - contact_email only if visible in the text; otherwise null. source_index is the [n] you used.
-${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student club, university club/association, or anything requiring Enactus to pay a membership/fee. Only real companies, businesses, or grant-making foundations."}`;
+${mode === "sales" ? "" : STRUCTURE_EXCLUSION_RULE}`;
 
   let parsedLeads: RawLead[] | null = null;
   let structureError: string | null = null;
@@ -870,7 +858,7 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
       dropped.membership_org = (dropped.membership_org ?? 0) + 1;
       return false;
     }
-    if (/^(simon fraser|sfu\b)/i.test(raw.company.trim())) return false;
+    if (isOwnOrganisation(raw.company)) return false;
     // Chunks were assumed to be unable to collide because their inputs are
     // disjoint. A real Langley run emitted "Otter Co-Op" three times, each as
     // its own board row: the model names a company mentioned INSIDE a page, and
