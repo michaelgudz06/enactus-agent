@@ -38,6 +38,7 @@ import { companyPoints, contactPoints, isBranchAddress, isDecisionInbox, isGener
 import { actorKey, buildScoreboard, civilDate, monthOf, sent, weekStartOf, type ScoreEvent } from "../src/lib/scoreboard.ts";
 import { winMessage } from "../src/lib/slack.ts";
 import { looksConversational } from "../src/lib/intent.ts";
+import { reasoningFor } from "../src/lib/reasoning.ts";
 import {
   HARD_EXCLUSIONS,
   PROMO_SUPPLIER,
@@ -1329,5 +1330,49 @@ for (const body of ["Burnaby Board of Trade", "Greater Vancouver Chamber of Comm
   ok(isMembershipName(body), `"${body}" is a membership body Enactus would pay to join`);
 }
 ok(!isMembershipName("Trade Winds Coffee"), "a trading name is not a trade association");
+
+// ── per-chunk reasoning ─────────────────────────────────────────────────────
+// The bug this replaces: every chunk was handed trace.slice(0, 3000), so the
+// chunk holding candidates 10-12 read an argument about candidates 1-3.
+const NAMES = ["Aster Cafe", "Bellweather Books", "Cinder Climbing", "Drift Yoga", "Ember Bakery", "Fathom Escape"];
+const TRACE = [
+  "Working through the shortlist against the club's actual asks.",
+  "[1] Aster Cafe -- owner-operated, names the owner on the about page. Strong.",
+  "[2] Bellweather Books -- independent, student customers, plausible voucher.",
+  "[3] Cinder Climbing -- day passes are exactly the $25-300 shape.",
+  "[4] Drift Yoga -- a free class costs them little and wins a regular.",
+  "[5] Ember Bakery -- no named contact anywhere on the site.",
+  "[6] Fathom Escape -- escape rooms have converted before.",
+  "Overall the first three are the strongest.",
+].join("\n\n");
+
+const chunk1 = reasoningFor(TRACE, { names: NAMES, first: 0, count: 3, maxChars: 3000 });
+const chunk2 = reasoningFor(TRACE, { names: NAMES, first: 3, count: 3, maxChars: 3000 });
+ok(chunk1.includes("Aster Cafe") && chunk1.includes("Cinder Climbing"), "chunk 1 gets its own candidates");
+ok(!chunk1.includes("Drift Yoga"), "chunk 1 is not handed chunk 2's candidates");
+ok(chunk2.includes("Drift Yoga") && chunk2.includes("Fathom Escape"), "chunk 2 gets its own candidates");
+ok(!chunk2.includes("Aster Cafe"), "chunk 2 is no longer reading about candidate [1]");
+ok(chunk2.includes("Overall the first three"), "general blocks still reach every chunk");
+ok(chunk1.indexOf("Aster Cafe") < chunk1.indexOf("Working through"),
+   "a chunk's own reasoning is laid down before the general preamble");
+
+// Attribution by name, for the blocks where R1 drops the marker after the
+// first mention -- which it does constantly.
+const NAMED = "Aster Cafe looks best of the lot.\n\nDrift Yoga would need a manager's approval.";
+ok(reasoningFor(NAMED, { names: NAMES, first: 0, count: 3, maxChars: 3000 }).includes("Aster Cafe looks best"),
+   "a block with no [n] marker is still attributed by company name");
+ok(!reasoningFor(NAMED, { names: NAMES, first: 0, count: 3, maxChars: 3000 }).includes("Drift Yoga"),
+   "and is not given to the chunk that does not own it");
+
+// Degrade exactly to the old behaviour when R1 never reached these candidates,
+// which is what happens whenever the reasoning budget aborts mid-trace.
+const SHORT = "[1] Aster Cafe -- strong.\n\n[2] Bellweather Books -- strong.";
+eq(reasoningFor(SHORT, { names: NAMES, first: 3, count: 3, maxChars: 3000 }), SHORT,
+   "a chunk R1 never reached falls back to the head of the trace");
+eq(reasoningFor("", { names: NAMES, first: 0, count: 3, maxChars: 3000 }), "", "an empty trace stays empty");
+eq(reasoningFor(TRACE, { names: NAMES.slice(0, 2), first: 0, count: 3, maxChars: 3000 }), TRACE,
+   "a run small enough to be one chunk is not sliced at all");
+ok(reasoningFor(TRACE, { names: NAMES, first: 0, count: 3, maxChars: 60 }).length <= 60,
+   "the character cap is honoured");
 
 console.log(`selfcheck: ${checks} assertions passed`);
