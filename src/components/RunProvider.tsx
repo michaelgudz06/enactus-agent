@@ -19,9 +19,18 @@ import { applyEvent, newTurn, RunTurn, takeLines } from "@/lib/run-events";
  * needs a job that outlives the request, which is a much larger change. The
  * server-side run does keep going either way -- `runAgent` writes each lead to
  * the board as it goes, so leads already found are on the board regardless.
+ *
+ * A run can now span more than one request. When discovery leaves too little of
+ * the function budget to reason properly, the server parks the candidates and
+ * closes the response with a `continue` event; this component POSTs the run id
+ * straight back and reads the rest from a second stream. To the transcript it
+ * is one turn either way.
  */
 
 export type Turn = RunTurn<Lead>;
+
+/** How many times a run may be handed to a fresh invocation. See run(). */
+const MAX_HANDOFFS = 2;
 
 interface RunCtx {
   turns: Turn[];
@@ -55,37 +64,64 @@ export default function RunProvider({ children }: { children: React.ReactNode })
   // reader; `running` alone is a render behind and would let the second through.
   const busy = useRef(false);
 
+  /**
+   * Read one response's worth of events.
+   *
+   * Returns the run id when the server parked the run and wants a second
+   * invocation, so the caller can pick it straight back up. See
+   * src/lib/resume.ts: a run whose discovery ate the clock hands the analysis
+   * to a fresh budget rather than squeezing it, and from here that is simply
+   * one stream ending and another beginning.
+   */
+  const readStream = useCallback(async (body: unknown): Promise<string | null> => {
+    const res = await fetch("/api/agent/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok || !res.body) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error || `Request failed (${res.status})`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let continueWith: string | null = null;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const { lines, rest } = takeLines(buf);
+      buf = rest;
+      for (const line of lines) {
+        let ev: AgentEvent;
+        // A line that is not JSON costs that line and nothing else.
+        try { ev = JSON.parse(line) as AgentEvent; } catch { continue; }
+        setTurns((ts) => applyEvent(ts, ev));
+        if (ev.type === "continue") continueWith = ev.runId;
+        // A lead is emitted after the insert has been attempted, so this is
+        // the earliest honest moment to tell the board to read again.
+        if (ev.type === "lead" || ev.type === "done") setLeadSignal((n) => n + 1);
+      }
+    }
+    return continueWith;
+  }, []);
+
   const run = useCallback(async (mode: Mode, answers?: string) => {
     busy.current = true;
     setRunning(true);
     try {
-      const res = await fetch("/api/agent/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: askedRef.current, mode, answers, skipClarify: Boolean(answers) }),
+      let next = await readStream({
+        prompt: askedRef.current,
+        mode,
+        answers,
+        skipClarify: Boolean(answers),
       });
-      if (!res.ok || !res.body) {
-        const d = await res.json().catch(() => ({}));
-        throw new Error(d.error || `Request failed (${res.status})`);
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const { lines, rest } = takeLines(buf);
-        buf = rest;
-        for (const line of lines) {
-          let ev: AgentEvent;
-          // A line that is not JSON costs that line and nothing else.
-          try { ev = JSON.parse(line) as AgentEvent; } catch { continue; }
-          setTurns((ts) => applyEvent(ts, ev));
-          // A lead is emitted after the insert has been attempted, so this is
-          // the earliest honest moment to tell the board to read again.
-          if (ev.type === "lead" || ev.type === "done") setLeadSignal((n) => n + 1);
-        }
+      // Bounded, and low: the pipeline hands off at most once, so anything
+      // beyond that is a server that has started asking for a loop. Better to
+      // stop with the leads already on the board than to spend in a circle.
+      for (let hop = 0; next && hop < MAX_HANDOFFS; hop++) {
+        next = await readStream({ runId: next });
       }
     } catch (e) {
       setTurns((ts) => applyEvent(ts, { type: "error", message: (e as Error).message }));
@@ -93,7 +129,7 @@ export default function RunProvider({ children }: { children: React.ReactNode })
       busy.current = false;
       setRunning(false);
     }
-  }, []);
+  }, [readStream]);
 
   const send = useCallback((text: string, mode: Mode, awaitingAnswers: boolean) => {
     const t = text.trim();

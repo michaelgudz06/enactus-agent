@@ -79,8 +79,15 @@ nothing is posted.
    would have to *pay* to join are dropped here.
 5. **Persist** — survivors are written to Neon and appear on the board mid-run.
 
-A run is a single 60-second serverless function, so one run tops out at 25
+One invocation is a 60-second serverless function, so a run tops out at 25
 leads. Asking for more says so and tells you to run it again.
+
+Discovery, reasoning and structuring used to share that one budget, which
+meant a slow search was paid for by the stage that produces the leads. When
+discovery leaves too little of the clock to reason properly, the run now parks
+its candidates on the run row and the page picks it straight back up with a
+fresh budget. Usually there is time to spare and it just runs on; either way
+it is one turn in the transcript.
 
 ### Ground rules baked into the code
 

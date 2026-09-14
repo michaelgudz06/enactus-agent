@@ -42,6 +42,7 @@ export type RunEvent<L> =
   | { type: "similar"; message: string; suggestion: string; pastPrompt?: string }
   | { type: "clarify"; questions: string[] }
   | { type: "lead"; lead: L }
+  | { type: "continue"; runId: string; message: string }
   | { type: "done"; count?: number; searchId?: string | null }
   | { type: "error"; message: string };
 
@@ -95,6 +96,11 @@ export function applyEvent<L>(turns: RunTurn<L>[], ev: RunEvent<L>): RunTurn<L>[
       return patch({ clarify: ev.questions });
     case "lead":
       return patch({ leads: [...t.leads, ev.lead] });
+    // Rendered as an ordinary step, NOT as done: the run is still running, in
+    // the invocation the client is about to start. Marking the turn done here
+    // would close the transcript over a run that has produced no leads yet.
+    case "continue":
+      return patch({ steps: [...t.steps, { step: "continue", message: ev.message }] });
     case "done":
       return patch({ done: true });
     case "error":
