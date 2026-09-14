@@ -86,6 +86,11 @@ export type AgentEvent =
   | { type: "similar"; message: string; suggestion: string; pastPrompt: string }
   | { type: "clarify"; questions: string[] }
   | { type: "lead"; lead: Lead }
+  // The same lead again, after the contact phase found a person and re-scored
+  // it. Replaces rather than appends: without this the transcript kept showing
+  // the card as it was written, with no contact, while the board beside it had
+  // one.
+  | { type: "lead_update"; lead: Lead }
   // The run got its candidates but not enough of the clock to reason over them
   // properly, so it parked them and closed the response. The client POSTs the
   // runId straight back to finish it with a fresh budget. Not an error and not

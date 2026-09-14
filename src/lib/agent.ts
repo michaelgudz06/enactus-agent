@@ -32,8 +32,9 @@ import { ENACTUS_ORG, ENACTUS_PROJECTS, ENACTUS_VENTURES } from "./enactus";
 import { looksConversational } from "./intent";
 import { reasoningFor } from "./reasoning";
 import { interleave, partition } from "./funnel";
+import { enrichContacts } from "./contact";
 import { newTrace, note, traceSummary, type RunTrace } from "./trace";
-import { RESUME_VERSION, isResumable, shouldHandOff, type ResumeState } from "./resume";
+import { RESUME_VERSION, isResumable, shouldHandOff, type ResumePhase, type ResumeState } from "./resume";
 // Every rule about who the club targets -- in prose for the prompts and as
 // patterns for the code -- lives in one file. See its header for why.
 import {
@@ -49,6 +50,8 @@ import {
   budgetStopMessage,
   exaContentsCostUsd,
   exaSearchCostUsd,
+  firecrawlCreditUsd,
+  firecrawlLookupCostUsd,
   openRouterCostUsd,
   overBudget,
   tokensFromChars,
@@ -65,6 +68,18 @@ const RUN_BUDGET_MS = 52_000;
 // finish: R1's cap plus structuring's reserve plus room to persist. Below this,
 // the run hands off rather than squeezing both stages into what discovery left.
 const ANALYSIS_MIN_MS = 30_000;
+
+// How many of a run's leads get a contact lookup. Every lookup is two /map
+// calls and up to three /scrape calls against somebody else's web server, so
+// this is a credit and wall-clock bound, not a quality one: the leads are
+// ordered best-first, and the ones a volunteer opens first are the ones worth
+// spending on.
+const CONTACT_ENRICH_MAX = 5;
+
+// What the contact phase wants. A scrape is 2-5s per URL and a lookup reads up
+// to three of them, so below this the run hands off rather than find two
+// contacts and abandon the rest half-scraped.
+const CONTACTS_MIN_MS = 20_000;
 
 // Planner retry. See the loop in runPipeline().
 const PLAN_ATTEMPTS = 2;
@@ -142,6 +157,13 @@ interface Candidate {
  * Plain data, all of it: this is exactly what crosses a handoff, so a field
  * that cannot survive JSON cannot be added here by accident.
  */
+/** Everything the contact phase needs. Plain data: it crosses a handoff too. */
+interface ContactsInput {
+  leadIds: string[];
+  userName: string;
+  targetCount: number;
+}
+
 interface AnalysisInput {
   fullPrompt: string;
   mode: Mode;
@@ -804,7 +826,7 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
   // giving it one too small to be worth spending. Discovery usually leaves
   // plenty, and then this is exactly the pipeline that was here before.
   if (state.searchId && hasDatabaseUrl() && shouldHandOff(RUN_DEADLINE - Date.now(), ANALYSIS_MIN_MS)) {
-    const handedOff = await saveResumeState(state.searchId, analysisInput, trace, state.costUsd);
+    const handedOff = await saveResumeState(state.searchId, "analysis", analysisInput, trace, state.costUsd);
     if (handedOff) {
       mark("handing off to a fresh invocation for analysis");
       note(trace, "analysis ran in a second invocation");
@@ -829,6 +851,75 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
 }
 
 /**
+ * Phase three: find a named human at each lead this run just created.
+ *
+ * Runs last on purpose. Everything before it produces companies; this is the
+ * only stage that produces people, and a company with nobody to write to is a
+ * row a volunteer scrolls past. findContactFor() re-scores each lead as it
+ * lands, so the board's order settles here rather than whenever somebody
+ * happens to click.
+ *
+ * Bounded twice over: at most CONTACT_ENRICH_MAX leads, and it stops when the
+ * phase deadline says so. Credits are real money and this is the one stage that
+ * spends them without a model deciding it was worth it.
+ */
+async function runContacts(
+  input: ContactsInput,
+  emit: Emit,
+  state: RunState,
+  trace: RunTrace,
+  deadline: number
+): Promise<void> {
+  emit({
+    type: "status",
+    step: "contacts",
+    message: `Looking for a named contact at ${input.leadIds.length} ${
+      input.leadIds.length === 1 ? "company" : "companies"
+    }`,
+  });
+
+  const creditUsd = firecrawlCreditUsd(process.env.FIRECRAWL_CREDIT_USD);
+  if (creditUsd === null) {
+    // Said out loud rather than silently counted as free. A cap enforced
+    // against a total that excludes a whole provider is worse than one that
+    // admits the gap -- and this codebase has been repaired repeatedly for
+    // degrading quietly.
+    note(trace, "Firecrawl lookups are not priced into the cap (set FIRECRAWL_CREDIT_USD)");
+  }
+
+  const { found, attempted } = await enrichContacts(input.leadIds, input.userName, { deadline });
+  trace.contactsAttempted = attempted;
+  trace.contactsFound = found;
+
+  const costUsd = firecrawlLookupCostUsd(attempted, creditUsd);
+  if (costUsd > 0) {
+    state.costUsd += costUsd;
+    void recordSpend({ provider: "firecrawl", detail: "contact lookup", costUsd, searchId: state.searchId });
+  }
+
+  // Re-read the rows rather than trusting the in-memory copies: findContactFor
+  // coalesces, so what it wrote is not always what it found, and it also moved
+  // fit_score and board_order. The transcript should show what is on the board.
+  if (hasDatabaseUrl()) {
+    try {
+      const rows = (await db()`
+        select * from enactus_leads where id = any(${input.leadIds}::uuid[])`) as Lead[];
+      for (const lead of rows ?? []) emit({ type: "lead_update", lead });
+    } catch {
+      // Cosmetic: the board reads these rows itself on the next refresh.
+    }
+  }
+
+  emit({
+    type: "status",
+    step: "contacts",
+    message: found
+      ? `Found a contact at ${found} of ${attempted}.`
+      : `No published contact found at ${attempted === 1 ? "that company" : "those companies"}. The composer still writes the outreach.`,
+  });
+}
+
+/**
  * Park a run's settled candidate pool on its row so another invocation can
  * finish it.
  *
@@ -837,17 +928,18 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
  * left, which is worse than a fresh one and far better than losing the
  * discovery that was already paid for.
  */
-async function saveResumeState(
+async function saveResumeState<T>(
   searchId: string,
-  input: AnalysisInput,
+  phase: ResumePhase,
+  input: T,
   trace: RunTrace,
   costUsd: number
 ): Promise<boolean> {
-  const stored: ResumeState<AnalysisInput, RunTrace> = { v: RESUME_VERSION, input, trace, costUsd };
+  const stored: ResumeState<T, RunTrace> = { v: RESUME_VERSION, phase, input, trace, costUsd };
   try {
     await db()`
       update enactus_searches
-         set resume_state = ${JSON.stringify(stored)}::jsonb, status = 'analysing'
+         set resume_state = ${JSON.stringify(stored)}::jsonb, status = 'parked'
        where id = ${searchId}`;
     return true;
   } catch (e) {
@@ -884,7 +976,7 @@ export async function resumeAgent(runId: string, emit: Emit): Promise<void> {
     // Anything but 'analysing' means this run was already finished, or never
     // handed off. Resuming it twice would reason over the same candidates again
     // and pay for it again.
-    if (!row || row.status !== "analysing") {
+    if (!row || row.status !== "parked") {
       emit({ type: "error", message: "That run is not waiting to be resumed." });
       return;
     }
@@ -901,12 +993,18 @@ export async function resumeAgent(runId: string, emit: Emit): Promise<void> {
     // Claimed before any work, so two clients racing the same handoff cannot
     // both spend a reasoning pass on it.
     await db()`update enactus_searches set status = 'running', resume_state = null where id = ${runId}`;
+    const deadline = Date.now() + RUN_BUDGET_MS;
+    if (stored.phase === "contacts") {
+      await runContacts(stored.input as unknown as ContactsInput, emit, state, stored.trace, deadline);
+      emit({ type: "done", count: stored.trace.delivered, searchId: runId });
+      return;
+    }
     emit({
       type: "status",
       step: "research",
       message: `Analysing ${stored.input.candidates.length} candidates for ${stored.input.targetCount} leads`,
     });
-    await runAnalysis(stored.input, emit, state, stored.trace, Date.now() + RUN_BUDGET_MS);
+    await runAnalysis(stored.input, emit, state, stored.trace, deadline);
   } catch (e) {
     state.error = (e as Error).message;
     throw e;
@@ -1369,6 +1467,31 @@ ${mode === "sales" ? "" : STRUCTURE_EXCLUSION_RULE}`;
   // the outcome only this point knows.
   trace.delivered = finalized.length;
   state.error = persistError;
+
+  // ── 6. Find a human being ───────────────────────────────────────────────
+  // The point of the whole exercise. See enrichContacts() in contact.ts: the
+  // three strongest weights in the rubric are contact-level and none of them
+  // can fire until somebody real is found, so a board ordered before this step
+  // is ordered by the weakest half of the score.
+  const needContacts = finalized
+    .filter((l) => l.website && !l.contact_name && !l.contact_email)
+    .slice(0, CONTACT_ENRICH_MAX)
+    .map((l) => l.id);
+  if (needContacts.length) {
+    const contactsInput: ContactsInput = { leadIds: needContacts, userName, targetCount };
+    if (state.searchId && hasDatabaseUrl() && shouldHandOff(msLeft(), CONTACTS_MIN_MS)) {
+      if (await saveResumeState(state.searchId, "contacts", contactsInput, trace, state.costUsd)) {
+        emit({
+          type: "continue",
+          runId: state.searchId,
+          message: `${finalized.length} on the board. Looking for a named contact at each, with a fresh budget.`,
+        });
+        state.trace = null;
+        return;
+      }
+    }
+    await runContacts(contactsInput, emit, state, trace, RUN_DEADLINE);
+  }
 
   // A cap that is not being recorded is not a cap. If the ledger could not be
   // written this run, say so rather than let the next run believe the total.

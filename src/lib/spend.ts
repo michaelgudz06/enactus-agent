@@ -10,7 +10,7 @@ import { billingMonth, capUsd, type BudgetState } from "./budget";
 // -- against Neon that is one `sum()` and the ~50 lines of paging go away.
 
 export interface SpendEntry {
-  provider: "openrouter" | "exa";
+  provider: "openrouter" | "exa" | "firecrawl";
   /** Model id or endpoint, so a surprising month can be read back per source. */
   detail?: string | null;
   costUsd: number;

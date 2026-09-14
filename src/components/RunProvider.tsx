@@ -99,9 +99,12 @@ export default function RunProvider({ children }: { children: React.ReactNode })
         try { ev = JSON.parse(line) as AgentEvent; } catch { continue; }
         setTurns((ts) => applyEvent(ts, ev));
         if (ev.type === "continue") continueWith = ev.runId;
-        // A lead is emitted after the insert has been attempted, so this is
-        // the earliest honest moment to tell the board to read again.
-        if (ev.type === "lead" || ev.type === "done") setLeadSignal((n) => n + 1);
+        // A lead is emitted after the insert has been attempted, and an update
+        // after the contact phase rewrote the row, so both are honest moments
+        // to tell the board to read again.
+        if (ev.type === "lead" || ev.type === "lead_update" || ev.type === "done") {
+          setLeadSignal((n) => n + 1);
+        }
       }
     }
     return continueWith;
