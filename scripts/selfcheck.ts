@@ -27,6 +27,8 @@ import {
   billingMonth,
   EXA_SEARCH_USD,
   OPENROUTER_PRICES,
+  exaContentsCostUsd,
+  EXA_CONTENTS_PAGE_USD,
 } from "../src/lib/budget.ts";
 import { setClause } from "../src/lib/db.ts";
 import { applyEvent, newTurn, takeLines, type RunTurn } from "../src/lib/run-events.ts";
@@ -39,6 +41,7 @@ import { actorKey, buildScoreboard, civilDate, monthOf, sent, weekStartOf, type 
 import { winMessage } from "../src/lib/slack.ts";
 import { looksConversational } from "../src/lib/intent.ts";
 import { reasoningFor } from "../src/lib/reasoning.ts";
+import { interleave, partition } from "../src/lib/funnel.ts";
 import {
   HARD_EXCLUSIONS,
   PROMO_SUPPLIER,
@@ -1374,5 +1377,36 @@ eq(reasoningFor(TRACE, { names: NAMES.slice(0, 2), first: 0, count: 3, maxChars:
    "a run small enough to be one chunk is not sliced at all");
 ok(reasoningFor(TRACE, { names: NAMES, first: 0, count: 3, maxChars: 60 }).length <= 60,
    "the character cap is honoured");
+
+// ── funnel shaping ──────────────────────────────────────────────────────────
+// The pool is cut to roughly twice the requested lead count before any model
+// sees it, so order here decides what is CONSIDERED, not merely what ranks
+// well. Concatenation would hand the whole pool to whichever group is first.
+eq(interleave([[1, 3, 5], [2, 4, 6]]), [1, 2, 3, 4, 5, 6], "two even groups alternate");
+eq(interleave([["a"], ["b", "c", "d"]]), ["a", "b", "c", "d"], "a short group does not stall the rest");
+eq(interleave([[], [1, 2]]), [1, 2], "an empty group does not waste its turn");
+eq(interleave([]), [], "no groups is not an error");
+eq(interleave([[1, 2]]), [1, 2], "one group passes through unchanged");
+
+// The property that matters: a channel returning far fewer rows still gets an
+// even share of the cut, which is the whole reason Places is interleaved rather
+// than concatenated after Exa.
+const fewPlaces = ["p1", "p2"];
+const manyExa = Array.from({ length: 20 }, (_, i) => `e${i + 1}`);
+const cut = interleave([fewPlaces, manyExa]).slice(0, 8);
+eq(cut.filter((x) => x.startsWith("p")).length, 2, "both Places rows survive a cut Exa would have flooded");
+
+eq(partition([1, 2, 3, 4], (n) => n % 2 === 0), [[2, 4], [1, 3]], "partition keeps order inside each half");
+eq(partition([], () => true), [[], []], "partition of nothing is two empty halves");
+
+// /contents is billed per page with no per-request component -- it runs no
+// search. A run that enriches nothing must cost nothing.
+eq(exaContentsCostUsd(0), 0, "enriching no pages is free");
+eq(exaContentsCostUsd(12), 12 * EXA_CONTENTS_PAGE_USD, "contents is charged per page");
+// Not free, and not cheaper than a search per page: a 10-result search bundles
+// its pages for $0.007, while ten /contents pages are $0.010. That is why
+// enrichment runs AFTER the pool is cut rather than over everything found.
+ok(exaContentsCostUsd(10) > exaSearchCostUsd(10), "ten enriched pages cost more than a ten-result search");
+ok(exaContentsCostUsd(12) < 2 * exaSearchCostUsd(25), "a cut-sized enrichment stays under two wide searches");
 
 console.log(`selfcheck: ${checks} assertions passed`);

@@ -67,7 +67,10 @@ nothing is posted.
 
 ## How a run works
 
-1. **Search** — Exa queries the open web for candidate companies.
+1. **Search** — Google Places finds the businesses themselves (the channel
+   that reliably surfaces the independent storefronts this club wins) and Exa
+   queries the open web alongside it. Places results are then given real page
+   text so they can be reasoned about rather than judged on a street address.
 2. **Reason** — DeepSeek R1 (via OpenRouter) argues each candidate against the
    club's actual asks, streaming its reasoning to the page.
 3. **Structure** — a fast model turns that prose into rows.
