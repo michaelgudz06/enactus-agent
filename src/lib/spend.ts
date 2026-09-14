@@ -38,7 +38,40 @@ export function ledgerWriteProblem(): string | null {
   return writeProblem;
 }
 
+// Ledger inserts that have been started but not yet confirmed by Postgres.
+//
+// recordSpend() is called from the hot path and its callers deliberately do not
+// await it -- a run must not pay a round-trip to bill itself. On a long-lived
+// server that is harmless, because the promise settles eventually. On a
+// serverless function it is not: the runtime is free to tear the process down
+// the moment the response stream closes, and any insert still in flight dies
+// with it. Every killed insert is spend the NEXT run does not know about, so
+// the $20 cap drifts upward silently -- which is the one failure mode a cap
+// exists to prevent.
+//
+// So every write registers here and runAgent() awaits flushSpend() before it
+// returns. The cap itself is unaffected either way: inProcessUsd is incremented
+// synchronously above, so a run always sees its own spend.
+const pending = new Set<Promise<void>>();
+
+/**
+ * Wait for every ledger insert this process has started.
+ *
+ * Loops rather than awaiting once: a flush can itself be racing a write that
+ * was started while we were waiting. Never throws -- recordSpend() already
+ * records its own failures in writeProblem, and a bookkeeping error must not
+ * fail a run that has real leads to hand back.
+ */
+export async function flushSpend(): Promise<void> {
+  while (pending.size) {
+    const inflight = [...pending];
+    await Promise.allSettled(inflight);
+    for (const p of inflight) pending.delete(p);
+  }
+}
+
 export function resetSpendCacheForTests(): void {
+  pending.clear();
   cachedDbUsd = null;
   cachedMonth = "";
   cachedAt = 0;
@@ -55,14 +88,18 @@ export async function recordSpend(entry: SpendEntry): Promise<void> {
     writeProblem = "DATABASE_URL is not set, so API spend is not being recorded";
     return;
   }
-  try {
-    await db()`
-      insert into enactus_spend (month, provider, detail, cost_usd)
-      values (${billingMonth()}, ${entry.provider}, ${entry.detail ?? null}, ${cost})
-    `;
-  } catch (e) {
-    writeProblem = `could not record API spend: ${e instanceof Error ? e.message : String(e)}`;
-  }
+  const write = (async () => {
+    try {
+      await db()`
+        insert into enactus_spend (month, provider, detail, cost_usd)
+        values (${billingMonth()}, ${entry.provider}, ${entry.detail ?? null}, ${cost})
+      `;
+    } catch (e) {
+      writeProblem = `could not record API spend: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  })();
+  pending.add(write);
+  await write;
 }
 
 async function dbMonthUsd(): Promise<number> {
