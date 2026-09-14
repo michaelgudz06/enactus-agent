@@ -46,6 +46,7 @@ import { costPerLead, newTrace, note, traceSummary } from "../src/lib/trace.ts";
 import { RESUME_VERSION, isResumable, shouldHandOff } from "../src/lib/resume.ts";
 import { FIRECRAWL_CREDITS_PER_LOOKUP, firecrawlCreditUsd, firecrawlLookupCostUsd } from "../src/lib/budget.ts";
 import { baseNameOf, entityKey, localityOf, sameCompany } from "../src/lib/entity.ts";
+import { canonicalName, nameKey } from "../src/lib/people.ts";
 import { applyEvent as applyRunEvent } from "../src/lib/run-events.ts";
 import {
   HARD_EXCLUSIONS,
@@ -1568,5 +1569,39 @@ ok(sameCompany(
    "one website is one company");
 ok(!sameCompany({ company: "Aster Cafe" }, { company: "Bellweather Books" }),
    "different companies stay different");
+
+// ── one person, one spelling ────────────────────────────────────────────────
+// The live board held "michael" and "Michael" as two people. The scoreboard was
+// repaired by grouping case-insensitively, which fixes the totals and not the
+// cause: the owner filter and every "created by" line still show whichever
+// spelling was typed that day.
+const TEAM = ["Michael", "Priya Raman", "Sam"];
+eq(canonicalName("michael", TEAM), "Michael", "a known name keeps the team's spelling");
+eq(canonicalName("MICHAEL", TEAM), "Michael", "however it was typed");
+eq(canonicalName("  Michael  ", TEAM), "Michael", "surrounding space is not a different person");
+eq(canonicalName("priya  raman", TEAM), "Priya Raman", "a doubled space is not a different person");
+eq(canonicalName("Michael", []), "Michael", "with no history, the typed name stands");
+
+// Exact, case aside, and nothing more. A club with two Michaels is not
+// unusual, and silently merging two volunteers' work is worse than two
+// spellings of one.
+eq(canonicalName("Mike", TEAM), "Mike", "a nickname is NOT assumed to be the same person");
+eq(canonicalName("Michael G", TEAM), "Michael G", "a name with a surname is NOT merged into one without");
+eq(canonicalName("Michaela", TEAM), "Michaela", "a longer name that starts the same is a different person");
+
+// "Sam Okonkwo" and "Sam" are different keys and therefore different people --
+// deliberately, per the rule above. Where two KNOWN entries do share a key, the
+// board has both spellings already and the most recent one wins, because
+// `known` arrives most-recent-first.
+eq(canonicalName("sam", ["Sam Okonkwo", "Sam"]), "Sam",
+   "a surname is a different key, so the bare name matches the bare name");
+eq(canonicalName("SAM", ["Sam", "sam"]), "Sam", "the most recent of two known spellings wins");
+eq(canonicalName("sam", ["sam", "Sam"]), "sam", "and it is genuinely the most recent, not the tidiest");
+
+eq(canonicalName("", TEAM), "", "an empty name stays empty for the caller to default");
+eq(canonicalName("   ", TEAM), "", "whitespace only is empty too");
+eq(canonicalName("x".repeat(60), []).length, 40, "a long name is still capped");
+eq(nameKey("  Priya   Raman "), "priya raman", "the comparison form ignores case and spacing");
+eq(nameKey(null), "", "no name has an empty key");
 
 console.log(`selfcheck: ${checks} assertions passed`);
