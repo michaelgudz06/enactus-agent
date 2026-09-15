@@ -106,6 +106,39 @@ export const WRONG_SIDE =
   /\b(government|municipal|city of|public administration|higher education|universit|college|school district|non.?profit|charit|\bngo\b)/i;
 
 /**
+ * Organisations that raise their own funds, matched by NAME as well as industry.
+ *
+ * Deliberately BROADER than WRONG_SIDE above, and deliberately used for a
+ * different decision -- which is why both live here rather than one being
+ * folded into the other.
+ *
+ * WRONG_SIDE is a -50 scoring penalty, so it is matched against Apollo's dull
+ * structured industry only: "we partner with local non-profits" is a sentence a
+ * perfectly good sponsor puts on its About page, and a penalty that size cannot
+ * be allowed to fire on model-written prose.
+ *
+ * This one decides only whether an already-approved lead's outreach may ask for
+ * MONEY. Getting it wrong costs a softer ask, not a deleted lead, so it can
+ * afford to match the company NAME and to catch the societies, councils,
+ * associations and foundations WRONG_SIDE leaves alone. Burnaby Arts Council is
+ * quoted in its own draft as "grant-receiving and grant-giving" and then asked
+ * for money; that is the failure this exists to stop.
+ *
+ * Known limit, inherited: this is a name/industry regex at draft time. The real
+ * fix is disqualifying these upstream, where MEMBERSHIP_NAME already sits.
+ */
+export const RAISES_OWN_FUNDS =
+  /non-?profit|society|council|association|foundation|charit/i;
+
+/** Does this lead raise its own funds, and so should never be asked for cash? */
+export function raisesOwnFunds(
+  company: string | null | undefined,
+  industry: string | null | undefined
+): boolean {
+  return RAISES_OWN_FUNDS.test(`${company ?? ""} ${industry ?? ""}`);
+}
+
+/**
  * Promotional-products suppliers: their product IS branded merchandise, so
  * donating it is a free sample shown to a room of future buyers. Structurally
  * the best fit in the whole history and only one was ever asked -- the
