@@ -45,6 +45,7 @@ import {
   WRONG_SIDE,
   analystSystemPrompt,
   isMembershipName,
+  raisesOwnFunds,
   isOwnOrganisation,
   planPrompt,
 } from "../src/lib/targeting.ts";
@@ -1331,6 +1332,17 @@ ok(analystSystemPrompt("sponsor").includes("RANK BY WHO CAN SAY YES"),
    "the analyst still gets the ranking rule");
 ok(!planPrompt("sales").includes("HARD EXCLUSIONS"),
    "sales mode does not inherit the sponsor exclusions");
+
+// The two wrong-side rules differ ON PURPOSE, and the difference is the thing
+// worth pinning: WRONG_SIDE is a -50 scoring penalty matched against Apollo's
+// structured industry only; raisesOwnFunds only softens an ask, so it can
+// afford to match the company NAME and to catch what WRONG_SIDE leaves alone.
+ok(raisesOwnFunds("Burnaby Arts Council", null), "a council raises its own funds");
+ok(raisesOwnFunds("Vancouver Heritage Society", null), "so does a society");
+ok(raisesOwnFunds("Acme Widgets", "non-profit organization management"), "industry counts too");
+ok(!WRONG_SIDE.test("Burnaby Arts Council"), "but WRONG_SIDE does not score a council down on its name");
+ok(!raisesOwnFunds("Aster Cafe", "restaurants"), "an ordinary business may still be asked for money");
+ok(!raisesOwnFunds(null, null), "an unknown lead is not assumed to be fundraising");
 
 // The promotional-supplier shape is named in the prose and scored in the code.
 ok(planPrompt("sponsor").includes("Promotional-products"), "promo suppliers are still named to the planner");
