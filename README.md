@@ -143,7 +143,11 @@ your database once before the first start.
 
 Access is a single shared team password rather than per-user accounts —
 deliberate, for a five-person volunteer team with annual turnover, and the
-obvious thing to replace first if the team grows.
+obvious thing to replace first if the team grows. The display name is
+free text, so it is settled at sign-in against the names the team has already
+used: type `michael` and the board records `Michael`. Case and spacing only —
+nothing assumes `Mike` is `Michael`, because a club with two Michaels is not
+unusual and merging two volunteers' work is worse than two spellings of one.
 
 ## Checks
 

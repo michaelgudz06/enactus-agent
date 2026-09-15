@@ -40,7 +40,10 @@ export default function Login() {
         setLoading(false);
         return;
       }
-      localStorage.setItem("enactus.name", name.trim());
+      // The server's spelling, not the typed one: it has settled this name
+      // against the ones the team already uses, so remembering what was typed
+      // would re-introduce the variant on the next sign-in.
+      localStorage.setItem("enactus.name", String(data.name ?? name).trim());
       router.push("/agent");
     } catch {
       setError("Network error");
