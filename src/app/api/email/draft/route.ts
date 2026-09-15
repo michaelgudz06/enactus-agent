@@ -1,4 +1,5 @@
 import { route } from "@/lib/auth";
+import { raisesOwnFunds as raisesOwnFundsFor } from "@/lib/targeting";
 import { db } from "@/lib/db";
 import { streamReasoner, STRUCTURER, STRUCTURER_PROVIDER } from "@/lib/llm";
 import { stripEmDashes } from "@/lib/sanitize";
@@ -225,12 +226,10 @@ export const POST = route(async (session, req: Request) => {
   // Sales mode shipped with no description of the product at all, so "introduce
   // your product" left the model nothing to do but invent one. These are the
   // only real ventures, and agent.ts already scores sales leads against them.
-  // A grant-receiving nonprofit asked for cash reads as nobody having looked past
-  // the industry label: Burnaby Arts Council is quoted in its own draft as
-  // "grant-receiving and grant-giving" and then asked for money.
-  // Known limit: name/industry regex, the real fix is disqualifying these upstream
-  // in apollo.ts MEMBERSHIP_NAME.
-  const raisesOwnFunds = /non-?profit|society|council|association|foundation|charit/i.test(`${l.company} ${l.industry ?? ""}`);
+  // Seventh home of the club's targeting policy, now folded into the first. The
+  // pattern and the reasoning for why it is broader than score.ts's WRONG_SIDE
+  // live in src/lib/targeting.ts, next to the rule it differs from.
+  const raisesOwnFunds = raisesOwnFundsFor(l.company, l.industry);
   // Telling the model "do not ask for money" while still handing it
   // "Angle: monetary" is two instructions that cannot both be followed, so the
   // angle itself drops the money ask rather than arguing with it downstream.
