@@ -54,6 +54,7 @@ import {
   WRONG_SIDE,
   analystSystemPrompt,
   isMembershipName,
+  raisesOwnFunds,
   isOwnOrganisation,
   planPrompt,
 } from "../src/lib/targeting.ts";
@@ -1279,6 +1280,24 @@ eq(boardLines(STAGES, [{ status: "prospects", n: 1, total: 0 }])[0],
 for (const greeting of ["hi", "Hey!", "hello there", "thanks", "Thank you!", "thx", "cheers", "ok", "got it", "never mind", "bye", "good morning", "sounds good", ""]) {
   ok(looksConversational(greeting), `"${greeting}" is small talk, not a search`);
 }
+// Adjectives that are small talk ALONE and ordinary openers in front of a
+// request. These were all silently declined -- the guard against refusing to
+// search was itself refusing to search.
+for (const adjectiveLed of [
+  "great gyms near SFU",
+  "nice coffee shops in Burnaby",
+  "perfect bakeries Langley",
+  "cool climbing gyms Burnaby",
+  "ok escape rooms Vancouver",
+  "awesome yoga studios",
+]) {
+  ok(!looksConversational(adjectiveLed), `"${adjectiveLed}" is a search, not a pleasantry`);
+}
+// The same words alone are still small talk.
+for (const bare of ["great", "great!", "ok", "cool.", "nice", "perfect!", "got it", "sounds good"]) {
+  ok(looksConversational(bare), `"${bare}" on its own is still small talk`);
+}
+
 for (const request of [
   "coffee shops burnaby",
   "credit unions and banks in the Lower Mainland with community grant programs",
@@ -1322,6 +1341,17 @@ ok(analystSystemPrompt("sponsor").includes("RANK BY WHO CAN SAY YES"),
    "the analyst still gets the ranking rule");
 ok(!planPrompt("sales").includes("HARD EXCLUSIONS"),
    "sales mode does not inherit the sponsor exclusions");
+
+// The two wrong-side rules differ ON PURPOSE, and the difference is the thing
+// worth pinning: WRONG_SIDE is a -50 scoring penalty matched against Apollo's
+// structured industry only; raisesOwnFunds only softens an ask, so it can
+// afford to match the company NAME and to catch what WRONG_SIDE leaves alone.
+ok(raisesOwnFunds("Burnaby Arts Council", null), "a council raises its own funds");
+ok(raisesOwnFunds("Vancouver Heritage Society", null), "so does a society");
+ok(raisesOwnFunds("Acme Widgets", "non-profit organization management"), "industry counts too");
+ok(!WRONG_SIDE.test("Burnaby Arts Council"), "but WRONG_SIDE does not score a council down on its name");
+ok(!raisesOwnFunds("Aster Cafe", "restaurants"), "an ordinary business may still be asked for money");
+ok(!raisesOwnFunds(null, null), "an unknown lead is not assumed to be fundraising");
 
 // The promotional-supplier shape is named in the prose and scored in the code.
 ok(planPrompt("sponsor").includes("Promotional-products"), "promo suppliers are still named to the planner");
@@ -1400,6 +1430,13 @@ const fewPlaces = ["p1", "p2"];
 const manyExa = Array.from({ length: 20 }, (_, i) => `e${i + 1}`);
 const cut = interleave([fewPlaces, manyExa]).slice(0, 8);
 eq(cut.filter((x) => x.startsWith("p")).length, 2, "both Places rows survive a cut Exa would have flooded");
+
+// The cut is fixed, so an even share is a REALLOCATION, not a widening: with
+// both channels live, Exa reaches the model with half of what it used to.
+const exaOnlyCut = interleave([[], manyExa]).slice(0, 12);
+const bothCut = interleave([fewPlaces.concat(manyExa.map((e) => "p" + e)), manyExa]).slice(0, 12);
+eq(exaOnlyCut.filter((x) => x.startsWith("e")).length, 12, "with no Places rows, Exa fills the whole cut");
+eq(bothCut.filter((x) => x.startsWith("e")).length, 6, "with Places live, Exa gets half of it");
 
 eq(partition([1, 2, 3, 4], (n) => n % 2 === 0), [[2, 4], [1, 3]], "partition keeps order inside each half");
 eq(partition([], () => true), [[], []], "partition of nothing is two empty halves");
