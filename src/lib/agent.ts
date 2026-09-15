@@ -770,6 +770,10 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
 
   // Say what was filtered rather than silently narrowing: a run that quietly
   // drops half its candidates reads as "the agent is weak at finding people".
+  // Provisional: the finalize filter and the batch insert both find more
+  // already-known companies, and they run in runAnalysis. Recorded here so a
+  // run that dies before analysis still reports what discovery skipped, then
+  // overwritten with the final figure once it is known.
   trace.alreadyKnown = alreadyKnown;
   trace.dropped = dropped;
   const notes = [
@@ -1121,6 +1125,12 @@ ${mode === "sales" ? "" : STRUCTURE_EXCLUSION_RULE}`;
   // Honour the count out loud. Silently returning 3 when 10 were asked for is
   // exactly the behaviour that made the agent feel like it was not listening;
   // if the funnel genuinely could not fill the order, say so and say why.
+  // The figure recorded in runPipeline was taken before the finalize filter and
+  // the batch insert, both of which increment it -- so the stored trace
+  // undercounted every run by however many companies the model re-proposed or
+  // the unique index rejected. This is the first point where it is final.
+  trace.alreadyKnown = alreadyKnown;
+
   if (finalized.length < targetCount) {
     trace.truncated = truncated;
     const reasons = [
