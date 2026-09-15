@@ -38,6 +38,17 @@ import { companyPoints, contactPoints, isBranchAddress, isDecisionInbox, isGener
 import { actorKey, buildScoreboard, civilDate, monthOf, sent, weekStartOf, type ScoreEvent } from "../src/lib/scoreboard.ts";
 import { winMessage } from "../src/lib/slack.ts";
 import { looksConversational } from "../src/lib/intent.ts";
+import {
+  HARD_EXCLUSIONS,
+  PROMO_SUPPLIER,
+  STOREFRONT,
+  WRONG_SIDE,
+  analystSystemPrompt,
+  isMembershipName,
+  raisesOwnFunds,
+  isOwnOrganisation,
+  planPrompt,
+} from "../src/lib/targeting.ts";
 
 let checks = 0;
 const eq = (actual: unknown, expected: unknown, msg: string) => {
@@ -1290,5 +1301,63 @@ for (const request of [
 ]) {
   ok(!looksConversational(request), `"${request}" must still run a search`);
 }
+
+// ── targeting policy ────────────────────────────────────────────────────────
+// One file now states each rule twice on purpose -- once as prose for the
+// model, once as a pattern for the code -- and the whole point of putting them
+// side by side is that the two halves cannot drift. These assertions are what
+// enforces that, so they check the PAIRS, not each half alone.
+
+// The museum carve-out. This is the drift that actually happened: the prompts
+// carved museums out of "non-profits that raise money" and the regex never did,
+// so a -50 penalty was landing on two confirmed past sponsors.
+ok(HARD_EXCLUSIONS.includes("IMPORTANT CARVE-OUT"), "the museum carve-out is still stated to the model");
+ok(!WRONG_SIDE.test("museums and institutions"), "museums are not on the wrong side of the transaction");
+ok(STOREFRONT.test("museums and institutions"), "museums are consumer-facing");
+ok(WRONG_SIDE.test("higher education"), "universities still receive rather than give");
+ok(WRONG_SIDE.test("non-profit organization management"), "fundraising non-profits are still excluded");
+
+// Every prompt that ships has to carry the rules it is responsible for.
+for (const mode of ["sponsor", "sales"] as const) {
+  ok(planPrompt(mode).length > 400, `planPrompt(${mode}) is not empty`);
+  ok(analystSystemPrompt(mode).length > 400, `analystSystemPrompt(${mode}) is not empty`);
+}
+ok(planPrompt("sponsor").includes("NEVER target other student clubs"),
+   "the planner is still told not to search for student clubs");
+ok(planPrompt("sponsor").includes("SPECIFIC LOCAL BRANCH"),
+   "the planner is still told to target the branch, not head office");
+ok(analystSystemPrompt("sponsor").includes("HARD EXCLUSIONS"),
+   "the analyst still gets the exclusion list");
+ok(analystSystemPrompt("sponsor").includes("RANK BY WHO CAN SAY YES"),
+   "the analyst still gets the ranking rule");
+ok(!planPrompt("sales").includes("HARD EXCLUSIONS"),
+   "sales mode does not inherit the sponsor exclusions");
+
+// The two wrong-side rules differ ON PURPOSE, and the difference is the thing
+// worth pinning: WRONG_SIDE is a -50 scoring penalty matched against Apollo's
+// structured industry only; raisesOwnFunds only softens an ask, so it can
+// afford to match the company NAME and to catch what WRONG_SIDE leaves alone.
+ok(raisesOwnFunds("Burnaby Arts Council", null), "a council raises its own funds");
+ok(raisesOwnFunds("Vancouver Heritage Society", null), "so does a society");
+ok(raisesOwnFunds("Acme Widgets", "non-profit organization management"), "industry counts too");
+ok(!WRONG_SIDE.test("Burnaby Arts Council"), "but WRONG_SIDE does not score a council down on its name");
+ok(!raisesOwnFunds("Aster Cafe", "restaurants"), "an ordinary business may still be asked for money");
+ok(!raisesOwnFunds(null, null), "an unknown lead is not assumed to be fundraising");
+
+// The promotional-supplier shape is named in the prose and scored in the code.
+ok(planPrompt("sponsor").includes("Promotional-products"), "promo suppliers are still named to the planner");
+ok(PROMO_SUPPLIER.test("promotional products and branded apparel"), "promo suppliers are still scored");
+
+// The club itself, and the membership bodies it would have to pay to join.
+for (const own of ["Simon Fraser University", "SFU Recreation", "sfu", " Simon Fraser Student Society"]) {
+  ok(isOwnOrganisation(own), `"${own}" is the club's own university, not a sponsor`);
+}
+for (const other of ["Simone's Bakery", "Safeway", "SFUEL Energy Drinks"]) {
+  ok(!isOwnOrganisation(other), `"${other}" is a real prospect`);
+}
+for (const body of ["Burnaby Board of Trade", "Greater Vancouver Chamber of Commerce", "Hastings North Business Improvement Association"]) {
+  ok(isMembershipName(body), `"${body}" is a membership body Enactus would pay to join`);
+}
+ok(!isMembershipName("Trade Winds Coffee"), "a trading name is not a trade association");
 
 console.log(`selfcheck: ${checks} assertions passed`);

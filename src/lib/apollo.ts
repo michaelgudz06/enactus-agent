@@ -19,6 +19,7 @@
 // `node --experimental-strip-types`, which resolves only explicit extensions.
 // tsconfig sets allowImportingTsExtensions so the Next build reads it too.
 import { baseName } from "./firecrawl.ts";
+import { MEMBERSHIP_INDUSTRIES, isMembershipName } from "./targeting.ts";
 
 const BULK_URL = "https://api.apollo.io/api/v1/organizations/bulk_enrich";
 const MAX_PER_CALL = 10;
@@ -114,24 +115,12 @@ export async function enrichDomains(
   return out;
 }
 
-// Apollo's own industry label for trade boards, chambers and member
-// associations. Enactus would be paying these to join, not receiving from them.
-const MEMBERSHIP_INDUSTRIES = new Set(["civic & social organization"]);
-const MEMBERSHIP_NAME =
-  /\b(board of trade|chamber of commerce|business improvement (association|area)|trade association)\b/i;
-
-/**
- * Name test for membership bodies, usable without an Apollo record.
- *
- * A real run leaked "Burnaby Board of Trade (BBOT)" onto the board: Apollo has
- * no record for its members.bbot.ca subdomain, so the org-based check never
- * ran. The name itself is sufficient evidence, wherever it comes from, so this
- * is applied to the candidate title AND to the company name the model finally
- * emits -- the model can name an organisation the candidate title never did.
- */
-export function isMembershipName(name: string | null | undefined): boolean {
-  return Boolean(name && MEMBERSHIP_NAME.test(name));
-}
+// The membership-body rules moved to src/lib/targeting.ts, next to the prompt
+// wording that tells the model the same thing. Re-exported because callers
+// import this test from here and the name test is applied to the candidate
+// title AND to the company name the model finally emits -- the model can name
+// an organisation the candidate title never did.
+export { isMembershipName };
 
 // "duplicate" is never returned by disqualify() -- it is a drop reason the
 // finalize step records. It lives here so every reason shown to the user has a
