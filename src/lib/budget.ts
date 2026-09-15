@@ -136,6 +136,16 @@ export function exaSearchCostUsd(numResults: number): number {
   return EXA_SEARCH_USD + extra * EXA_RESULT_OVER_TEN_USD;
 }
 
+// /contents is billed per page returned, with no per-request component: it runs
+// no search, it just fetches text for URLs we already hold. Same per-page rate
+// as an over-quota search result, which is the number to re-check first if a
+// month comes in higher than this file predicts.
+export const EXA_CONTENTS_PAGE_USD = EXA_RESULT_OVER_TEN_USD;
+
+export function exaContentsCostUsd(pages: number): number {
+  return Math.max(0, pages) * EXA_CONTENTS_PAGE_USD;
+}
+
 // OpenRouter reports real usage on every response, so an estimate is only ever
 // a fallback for a stream that ended before its usage chunk arrived. Four
 // characters per token is the usual rule of thumb for this tokenizer family.

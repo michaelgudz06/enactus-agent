@@ -11,7 +11,7 @@ import {
   STRUCTURER_PROVIDER,
   type Usage,
 } from "./llm";
-import { exaSearch, dedupeByDomain, ExaResult } from "./exa";
+import { exaSearch, exaContents, dedupeByDomain, ExaResult } from "./exa";
 import { placesSearch, hasPlacesKey } from "./places";
 import {
   enrichDomains,
@@ -31,6 +31,7 @@ import { MAX_COUNT, parsedCount, requestedCount } from "./count";
 import { ENACTUS_ORG, ENACTUS_PROJECTS, ENACTUS_VENTURES } from "./enactus";
 import { looksConversational } from "./intent";
 import { reasoningFor } from "./reasoning";
+import { interleave, partition } from "./funnel";
 // Every rule about who the club targets -- in prose for the prompts and as
 // patterns for the code -- lives in one file. See its header for why.
 import {
@@ -44,6 +45,7 @@ import { scoreLead, boardOrderFor } from "./score";
 import { boardLines } from "./table";
 import {
   budgetStopMessage,
+  exaContentsCostUsd,
   exaSearchCostUsd,
   openRouterCostUsd,
   overBudget,
@@ -436,11 +438,30 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
   // one search's wall clock and the pool is sliced back before any LLM sees it.
   const perQuery = Math.min(25, Math.max(10, Math.ceil((candidateTarget * 2) / Math.max(1, queries.length))));
 
-  const usingPlaces = hasPlacesKey() && (plan.placesQueries?.length ?? 0) > 0;
+  // Places is the PRIMARY discovery channel for sponsor mode, not a side
+  // channel. The planner's own prompt has said so for months -- "a maps search
+  // returns the businesses themselves rather than pages written about them,
+  // which is the only channel that reliably finds the independent storefronts
+  // this club actually wins" -- while the code capped it at 3 queries asking
+  // for half as many results as Exa, and gave the results a one-line text blob
+  // no model could reason from. The channel the club wins through was the one
+  // wired in as optional.
+  //
+  // Sales mode keeps the old shape: the planner is told to return placesQueries
+  // only when the request is about local storefronts, so there is frequently
+  // nothing to run.
+  const placesQueries = (plan.placesQueries ?? []).filter((q) => typeof q === "string" && q.trim());
+  const placesPrimary = mode === "sponsor";
+  const placesQueryCap = placesPrimary ? 4 : 3;
+  const usingPlaces = hasPlacesKey() && placesQueries.length > 0;
   emit({
     type: "status",
     step: "discover",
-    message: `Searching ${usingPlaces ? "Exa + Google Places" : "the web with Exa"}: ${queries.join("  ·  ")}`,
+    message: usingPlaces
+      ? `Searching Google Places for the businesses themselves (${placesQueries
+          .slice(0, placesQueryCap)
+          .join("  ·  ")}), and the web with Exa: ${queries.join("  ·  ")}`
+      : `Searching the web with Exa: ${queries.join("  ·  ")}`,
   });
 
   // ── 2b. What is already on the board ────────────────────────────────────
@@ -485,10 +506,14 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
     // Places returns actual businesses rather than pages about businesses, so
     // it is the better source for local storefront sponsors. Shaped into the
     // same ExaResult so everything downstream stays source-agnostic.
+    // Places is free at this tier and capped at 20 results per call, so ask for
+    // the whole candidate target from each query rather than half of it: the
+    // pool is cut back before any model sees it, and the rows that survive
+    // dedupe are the ones worth having.
     const placeBatches = usingPlaces
       ? Promise.all(
-          plan.placesQueries!.slice(0, 3).map((q) =>
-            placesSearch(q, { maxResults: Math.ceil(candidateTarget / 2) }).then((ps) =>
+          placesQueries.slice(0, placesQueryCap).map((q) =>
+            placesSearch(q, { maxResults: placesPrimary ? 20 : Math.ceil(candidateTarget / 2) }).then((ps) =>
               ps
                 .filter((p) => p.website)
                 .map<ExaResult>((p) => ({
@@ -496,10 +521,14 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
                   title: p.name,
                   publishedDate: null,
                   author: null,
+                  // A placeholder until enrichPlaces() below fetches the real
+                  // page. Kept as the fallback for anything that could not be
+                  // fetched -- a name and a street address still beat nothing.
                   text: [p.name, p.primaryType?.replace(/_/g, " "), p.address]
                     .filter(Boolean)
                     .join(" · "),
                   highlights: [],
+                  source: "places" as const,
                 }))
             )
           )
@@ -566,22 +595,77 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
     return !why;
   });
 
-  // Interleave verified and unverified rather than sorting verified first.
-  // Sorting then slicing would quietly undo the whole point of disqualify()
-  // never dropping on missing data: Apollo has poor coverage of very small
-  // local businesses, so a verified-first sort pushes exactly the corner-shop
-  // in-kind sponsors this club relies on below the cut whenever the pool is
-  // large.
-  const verified = candidates.filter((c) => c.org);
-  const unverified = candidates.filter((c) => !c.org);
-  const mixed: Candidate[] = [];
-  for (let i = 0; i < Math.max(verified.length, unverified.length); i++) {
-    if (verified[i]) mixed.push(verified[i]);
-    if (unverified[i]) mixed.push(unverified[i]);
-  }
+  // Mix the pool across BOTH axes that matter, rather than sorting on either.
+  //
+  // Verified vs unverified: sorting verified first would quietly undo the whole
+  // point of disqualify() never dropping on missing data -- Apollo has poor
+  // coverage of very small local businesses, so a verified-first sort pushes
+  // exactly the corner-shop in-kind sponsors this club relies on below the cut
+  // whenever the pool is large.
+  //
+  // Places vs Exa: Places returns the businesses, Exa returns pages about them,
+  // and Exa returns many times more rows. Left proportional, the channel that
+  // finds what this club actually wins takes a handful of slots in a pool that
+  // is then cut. Round-robin gives it an even share of what the model gets to
+  // choose from.
+  //
+  // Be clear about what that costs, because the first version of this comment
+  // was not: the cut below is UNCHANGED, so this is a reallocation, not a
+  // widening. At the default count the model sees twelve candidates either way
+  // -- Places does not add six, it takes six that Exa used to have. That is the
+  // intended trade (a business beats an article about a business, and the
+  // planner prompt has said so for months), but it is a trade.
+  //
+  // Exa's per-query ask is deliberately NOT reduced to match its smaller share.
+  // usingPlaces is decided before either search runs, so an Exa ask sized for
+  // half the pool would starve the run outright on any day Places returns
+  // nothing -- a bad key, a quota, an outage. The surplus rows are the
+  // insurance, and at roughly a tenth of a cent per extra result they are the
+  // cheapest part of the run.
+  const [fromPlaces, fromExa] = partition(candidates, (c) => c.result.source === "places");
+  const byVerification = (list: Candidate[]) =>
+    interleave([list.filter((c) => c.org), list.filter((c) => !c.org)]);
+  const mixed = interleave([byVerification(fromPlaces), byVerification(fromExa)]);
   // Give the model roughly twice what we need so it has genuine choice, without
   // paying to reason over candidates that can never make the cut.
   candidates = mixed.slice(0, Math.max(targetCount * 2, 12));
+
+  // ── 3c. Give the Places candidates real evidence ────────────────────────
+  // A Places row arrives as "Aster Cafe · cafe · 123 Main St" and nothing else.
+  // That is not enough to reason about, not enough to ground a contact against,
+  // and it loses on sight to any Exa result that came with two paragraphs of
+  // prose -- so the model was systematically preferring pages ABOUT businesses
+  // over the businesses themselves, which is the exact inversion this channel
+  // exists to correct.
+  //
+  // Run AFTER the cut, so only candidates that will actually be reasoned over
+  // are paid for. This is not free and it is not cheaper per page than a
+  // search -- a 10-result search bundles its pages for $0.007, ten /contents
+  // pages are $0.010 -- so the placement matters: at most a dozen URLs, once,
+  // for the candidates a model is about to spend far more than that reading.
+  const needText = candidates.filter((c) => c.result.source === "places" && c.domain);
+  if (needText.length && !(await budgetBlocked())) {
+    void recordSpend({
+      provider: "exa",
+      detail: "contents",
+      costUsd: exaContentsCostUsd(needText.length),
+    });
+    const pages = await exaContents(
+      needText.map((c) => c.result.url),
+      { signal: AbortSignal.timeout(Math.max(2000, Math.min(8000, RUN_DEADLINE - Date.now() - 20_000))) }
+    );
+    let enriched = 0;
+    for (const c of needText) {
+      const page = pages.get(c.result.url);
+      // Keep the address placeholder when the fetch came back empty: a name and
+      // a street still beat nothing, and an empty text field reads downstream
+      // as "no evidence" rather than "not fetched".
+      if (!page?.text?.trim()) continue;
+      c.result = { ...c.result, text: page.text, highlights: page.highlights, source: "places" };
+      enriched++;
+    }
+    mark(`places contents done (${enriched}/${needText.length} enriched)`);
+  }
 
   if (!candidates.length) {
     const why = alreadyKnown
