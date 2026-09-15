@@ -606,8 +606,22 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
   // Places vs Exa: Places returns the businesses, Exa returns pages about them,
   // and Exa returns many times more rows. Left proportional, the channel that
   // finds what this club actually wins takes a handful of slots in a pool that
-  // is then cut in half. Round-robin gives it an even share of what the model
-  // gets to choose from.
+  // is then cut. Round-robin gives it an even share of what the model gets to
+  // choose from.
+  //
+  // Be clear about what that costs, because the first version of this comment
+  // was not: the cut below is UNCHANGED, so this is a reallocation, not a
+  // widening. At the default count the model sees twelve candidates either way
+  // -- Places does not add six, it takes six that Exa used to have. That is the
+  // intended trade (a business beats an article about a business, and the
+  // planner prompt has said so for months), but it is a trade.
+  //
+  // Exa's per-query ask is deliberately NOT reduced to match its smaller share.
+  // usingPlaces is decided before either search runs, so an Exa ask sized for
+  // half the pool would starve the run outright on any day Places returns
+  // nothing -- a bad key, a quota, an outage. The surplus rows are the
+  // insurance, and at roughly a tenth of a cent per extra result they are the
+  // cheapest part of the run.
   const [fromPlaces, fromExa] = partition(candidates, (c) => c.result.source === "places");
   const byVerification = (list: Candidate[]) =>
     interleave([list.filter((c) => c.org), list.filter((c) => !c.org)]);

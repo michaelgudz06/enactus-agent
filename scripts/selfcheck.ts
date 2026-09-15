@@ -1426,6 +1426,13 @@ const manyExa = Array.from({ length: 20 }, (_, i) => `e${i + 1}`);
 const cut = interleave([fewPlaces, manyExa]).slice(0, 8);
 eq(cut.filter((x) => x.startsWith("p")).length, 2, "both Places rows survive a cut Exa would have flooded");
 
+// The cut is fixed, so an even share is a REALLOCATION, not a widening: with
+// both channels live, Exa reaches the model with half of what it used to.
+const exaOnlyCut = interleave([[], manyExa]).slice(0, 12);
+const bothCut = interleave([fewPlaces.concat(manyExa.map((e) => "p" + e)), manyExa]).slice(0, 12);
+eq(exaOnlyCut.filter((x) => x.startsWith("e")).length, 12, "with no Places rows, Exa fills the whole cut");
+eq(bothCut.filter((x) => x.startsWith("e")).length, 6, "with Places live, Exa gets half of it");
+
 eq(partition([1, 2, 3, 4], (n) => n % 2 === 0), [[2, 4], [1, 3]], "partition keeps order inside each half");
 eq(partition([], () => true), [[], []], "partition of nothing is two empty halves");
 
