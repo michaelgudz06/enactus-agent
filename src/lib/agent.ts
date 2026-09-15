@@ -737,8 +737,22 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
   // Places vs Exa: Places returns the businesses, Exa returns pages about them,
   // and Exa returns many times more rows. Left proportional, the channel that
   // finds what this club actually wins takes a handful of slots in a pool that
-  // is then cut in half. Round-robin gives it an even share of what the model
-  // gets to choose from.
+  // is then cut. Round-robin gives it an even share of what the model gets to
+  // choose from.
+  //
+  // Be clear about what that costs, because the first version of this comment
+  // was not: the cut below is UNCHANGED, so this is a reallocation, not a
+  // widening. At the default count the model sees twelve candidates either way
+  // -- Places does not add six, it takes six that Exa used to have. That is the
+  // intended trade (a business beats an article about a business, and the
+  // planner prompt has said so for months), but it is a trade.
+  //
+  // Exa's per-query ask is deliberately NOT reduced to match its smaller share.
+  // usingPlaces is decided before either search runs, so an Exa ask sized for
+  // half the pool would starve the run outright on any day Places returns
+  // nothing -- a bad key, a quota, an outage. The surplus rows are the
+  // insurance, and at roughly a tenth of a cent per extra result they are the
+  // cheapest part of the run.
   const [fromPlaces, fromExa] = partition(candidates, (c) => c.result.source === "places");
   const byVerification = (list: Candidate[]) =>
     interleave([list.filter((c) => c.org), list.filter((c) => !c.org)]);
@@ -796,6 +810,10 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
 
   // Say what was filtered rather than silently narrowing: a run that quietly
   // drops half its candidates reads as "the agent is weak at finding people".
+  // Provisional: the finalize filter and the batch insert both find more
+  // already-known companies, and they run in runAnalysis. Recorded here so a
+  // run that dies before analysis still reports what discovery skipped, then
+  // overwritten with the final figure once it is known.
   trace.alreadyKnown = alreadyKnown;
   trace.dropped = dropped;
   const notes = [
@@ -1433,6 +1451,12 @@ ${mode === "sales" ? "" : STRUCTURE_EXCLUSION_RULE}`;
   // Honour the count out loud. Silently returning 3 when 10 were asked for is
   // exactly the behaviour that made the agent feel like it was not listening;
   // if the funnel genuinely could not fill the order, say so and say why.
+  // The figure recorded in runPipeline was taken before the finalize filter and
+  // the batch insert, both of which increment it -- so the stored trace
+  // undercounted every run by however many companies the model re-proposed or
+  // the unique index rejected. This is the first point where it is final.
+  trace.alreadyKnown = alreadyKnown;
+
   if (finalized.length < targetCount) {
     trace.truncated = truncated;
     const reasons = [
@@ -1694,6 +1718,37 @@ function leadValues(row: LeadRow): unknown[] {
 const dbKey = (name: string) => name.trim().toLowerCase();
 
 /**
+ * Insert leads one at a time, keeping whatever succeeds.
+ *
+ * The recovery path for a rejected batch. Deliberately sequential and
+ * deliberately silent per row: it only ever runs after the fast path has
+ * already failed, and the point is to salvage the leads that are fine rather
+ * than to diagnose the one that is not.
+ */
+async function insertRowsIndividually(rows: LeadRow[]): Promise<{ leads: Lead[] }> {
+  const cols = LEAD_COLUMNS.join(", ");
+  const leads: Lead[] = [];
+  for (const row of rows) {
+    const values = leadValues(row);
+    const placeholders = values.map((_, i) => `$${i + 1}${LEAD_CASTS[LEAD_COLUMNS[i]] ?? ""}`);
+    try {
+      const res = await db().query(
+        `insert into enactus_leads (${cols}) values (${placeholders.join(", ")})
+         on conflict do nothing
+         returning *`,
+        values
+      );
+      const [saved] = res as unknown as Lead[];
+      if (saved) leads.push(saved);
+    } catch {
+      // This row is the problem, or every row is. Either way the next one is
+      // still worth trying.
+    }
+  }
+  return { leads };
+}
+
+/**
  * Write a whole run's leads in one statement.
  *
  * Returns only the rows that are genuinely NEW. A company already on the board
@@ -1733,6 +1788,7 @@ async function persistLeadRows(
   });
 
   let inserted: Lead[] = [];
+  let error: string | null = null;
   try {
     const res = await db().query(
       `insert into enactus_leads (${cols}) values ${tuples.join(", ")}
@@ -1742,7 +1798,24 @@ async function persistLeadRows(
     );
     inserted = res as unknown as Lead[];
   } catch (e) {
-    return unsaved((e as Error).message);
+    // One statement means one failure mode: anything that rejects the batch
+    // rejects EVERY lead in it. Before this was batched, a per-row loop lost
+    // one lead to a bad row and saved the rest, so making the fast path
+    // all-or-nothing quietly converted "lost one card" into "saved nothing" --
+    // and a schema migration applied after a deploy turns that into every run,
+    // silently, for as long as the column is missing.
+    //
+    // So the batch is the fast path, not the only path. Falling back row by row
+    // costs a round trip per lead exactly when the run has already gone wrong,
+    // and recovers the 24 leads that a single unlucky one would have taken with
+    // it. If the fallback fails too the cause is not this row, and the original
+    // batch error is the more useful one to report.
+    const batchError = (e as Error).message;
+    console.error("batch lead insert failed, falling back to row-by-row:", batchError);
+    const recovered = await insertRowsIndividually(rows);
+    inserted = recovered.leads;
+    error = recovered.leads.length ? null : batchError;
+    if (!inserted.length) return { ...unsaved(batchError), duplicates: 0 };
   }
 
   // Anything the insert did not return hit the unique index. One follow-up
@@ -1751,7 +1824,6 @@ async function persistLeadRows(
   const insertedKeys = new Set(inserted.map((l) => dbKey(l.company)));
   const missing = rows.filter((r) => !insertedKeys.has(dbKey(r.company)));
   let duplicates = 0;
-  let error: string | null = null;
   if (missing.length) {
     try {
       const res = await db().query(
