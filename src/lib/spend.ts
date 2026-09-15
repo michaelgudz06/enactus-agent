@@ -14,6 +14,14 @@ export interface SpendEntry {
   /** Model id or endpoint, so a surprising month can be read back per source. */
   detail?: string | null;
   costUsd: number;
+  /**
+   * The run that paid for this call, when there is one.
+   *
+   * Null for anything outside a run -- a contact lookup from a card, say. The
+   * column is not a foreign key on purpose: a run row that could not be written
+   * must never be able to fail a ledger write.
+   */
+  searchId?: string | null;
 }
 
 // Spend this process has recorded but may not have re-read yet. The month total
@@ -91,8 +99,8 @@ export async function recordSpend(entry: SpendEntry): Promise<void> {
   const write = (async () => {
     try {
       await db()`
-        insert into enactus_spend (month, provider, detail, cost_usd)
-        values (${billingMonth()}, ${entry.provider}, ${entry.detail ?? null}, ${cost})
+        insert into enactus_spend (month, provider, detail, cost_usd, search_id)
+        values (${billingMonth()}, ${entry.provider}, ${entry.detail ?? null}, ${cost}, ${entry.searchId ?? null})
       `;
     } catch (e) {
       writeProblem = `could not record API spend: ${e instanceof Error ? e.message : String(e)}`;

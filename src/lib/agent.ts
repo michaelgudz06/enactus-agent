@@ -32,6 +32,7 @@ import { ENACTUS_ORG, ENACTUS_PROJECTS, ENACTUS_VENTURES } from "./enactus";
 import { looksConversational } from "./intent";
 import { reasoningFor } from "./reasoning";
 import { interleave, partition } from "./funnel";
+import { newTrace, note, traceSummary, type RunTrace } from "./trace";
 // Every rule about who the club targets -- in prose for the prompts and as
 // patterns for the code -- lives in one file. See its header for why.
 import {
@@ -210,20 +211,44 @@ ${board}`;
  * inserts are deliberately not awaited on the hot path, and on a serverless
  * runtime an unawaited insert dies when the response stream closes.
  */
+/**
+ * Everything runAgent() must settle on the way out, however the run ended.
+ *
+ * Held out here rather than inside the pipeline because the pipeline has a
+ * dozen early returns -- a starved funnel, a budget stop, a dead structuring
+ * call -- and those are the runs whose record is most worth having. Leaving
+ * the close-out to each return meant the failures were exactly the runs that
+ * left a row stuck at status = 'running'.
+ */
+interface RunState {
+  searchId: string | null;
+  trace: RunTrace | null;
+  costUsd: number;
+  error: string | null;
+}
+
 export async function runAgent(
   input: { prompt: string; mode: Mode; answers?: string; userName: string; skipClarify?: boolean },
   emit: Emit
 ): Promise<void> {
+  const state: RunState = { searchId: null, trace: null, costUsd: 0, error: null };
   try {
-    await runPipeline(input, emit);
+    await runPipeline(input, emit, state);
+  } catch (e) {
+    state.error = (e as Error).message;
+    throw e;
   } finally {
+    if (state.trace) {
+      await closeRun(state.searchId, state.trace, state.costUsd, state.error ? "error" : "done", state.error);
+    }
     await flushSpend();
   }
 }
 
 async function runPipeline(
   input: { prompt: string; mode: Mode; answers?: string; userName: string; skipClarify?: boolean },
-  emit: Emit
+  emit: Emit,
+  state: RunState
 ): Promise<void> {
   const { prompt, mode, answers, userName } = input;
   const fullPrompt = answers ? `${prompt}\n\nAdditional context from user: ${answers}` : prompt;
@@ -240,6 +265,21 @@ async function runPipeline(
     ? ` (you asked for ${askedFor}; ${MAX_COUNT} is the most one run can do -- run it again to keep going)`
     : "";
   const capTail = overCap ? ` ${MAX_COUNT} is the most one run can do, so run it again to keep going.` : "";
+
+  // Everything this run did, written to enactus_searches when it ends. See
+  // src/lib/trace.ts: without it, an outcome on the board cannot be traced back
+  // to the query that produced it, and "what does a qualified lead cost" has no
+  // answer.
+  const trace = newTrace({ targetCount, askedFor });
+  state.trace = trace;
+  // Assigned once the run row is inserted, below. Every paid call after that
+  // point is attributed to it; the planner call before it is not, which is a
+  // known and deliberate gap -- inserting the row earlier would put the current
+  // run into its own similar-search history.
+  // Local aliases for readability; the shared state above is what the close-out
+  // in runAgent() reads, so both are written together.
+  const setSearchId = (id: string | null) => (state.searchId = id);
+  const addCost = (usd: number) => (state.costUsd += usd);
 
   // Vercel Hobby kills the function at 60s (see maxDuration in the route).
   // Stop our own work at 52s so there is room to persist the leads and flush
@@ -264,11 +304,15 @@ async function runPipeline(
   const charge = (u: Usage) => {
     const input = u.inputTokens ?? tokensFromChars(u.inputChars);
     const output = u.outputTokens ?? tokensFromChars(u.outputChars);
-    void recordSpend({
-      provider: "openrouter",
-      detail: u.model,
-      costUsd: openRouterCostUsd(u.model, input, output),
-    });
+    const costUsd = openRouterCostUsd(u.model, input, output);
+    addCost(costUsd);
+    void recordSpend({ provider: "openrouter", detail: u.model, costUsd, searchId: state.searchId });
+  };
+  // Exa is billed per request rather than per token, so it is recorded at the
+  // call site; this keeps the run total in step with it.
+  const chargeExa = (detail: string, costUsd: number) => {
+    addCost(costUsd);
+    void recordSpend({ provider: "exa", detail, costUsd, searchId: state.searchId });
   };
   // Do NOT tune this from a one-off measurement. The same structuring call has
   // been measured at 1.0s and at over 20s within the same hour, on the same
@@ -281,7 +325,13 @@ async function runPipeline(
   // for headroom rather than risking the run.
   const R1_CAP_MS = 16_000;
   const t0 = Date.now();
-  const mark = (label: string) => console.log(`[agent] ${label} @${Date.now() - t0}ms`);
+  const mark = (label: string) => {
+    const at = Date.now() - t0;
+    // Same clock as the console mark on purpose: a trace timing that can
+    // disagree with the log line beside it is worse than no timing.
+    trace.timings[label] = at;
+    console.log(`[agent] ${label} @${at}ms`);
+  };
 
   // ── 1. Understand + plan ────────────────────────────────────────────────
   // The status announcing a lead target is emitted AFTER the intent branch
@@ -342,6 +392,7 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
     // the same place. Intent is the one thing that genuinely cannot be
     // recovered, so looksConversational() makes the cheap, conservative call.
     console.error("planner failed after retries:", planError.message);
+    note(trace, `planner degraded: ${planError.message}`);
     emit({
       type: "status",
       step: "understand",
@@ -360,6 +411,21 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
   }
 
   if (plan.intent === "answer") {
+    // Logged too, as kind = 'answer'. An answer turn is a real OpenRouter call
+    // and its cost belongs in the same ledger as everything else; the kind
+    // column is what keeps it out of the similar-search history, which only
+    // ever reads kind = 'leads'.
+    if (hasDatabaseUrl()) {
+      try {
+        const [row] = (await db()`
+          insert into enactus_searches (prompt, normalized, mode, kind, status, created_by_name)
+          values (${fullPrompt}, ${normalize(fullPrompt)}, ${mode}, 'answer', 'running', ${userName})
+          returning id`) as { id: string }[];
+        setSearchId(row?.id ?? null);
+      } catch {
+        // The answer is worth more than the record of it.
+      }
+    }
     await answerRequest(fullPrompt, mode, userName, emit, charge);
     return;
   }
@@ -381,7 +447,7 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
     try {
       const data = (await db()`
         select prompt, normalized, created_at from enactus_searches
-        where mode = ${mode} order by created_at desc limit 40`) as {
+        where mode = ${mode} and kind = 'leads' order by created_at desc limit 40`) as {
         prompt: string;
         normalized: string | null;
       }[];
@@ -400,6 +466,27 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
       }
     } catch {
       // non-fatal
+    }
+  }
+
+  // ── 2c. Open the run log ────────────────────────────────────────────────
+  // Written HERE rather than at the end, for two reasons. A run that dies at
+  // discovery used to leave no record at all, so the runs worth reading were
+  // exactly the ones with no trace. And every paid call from this point on
+  // needs an id to be attributed to.
+  //
+  // After the history check above, deliberately: inserting it earlier would put
+  // this run into its own similar-search history and it would match itself.
+  if (hasDatabaseUrl()) {
+    try {
+      const [row] = (await db()`
+        insert into enactus_searches (prompt, normalized, mode, kind, status, created_by_name)
+        values (${fullPrompt}, ${norm}, ${mode}, 'leads', 'running', ${userName})
+        returning id`) as { id: string }[];
+      setSearchId(row?.id ?? null);
+    } catch (e) {
+      // Non-fatal. The run proceeds unattributed rather than not at all.
+      note(trace, `run log unavailable: ${(e as Error).message}`);
     }
   }
 
@@ -454,6 +541,9 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
   const placesPrimary = mode === "sponsor";
   const placesQueryCap = placesPrimary ? 4 : 3;
   const usingPlaces = hasPlacesKey() && placesQueries.length > 0;
+  trace.queries = queries;
+  trace.placesQueries = usingPlaces ? placesQueries.slice(0, placesQueryCap) : [];
+  trace.models = { reasoner: REASONER, structurer: STRUCTURER };
   emit({
     type: "status",
     step: "discover",
@@ -499,7 +589,7 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
       queries.map((q) => {
         // Charged per request, not per result, and billed whether or not the
         // search returns anything -- so it is recorded before the .catch().
-        void recordSpend({ provider: "exa", detail: "search", costUsd: exaSearchCostUsd(perQuery) });
+        chargeExa("search", exaSearchCostUsd(perQuery));
         return exaSearch(q, { numResults: perQuery, excludeDomains }).catch(() => []);
       })
     );
@@ -548,6 +638,7 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
     (r) => !/wikipedia\.org|reddit\.com|indeed\.com|glassdoor\.|linkedin\.com|facebook\.com|yelp\./.test(r.url)
   );
   const foundCount = found.length;
+  trace.found = foundCount;
   mark(`discovery done (${foundCount} raw)`);
 
   // ── 3a. Drop anything already on the board ──────────────────────────────
@@ -629,6 +720,10 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
   // Give the model roughly twice what we need so it has genuine choice, without
   // paying to reason over candidates that can never make the cut.
   candidates = mixed.slice(0, Math.max(targetCount * 2, 12));
+  // Domains rather than names: this is the list to re-read when asking why a
+  // lead that later replied was found, and a domain is what joins back to the
+  // stored row.
+  trace.candidates = candidates.map((c) => c.domain).filter(Boolean);
 
   // ── 3c. Give the Places candidates real evidence ────────────────────────
   // A Places row arrives as "Aster Cafe · cafe · 123 Main St" and nothing else.
@@ -645,11 +740,7 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
   // for the candidates a model is about to spend far more than that reading.
   const needText = candidates.filter((c) => c.result.source === "places" && c.domain);
   if (needText.length && !(await budgetBlocked())) {
-    void recordSpend({
-      provider: "exa",
-      detail: "contents",
-      costUsd: exaContentsCostUsd(needText.length),
-    });
+    chargeExa("contents", exaContentsCostUsd(needText.length));
     const pages = await exaContents(
       needText.map((c) => c.result.url),
       { signal: AbortSignal.timeout(Math.max(2000, Math.min(8000, RUN_DEADLINE - Date.now() - 20_000))) }
@@ -664,6 +755,7 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
       c.result = { ...c.result, text: page.text, highlights: page.highlights, source: "places" };
       enriched++;
     }
+    trace.placesEnriched = enriched;
     mark(`places contents done (${enriched}/${needText.length} enriched)`);
   }
 
@@ -678,6 +770,12 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
 
   // Say what was filtered rather than silently narrowing: a run that quietly
   // drops half its candidates reads as "the agent is weak at finding people".
+  // Provisional: the finalize filter and the batch insert both find more
+  // already-known companies, and they run in runAnalysis. Recorded here so a
+  // run that dies before analysis still reports what discovery skipped, then
+  // overwritten with the final figure once it is known.
+  trace.alreadyKnown = alreadyKnown;
+  trace.dropped = dropped;
   const notes = [
     `${foundCount} found`,
     alreadyKnown ? `${alreadyKnown} already on the board` : "",
@@ -923,6 +1021,7 @@ ${mode === "sales" ? "" : STRUCTURE_EXCLUSION_RULE}`;
     if (all.length) parsedLeads = all;
   } finally {
     clearTimeout(structureTimer);
+    trace.structured = parsedLeads?.length ?? 0;
     mark(`structure done (${parsedLeads?.length ?? 0} leads)`);
   }
   if (!parsedLeads?.length && !structureError) {
@@ -1009,6 +1108,7 @@ ${mode === "sales" ? "" : STRUCTURE_EXCLUSION_RULE}`;
       org: cand?.org ?? null,
       mode,
       userName,
+      searchId: state.searchId,
     });
   });
 
@@ -1025,22 +1125,27 @@ ${mode === "sales" ? "" : STRUCTURE_EXCLUSION_RULE}`;
   // Honour the count out loud. Silently returning 3 when 10 were asked for is
   // exactly the behaviour that made the agent feel like it was not listening;
   // if the funnel genuinely could not fill the order, say so and say why.
+  // The figure recorded in runPipeline was taken before the finalize filter and
+  // the batch insert, both of which increment it -- so the stored trace
+  // undercounted every run by however many companies the model re-proposed or
+  // the unique index rejected. This is the first point where it is final.
+  trace.alreadyKnown = alreadyKnown;
+
   if (finalized.length < targetCount) {
+    trace.truncated = truncated;
     const reasons = [
       alreadyKnown ? `${alreadyKnown} were already on the board` : "",
       ...dropReasons(dropped),
     ].filter(Boolean);
-    emit({
-      type: "status",
-      step: "shortfall",
-      message:
+    const shortfall =
         `You asked for ${askedFor ?? targetCount} and I found ${finalized.length}` +
         (reasons.length ? ` (${reasons.join(", ")})` : "") +
         (truncated
           ? `. The model ran out of time partway through, so these are the ones it finished -- run it again to fill the rest.`
           : `. Try a broader area or a different industry angle for more.`) +
-        capTail,
-    });
+        capTail;
+    trace.shortfall = shortfall;
+    emit({ type: "status", step: "shortfall", message: shortfall });
   }
 
   // A dead database used to fail silently here: cards rendered from in-memory
@@ -1054,27 +1159,21 @@ ${mode === "sales" ? "" : STRUCTURE_EXCLUSION_RULE}`;
     });
   }
 
-  // ── 5. Save the search to history ───────────────────────────────────────
-  let searchId: string | null = null;
-  if (hasDatabaseUrl()) {
-    try {
-      const [row] = (await db()`
-        insert into enactus_searches (prompt, normalized, mode, result_count, created_by_name)
-        values (${fullPrompt}, ${norm}, ${mode}, ${finalized.length}, ${userName})
-        returning id`) as { id: string }[];
-      searchId = row?.id ?? null;
-    } catch {
-      // non-fatal: history is a nicety, the leads themselves already persisted
-    }
-  }
+  // ── 5. Close the run log ────────────────────────────────────────────────
+  // The write itself happens in runAgent's finally, so a run that returns early
+  // from any of the branches above is recorded too. All that is left here is
+  // the outcome only this point knows.
+  trace.delivered = finalized.length;
+  state.error = persistError;
 
   // A cap that is not being recorded is not a cap. If the ledger could not be
   // written this run, say so rather than let the next run believe the total.
   const ledgerProblem = ledgerWriteProblem();
   if (ledgerProblem) {
+    note(trace, ledgerProblem);
     emit({ type: "status", step: "budget", message: `Budget tracking degraded -- ${ledgerProblem}` });
   }
-  emit({ type: "done", count: finalized.length, searchId });
+  emit({ type: "done", count: finalized.length, searchId: state.searchId });
 }
 
 interface RawLead {
@@ -1094,8 +1193,46 @@ interface RawLead {
   source_index?: number;
 }
 
-/** One row of enactus_leads, exactly as it is inserted. */
-type LeadRow = Omit<Lead, "id" | "created_at" | "updated_at">;
+/**
+ * Finish a run's log row: what it did, what it cost, and whether it worked.
+ *
+ * Never throws and never blocks the leads. A trace that could not be written is
+ * a diagnostic we do not get; a trace that failed a run would be a diagnostic
+ * that caused the problem it exists to explain.
+ */
+async function closeRun(
+  searchId: string | null,
+  trace: RunTrace,
+  costUsd: number,
+  status: "done" | "error",
+  error: string | null
+): Promise<void> {
+  console.log(`[agent] run ${searchId ?? "(unlogged)"} ${traceSummary(trace, costUsd)}`);
+  if (!searchId || !hasDatabaseUrl()) return;
+  try {
+    await db()`
+      update enactus_searches
+         set status = ${status},
+             finished_at = now(),
+             result_count = ${trace.delivered},
+             cost_usd = ${costUsd},
+             error = ${error},
+             params = ${JSON.stringify(trace)}::jsonb
+       where id = ${searchId}`;
+  } catch {
+    // The leads are already saved; the record of how they were found is not
+    // worth an error banner over.
+  }
+}
+
+/**
+ * One row of enactus_leads, exactly as it is inserted.
+ *
+ * search_id is not on the Lead type: nothing in the UI reads it, and adding it
+ * there would put a diagnostic column on every card's props. It is written and
+ * then only ever read back by a query joining leads to the run that found them.
+ */
+type LeadRow = Omit<Lead, "id" | "created_at" | "updated_at"> & { search_id: string | null };
 
 function buildLeadRow(
   raw: RawLead,
@@ -1105,6 +1242,8 @@ function buildLeadRow(
     org: ApolloOrg | null;
     mode: Mode;
     userName: string;
+    /** The run that found this lead, so an outcome can be traced back to a query. */
+    searchId: string | null;
   }
 ): LeadRow {
   // Every claim about a PERSON or a shared history has to survive the evidence
@@ -1195,6 +1334,7 @@ function buildLeadRow(
     status: "prospects" as const,
     mode: ctx.mode,
     created_by_name: ctx.userName,
+    search_id: ctx.searchId,
   } as LeadRow;
 }
 
@@ -1205,7 +1345,7 @@ const LEAD_COLUMNS = [
   "company", "website", "industry", "description", "contact_name", "contact_role",
   "contact_email", "location", "connection_type", "connection_note",
   "sponsorship_type", "fit_score", "board_order", "why_fit", "reasoning", "sources",
-  "status", "mode", "created_by_name",
+  "status", "mode", "created_by_name", "search_id",
 ] as const;
 const LEAD_CASTS: Record<string, string> = { sponsorship_type: "::text[]", sources: "::jsonb" };
 

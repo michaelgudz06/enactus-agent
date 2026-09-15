@@ -42,6 +42,7 @@ import { winMessage } from "../src/lib/slack.ts";
 import { looksConversational } from "../src/lib/intent.ts";
 import { reasoningFor } from "../src/lib/reasoning.ts";
 import { interleave, partition } from "../src/lib/funnel.ts";
+import { costPerLead, newTrace, note, traceSummary } from "../src/lib/trace.ts";
 import {
   HARD_EXCLUSIONS,
   PROMO_SUPPLIER,
@@ -1445,5 +1446,41 @@ eq(exaContentsCostUsd(12), 12 * EXA_CONTENTS_PAGE_USD, "contents is charged per 
 // enrichment runs AFTER the pool is cut rather than over everything found.
 ok(exaContentsCostUsd(10) > exaSearchCostUsd(10), "ten enriched pages cost more than a ten-result search");
 ok(exaContentsCostUsd(12) < 2 * exaSearchCostUsd(25), "a cut-sized enrichment stays under two wide searches");
+
+// ── run trace ───────────────────────────────────────────────────────────────
+const t = newTrace({ targetCount: 10, askedFor: 10 });
+eq(t.delivered, 0, "a new trace has delivered nothing");
+eq(t.dropped, {}, "a new trace has dropped nothing");
+
+// Degradations are deduplicated: they happen once per chunk, not once per run,
+// and a trace repeating one sentence four times is harder to read.
+note(t, "Apollo unreachable");
+note(t, "Apollo unreachable");
+note(t, "ledger unwritable");
+eq(t.notes, ["Apollo unreachable", "ledger unwritable"], "notes are recorded once each");
+
+// Null, not the run's total. A run that spent $0.40 and delivered nothing has
+// no cost per lead, and reporting $0.40 would make it the cheapest run of the
+// month in any average taken over this field.
+eq(costPerLead(0.4, 0), null, "a run that delivered nothing has no cost per lead");
+eq(costPerLead(0.4, 0), null, "and not its total cost either");
+eq(costPerLead(0.5, 10), 0.05, "cost per lead divides");
+eq(costPerLead(0, 10), 0, "a free run costs nothing per lead");
+
+t.delivered = 4;
+t.found = 40;
+t.alreadyKnown = 9;
+t.candidates = ["a.ca", "b.ca"];
+t.truncated = true;
+const summary = traceSummary(t, 0.25);
+ok(summary.includes("4/10 leads"), "the summary states delivered against target");
+ok(summary.includes("40 found"), "the summary states what discovery returned");
+ok(summary.includes("9 already known"), "the summary states the board overlap");
+ok(summary.includes("$0.2500"), "the summary states the cost");
+ok(summary.includes("$0.0625/lead"), "the summary states the cost per lead");
+ok(summary.includes("truncated"), "the summary says when structuring was cut short");
+ok(summary.includes("Apollo unreachable"), "the summary carries the degradations");
+ok(!traceSummary(newTrace({ targetCount: 5, askedFor: null }), 0.1).includes("/lead"),
+   "a run with no leads reports no per-lead figure");
 
 console.log(`selfcheck: ${checks} assertions passed`);
