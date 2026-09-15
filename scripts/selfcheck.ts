@@ -37,6 +37,7 @@ import { boardLines, facets, filterLeads, industryFacets, industryMatches, match
 import { companyPoints, contactPoints, isBranchAddress, isDecisionInbox, isGenericInbox, isPersonalEmail, namesLocalOutlet, scoreLead, boardOrderFor, WEIGHTS } from "../src/lib/score.ts";
 import { actorKey, buildScoreboard, civilDate, monthOf, sent, weekStartOf, type ScoreEvent } from "../src/lib/scoreboard.ts";
 import { winMessage } from "../src/lib/slack.ts";
+import { looksConversational } from "../src/lib/intent.ts";
 
 let checks = 0;
 const eq = (actual: unknown, expected: unknown, msg: string) => {
@@ -1251,5 +1252,43 @@ eq(boardLines(STAGES, [{ status: "prospects", n: 3, total: 0, companies: "AAA, B
    "- Prospects: 3 leads (AAA, )", "the company list is clipped, the count never is");
 eq(boardLines(STAGES, [{ status: "prospects", n: 1, total: 0 }])[0],
    "- Prospects: 1 lead ()", "a null company list does not throw");
+
+// ── intent fallback ─────────────────────────────────────────────────────────
+// Only reached when the planner call itself fails, so the bar is: never send a
+// real search request to the answer branch, and never spend Exa credit on
+// "thanks". Everything it cannot positively identify as small talk searches.
+for (const greeting of ["hi", "Hey!", "hello there", "thanks", "Thank you!", "thx", "cheers", "ok", "got it", "never mind", "bye", "good morning", "sounds good", ""]) {
+  ok(looksConversational(greeting), `"${greeting}" is small talk, not a search`);
+}
+// Adjectives that are small talk ALONE and ordinary openers in front of a
+// request. These were all silently declined -- the guard against refusing to
+// search was itself refusing to search.
+for (const adjectiveLed of [
+  "great gyms near SFU",
+  "nice coffee shops in Burnaby",
+  "perfect bakeries Langley",
+  "cool climbing gyms Burnaby",
+  "ok escape rooms Vancouver",
+  "awesome yoga studios",
+]) {
+  ok(!looksConversational(adjectiveLed), `"${adjectiveLed}" is a search, not a pleasantry`);
+}
+// The same words alone are still small talk.
+for (const bare of ["great", "great!", "ok", "cool.", "nice", "perfect!", "got it", "sounds good"]) {
+  ok(looksConversational(bare), `"${bare}" on its own is still small talk`);
+}
+
+for (const request of [
+  "coffee shops burnaby",
+  "credit unions and banks in the Lower Mainland with community grant programs",
+  "20 more",
+  "same thing for Richmond",
+  "hey can you find me 10 bakeries in Burnaby",
+  "thanks, now find climbing gyms near SFU as well",
+  "escape rooms",
+  "gyms",
+]) {
+  ok(!looksConversational(request), `"${request}" must still run a search`);
+}
 
 console.log(`selfcheck: ${checks} assertions passed`);

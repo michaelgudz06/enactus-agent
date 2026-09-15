@@ -28,6 +28,7 @@ import {
 } from "./apollo";
 import { db, hasDatabaseUrl } from "./db";
 import { MAX_COUNT, parsedCount, requestedCount } from "./count";
+import { looksConversational } from "./intent";
 import { ENACTUS_ORG, ENACTUS_PROJECTS, ENACTUS_VENTURES } from "./enactus";
 import { scoreLead, boardOrderFor } from "./score";
 import { boardLines } from "./table";
@@ -38,9 +39,15 @@ import {
   overBudget,
   tokensFromChars,
 } from "./budget";
-import { budgetState, ledgerWriteProblem, recordSpend } from "./spend";
+import { budgetState, flushSpend, ledgerWriteProblem, recordSpend } from "./spend";
 
 type Emit = (e: AgentEvent) => void;
+
+// Planner retry. See the loop in runPipeline().
+const PLAN_ATTEMPTS = 2;
+const PLAN_RETRY_MS = 400;
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 interface Plan {
   // Which of the two things this run is. Optional and defaulted to a search by
@@ -198,7 +205,27 @@ ${board}`;
   emit({ type: "done", count: 0, searchId: null });
 }
 
+/**
+ * One agent run, start to finish.
+ *
+ * A thin wrapper around the pipeline so that every exit -- and there are a
+ * dozen of them, most of them early returns on a degraded funnel -- settles the
+ * spend ledger on the way out. See flushSpend() in src/lib/spend.ts: the
+ * inserts are deliberately not awaited on the hot path, and on a serverless
+ * runtime an unawaited insert dies when the response stream closes.
+ */
 export async function runAgent(
+  input: { prompt: string; mode: Mode; answers?: string; userName: string; skipClarify?: boolean },
+  emit: Emit
+): Promise<void> {
+  try {
+    await runPipeline(input, emit);
+  } finally {
+    await flushSpend();
+  }
+}
+
+async function runPipeline(
   input: { prompt: string; mode: Mode; answers?: string; userName: string; skipClarify?: boolean },
   emit: Emit
 ): Promise<void> {
@@ -270,9 +297,14 @@ export async function runAgent(
   // `steps` is empty, so the planning wait is still covered.
   // Wider ask needs more angles, or every query returns the same few pages.
   const queryCount = targetCount <= 6 ? 3 : targetCount <= 12 ? 4 : 5;
-  let plan: Plan;
-  try {
-    plan = await chatJSON<Plan>(
+  let plan!: Plan;
+  // Every branch below this point depends on the planner, and it was a single
+  // unretried call: one 429, one 502, one malformed body and the whole run
+  // ended on "Planning failed" with nothing delivered. Transient OpenRouter
+  // failures are the common case by far, so retry first; only a planner that
+  // cannot be reached at all falls through to the degraded plan.
+  const planOnce = () =>
+    chatJSON<Plan>(
       [
         { role: "system", content: `${planPrompt(mode)}\n\nRespond ONLY with JSON of shape: {"intent": "leads" | "answer", "needClarification": boolean, "questions": string[], "searchQueries": string[], "criteria": string, "altAngle": string, "location": string, "placesQueries": string[]}. Provide ${queryCount} DISTINCT searchQueries that attack the request from different angles (neighbourhood plus business category, local-news coverage of independent businesses, business-improvement-association and neighbourhood directory listings, "supported a local school or team" phrasing) so they do not all return the same pages.${
               mode === "sales"
@@ -291,9 +323,44 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
       ],
       { model: STRUCTURER, provider: STRUCTURER_PROVIDER, maxTokens: 800 }
     );
-  } catch (e) {
-    emit({ type: "error", message: `Planning failed: ${(e as Error).message}` });
-    return;
+
+  // Two attempts, ~400ms apart. Kept tight on purpose: this runs inside the
+  // run deadline, so a long backoff would buy a plan at the cost of the
+  // structuring stage that actually produces the leads.
+  let planError: Error | null = null;
+  for (let attempt = 0; attempt < PLAN_ATTEMPTS; attempt++) {
+    try {
+      planError = null;
+      plan = await planOnce();
+      break;
+    } catch (e) {
+      planError = e as Error;
+      if (attempt < PLAN_ATTEMPTS - 1) await sleep(PLAN_RETRY_MS);
+    }
+  }
+
+  if (planError) {
+    // Degrade instead of dying. The query synthesis further down already knows
+    // how to build searches from a bare prompt -- it was written for the
+    // planner returning an EMPTY query list -- so an absent planner lands in
+    // the same place. Intent is the one thing that genuinely cannot be
+    // recovered, so looksConversational() makes the cheap, conservative call.
+    console.error("planner failed after retries:", planError.message);
+    emit({
+      type: "status",
+      step: "understand",
+      message: `Planning is degraded (${planError.message}) -- working from your request as written.`,
+    });
+    plan = {
+      intent: looksConversational(fullPrompt) ? "answer" : "leads",
+      needClarification: false,
+      questions: [],
+      searchQueries: [],
+      criteria: fullPrompt,
+      altAngle: "",
+      location: "",
+      placesQueries: [],
+    };
   }
 
   if (plan.intent === "answer") {
@@ -831,7 +898,13 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
   // The prompt asks for exactly targetCount, but a prompt is not a guarantee:
   // enforce the ceiling here so an over-eager run cannot clutter the board or
   // burn credits. Under-delivery is reported honestly below instead.
-  for (const raw of usable.slice(0, targetCount)) {
+  // Build every row first, then write them in ONE statement. This used to be a
+  // loop of awaited single-row inserts, which is up to 25 sequential round
+  // trips at the point in the run where there is least time left: the deadline
+  // that cuts structuring short is the same deadline these inserts run against,
+  // and a slow database turned "the model finished 10 leads" into "6 of them
+  // were saved". One statement is one round trip whatever the lead count.
+  const built = usable.slice(0, targetCount).map((raw) => {
     // `?? 1` silently bound every lead with no source_index to candidate #1 --
     // which is how one Langley candidate became three separate board rows. An
     // unattributable lead now resolves to undefined and simply keeps no site.
@@ -841,20 +914,21 @@ ${mode === "sales" ? "" : "- EXCLUDE entirely (do not output) any other student 
     // checking the model's domain against the model's company name -- the guard
     // grading its own homework, which passes.
     const website = cand ? `https://${cand.domain}` : null;
-    const { lead, error, duplicate } = await persistLead(raw, {
+    return buildLeadRow(raw, {
       website,
       src: cand?.result,
       org: cand?.org ?? null,
       mode,
       userName,
     });
-    if (error && !persistError) persistError = error;
-    // Lost a race with the unique index: the company is already on the board,
-    // so it is not a new lead and must not be shown as one.
-    if (duplicate) {
-      alreadyKnown++;
-      continue;
-    }
+  });
+
+  const written = await persistLeadRows(built);
+  persistError = written.error;
+  // Lost a race with the unique index: the company is already on the board, so
+  // it is not a new lead and must not be shown as one.
+  alreadyKnown += written.duplicates;
+  for (const lead of written.leads) {
     finalized.push(lead);
     emit({ type: "lead", lead });
   }
@@ -931,7 +1005,10 @@ interface RawLead {
   source_index?: number;
 }
 
-async function persistLead(
+/** One row of enactus_leads, exactly as it is inserted. */
+type LeadRow = Omit<Lead, "id" | "created_at" | "updated_at">;
+
+function buildLeadRow(
   raw: RawLead,
   ctx: {
     website: string | null;
@@ -940,7 +1017,7 @@ async function persistLead(
     mode: Mode;
     userName: string;
   }
-): Promise<{ lead: Lead; error: string | null; duplicate?: boolean }> {
+): LeadRow {
   // Every claim about a PERSON or a shared history has to survive the evidence
   // we actually fetched. This runs first so there is no path into the database
   // that skips it. Uses the full ExaResult, not the 700-char slice the model
@@ -992,7 +1069,7 @@ async function persistLead(
     contactEmail: safe.contact_email,
   });
 
-  const row = {
+  return {
     company,
     website: siteIsTheirs ? ctx.website : null,
     industry: row_industry,
@@ -1029,50 +1106,163 @@ async function persistLead(
     status: "prospects" as const,
     mode: ctx.mode,
     created_by_name: ctx.userName,
-  };
+  } as LeadRow;
+}
 
-  let error: string | null = null;
-  if (hasDatabaseUrl()) {
+// The 19 columns of enactus_leads that a run writes, and the casts the two
+// non-scalar ones need. Declared once so the column list, the placeholder
+// builder and the value builder below cannot drift apart.
+const LEAD_COLUMNS = [
+  "company", "website", "industry", "description", "contact_name", "contact_role",
+  "contact_email", "location", "connection_type", "connection_note",
+  "sponsorship_type", "fit_score", "board_order", "why_fit", "reasoning", "sources",
+  "status", "mode", "created_by_name",
+] as const;
+const LEAD_CASTS: Record<string, string> = { sponsorship_type: "::text[]", sources: "::jsonb" };
+
+function leadValues(row: LeadRow): unknown[] {
+  return LEAD_COLUMNS.map((c) => (c === "sources" ? JSON.stringify(row.sources) : row[c]));
+}
+
+/**
+ * The key the unique index actually uses.
+ *
+ * NOT companyKey(): that one is deliberately fuzzy (it drops legal suffixes,
+ * bracketed qualifiers and punctuation) and is the right tool for comparing a
+ * model's name against the board. The index is
+ * `lower(btrim(company))` and nothing else, so matching an insert result or a
+ * conflict against the database has to use the same plain normalisation or it
+ * silently matches nothing -- "Purdys Chocolatier Inc." conflicts as
+ * "purdys chocolatier inc.", never as "purdys chocolatier".
+ */
+const dbKey = (name: string) => name.trim().toLowerCase();
+
+/**
+ * Insert leads one at a time, keeping whatever succeeds.
+ *
+ * The recovery path for a rejected batch. Deliberately sequential and
+ * deliberately silent per row: it only ever runs after the fast path has
+ * already failed, and the point is to salvage the leads that are fine rather
+ * than to diagnose the one that is not.
+ */
+async function insertRowsIndividually(rows: LeadRow[]): Promise<{ leads: Lead[] }> {
+  const cols = LEAD_COLUMNS.join(", ");
+  const leads: Lead[] = [];
+  for (const row of rows) {
+    const values = leadValues(row);
+    const placeholders = values.map((_, i) => `$${i + 1}${LEAD_CASTS[LEAD_COLUMNS[i]] ?? ""}`);
     try {
-      const [saved] = await db()`
-        insert into enactus_leads (
-          company, website, industry, description, contact_name, contact_role,
-          contact_email, location, connection_type, connection_note,
-          sponsorship_type, fit_score, board_order, why_fit, reasoning, sources,
-          status, mode, created_by_name
-        ) values (
-          ${row.company}, ${row.website}, ${row.industry}, ${row.description},
-          ${row.contact_name}, ${row.contact_role}, ${row.contact_email},
-          ${row.location}, ${row.connection_type}, ${row.connection_note},
-          ${row.sponsorship_type}::text[], ${row.fit_score}, ${row.board_order}, ${row.why_fit},
-          ${row.reasoning}, ${JSON.stringify(row.sources)}::jsonb, ${row.status},
-          ${row.mode}, ${row.created_by_name}
-        )
-        on conflict do nothing
-        returning *`;
-      if (saved) return { lead: saved as Lead, error: null };
-      // No row means the unique index rejected it as a company already on the
-      // board -- NOT a failure. Reported as an error, this showed the volunteer
-      // a red database message for the one case the constraint exists to
-      // handle. Hand back the row that is already there and say so.
-      const [existing] = await db()`
-        select * from enactus_leads
-        where mode = ${row.mode} and lower(btrim(company)) = lower(btrim(${row.company}))
-        limit 1`;
-      if (existing) return { lead: existing as Lead, error: null, duplicate: true };
-      error = "insert returned no row";
+      const res = await db().query(
+        `insert into enactus_leads (${cols}) values (${placeholders.join(", ")})
+         on conflict do nothing
+         returning *`,
+        values
+      );
+      const [saved] = res as unknown as Lead[];
+      if (saved) leads.push(saved);
+    } catch {
+      // This row is the problem, or every row is. Either way the next one is
+      // still worth trying.
+    }
+  }
+  return { leads };
+}
+
+/**
+ * Write a whole run's leads in one statement.
+ *
+ * Returns only the rows that are genuinely NEW. A company already on the board
+ * is reported as a duplicate count, not as a lead and not as an error: that is
+ * the case the unique index exists to handle, and surfacing it as a failure
+ * showed volunteers a red database message for the system working correctly.
+ *
+ * Order is restored from the input afterwards. RETURNING gives no ordering
+ * guarantee, and the input is sorted best-first, so trusting the returned order
+ * would shuffle the board's top pick to an arbitrary position.
+ */
+async function persistLeadRows(
+  rows: LeadRow[]
+): Promise<{ leads: Lead[]; duplicates: number; error: string | null }> {
+  if (!rows.length) return { leads: [], duplicates: 0, error: null };
+
+  // Still hand back usable cards so the run's work isn't lost, but the caller
+  // now knows they are unsaved and tells the user.
+  const unsaved = (error: string) => {
+    const now = new Date().toISOString();
+    return {
+      leads: rows.map((r) => ({ id: crypto.randomUUID(), created_at: now, updated_at: now, ...r }) as Lead),
+      duplicates: 0,
+      error,
+    };
+  };
+  if (!hasDatabaseUrl()) return unsaved("DATABASE_URL missing");
+
+  const cols = LEAD_COLUMNS.join(", ");
+  const params: unknown[] = [];
+  const tuples = rows.map((row) => {
+    const placeholders = leadValues(row).map((v, i) => {
+      params.push(v);
+      return `$${params.length}${LEAD_CASTS[LEAD_COLUMNS[i]] ?? ""}`;
+    });
+    return `(${placeholders.join(", ")})`;
+  });
+
+  let inserted: Lead[] = [];
+  let error: string | null = null;
+  try {
+    const res = await db().query(
+      `insert into enactus_leads (${cols}) values ${tuples.join(", ")}
+       on conflict do nothing
+       returning *`,
+      params
+    );
+    inserted = res as unknown as Lead[];
+  } catch (e) {
+    // One statement means one failure mode: anything that rejects the batch
+    // rejects EVERY lead in it. Before this was batched, a per-row loop lost
+    // one lead to a bad row and saved the rest, so making the fast path
+    // all-or-nothing quietly converted "lost one card" into "saved nothing" --
+    // and a schema migration applied after a deploy turns that into every run,
+    // silently, for as long as the column is missing.
+    //
+    // So the batch is the fast path, not the only path. Falling back row by row
+    // costs a round trip per lead exactly when the run has already gone wrong,
+    // and recovers the 24 leads that a single unlucky one would have taken with
+    // it. If the fallback fails too the cause is not this row, and the original
+    // batch error is the more useful one to report.
+    const batchError = (e as Error).message;
+    console.error("batch lead insert failed, falling back to row-by-row:", batchError);
+    const recovered = await insertRowsIndividually(rows);
+    inserted = recovered.leads;
+    error = recovered.leads.length ? null : batchError;
+    if (!inserted.length) return { ...unsaved(batchError), duplicates: 0 };
+  }
+
+  // Anything the insert did not return hit the unique index. One follow-up
+  // query confirms it really is on the board rather than lost, so a genuine
+  // "insert returned no row" is still distinguishable from a duplicate.
+  const insertedKeys = new Set(inserted.map((l) => dbKey(l.company)));
+  const missing = rows.filter((r) => !insertedKeys.has(dbKey(r.company)));
+  let duplicates = 0;
+  if (missing.length) {
+    try {
+      const res = await db().query(
+        `select lower(btrim(company)) as key from enactus_leads
+          where mode = $1 and lower(btrim(company)) = any($2::text[])`,
+        [rows[0].mode, missing.map((r) => dbKey(r.company))]
+      );
+      const onBoard = new Set((res as unknown as { key: string }[]).map((r) => r.key));
+      duplicates = missing.filter((r) => onBoard.has(dbKey(r.company))).length;
+      if (duplicates < missing.length) error = "insert returned no row";
     } catch (e) {
       error = (e as Error).message;
     }
-  } else {
-    error = "DATABASE_URL missing";
   }
 
-  // Still hand back a usable card so the run's work isn't lost, but the caller
-  // now knows it is unsaved and tells the user.
-  const now = new Date().toISOString();
-  return {
-    lead: { id: crypto.randomUUID(), created_at: now, updated_at: now, ...row } as Lead,
-    error,
-  };
+  // Best-first, as the model ranked them.
+  const order = new Map(rows.map((r, i) => [dbKey(r.company), i]));
+  const leads = inserted.sort(
+    (a, b) => (order.get(dbKey(a.company)) ?? 0) - (order.get(dbKey(b.company)) ?? 0)
+  );
+  return { leads, duplicates, error };
 }
