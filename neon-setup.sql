@@ -286,3 +286,26 @@ create index if not exists enactus_searches_kind_idx on enactus_searches (mode, 
 -- status carries 'analysing' while a run is parked. The column already existed
 -- with 'running' / 'done' / 'error'; this is a fourth value, not a new column.
 alter table enactus_searches add column if not exists resume_state jsonb;
+
+-- ── Company identity ────────────────────────────────────────────────────────
+-- Identity in this app is a string, and five separate mechanisms try to
+-- reconstruct it from whatever the model typed: the domains shipped to Exa, the
+-- board pre-filter, the in-run seenNames set, this unique index, and the
+-- follow-up select when an insert conflicts. Each was added after a specific
+-- incident and they overlap because none of them is an identity -- they are
+-- five guesses at one. See src/lib/entity.ts.
+--
+-- entity_key is that identity: canonical name plus the locality that
+-- distinguishes one outlet from another. It is written alongside every lead
+-- from now on, and backfilled by scripts/backfill-entities.ts.
+--
+-- DELIBERATELY ADDITIVE. The unique index on lower(btrim(company)) is NOT
+-- dropped here and nothing reads entity_key for deduplication yet. That index
+-- is the thing currently stopping two volunteers emailing one cafe, and
+-- swapping it for a different definition of sameness is a change that has to be
+-- reviewed against the real board first -- it would, correctly, start allowing
+-- "Popeyes Burnaby" and "Popeyes Coquitlam" as two rows. Run the backfill in
+-- its dry-run mode, read what it says it would merge and split, and make that
+-- swap as its own change.
+alter table enactus_leads add column if not exists entity_key text;
+create index if not exists enactus_leads_entity_idx on enactus_leads (mode, entity_key);

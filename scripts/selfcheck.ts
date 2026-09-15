@@ -45,6 +45,7 @@ import { interleave, partition } from "../src/lib/funnel.ts";
 import { costPerLead, newTrace, note, traceSummary } from "../src/lib/trace.ts";
 import { RESUME_VERSION, isResumable, shouldHandOff } from "../src/lib/resume.ts";
 import { FIRECRAWL_CREDITS_PER_LOOKUP, firecrawlCreditUsd, firecrawlLookupCostUsd } from "../src/lib/budget.ts";
+import { baseNameOf, entityKey, localityOf, sameCompany } from "../src/lib/entity.ts";
 import { applyEvent as applyRunEvent } from "../src/lib/run-events.ts";
 import {
   HARD_EXCLUSIONS,
@@ -1553,5 +1554,56 @@ const unknownUpdate = applyRunEvent(beforeContact, {
   lead: { id: "L2", contact_name: "Sam Rivera" },
 });
 eq(unknownUpdate[0].leads.length, 2, "a lead the turn never saw is shown rather than dropped");
+
+// ── company identity ────────────────────────────────────────────────────────
+// Every case below is an incident recorded in this codebase's own comments.
+
+// "Xenon Pharmaceuticals Inc." and "Xenon Pharmaceuticals" arrived as two cards
+// in one Burnaby run. Same company, two volunteers about to email it.
+eq(entityKey("Xenon Pharmaceuticals Inc."), entityKey("Xenon Pharmaceuticals"),
+   "a legal suffix is not a different company");
+eq(entityKey("Nature's Path"), entityKey("Natures Path"), "an apostrophe is not a different company");
+eq(entityKey("Purdys Chocolatier "), entityKey("purdys chocolatier"),
+   "case and trailing space are not a different company");
+eq(entityKey("Otter Co-Op"), entityKey("Otter Co Op"), "punctuation is not a different company");
+
+// And the case the old exact index gets WRONG in the other direction. score.ts
+// pays a bonus for a name that carries a neighbourhood precisely because these
+// are two prospects with two managers, either of whom can say yes.
+ok(entityKey("Popeyes Burnaby") !== entityKey("Popeyes Coquitlam"),
+   "two outlets of one brand are two prospects");
+ok(entityKey("Oxygen Yoga & Fitness Kensington") !== entityKey("Oxygen Yoga & Fitness Brentwood"),
+   "two studios of one brand are two prospects");
+eq(entityKey("Popeyes Burnaby"), entityKey("Popeyes", "Burnaby, BC"),
+   "the branch is the same whether the name or the location says so");
+
+// "Grosvenor" and "Grosvenor (Burnaby FC)" were four cards for two companies.
+// The bracketed qualifier names the outlet, so it belongs in the key.
+eq(entityKey("Grosvenor (Burnaby FC)"), entityKey("Grosvenor Burnaby"),
+   "a bracketed neighbourhood identifies the same outlet as a plain one");
+
+// The name wins over the location column: Apollo resolves a franchise to its
+// parent, so location often holds a head office this row is not.
+eq(entityKey("Popeyes Coquitlam", "Burnaby, BC"), entityKey("Popeyes Coquitlam"),
+   "a name that names its outlet is not overridden by a head-office location");
+
+eq(localityOf("Browns Socialhouse Lougheed"), "lougheed", "a locality inside a name is found");
+eq(localityOf("New West Coffee"), "newwest", "spacing in a locality does not matter");
+eq(localityOf("Aster Bakery"), "", "a name with no locality has none");
+eq(localityOf(null), "", "no text has no locality");
+eq(baseNameOf("The Old Spaghetti Factory Ltd."), "the old spaghetti factory", "legal suffixes are dropped");
+
+// A name that is nothing but a locality must not reduce to an empty key that
+// collides with every other such name.
+ok(entityKey("Vancouver") !== "", "a name that is only a place still has a key");
+ok(entityKey("Vancouver") !== entityKey("Richmond"), "and is not the same as another place");
+
+// A shared domain settles identity outright, whatever the model called them.
+ok(sameCompany(
+     { company: "Aster Cafe", domain: "astercafe.ca" },
+     { company: "Aster Coffee Roasters", domain: "astercafe.ca" }),
+   "one website is one company");
+ok(!sameCompany({ company: "Aster Cafe" }, { company: "Bellweather Books" }),
+   "different companies stay different");
 
 console.log(`selfcheck: ${checks} assertions passed`);

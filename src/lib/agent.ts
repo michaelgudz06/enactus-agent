@@ -32,6 +32,7 @@ import { ENACTUS_ORG, ENACTUS_PROJECTS, ENACTUS_VENTURES } from "./enactus";
 import { looksConversational } from "./intent";
 import { reasoningFor } from "./reasoning";
 import { interleave, partition } from "./funnel";
+import { entityKey } from "./entity";
 import { enrichContacts } from "./contact";
 import { hasFirecrawlKey } from "./firecrawl";
 import { newTrace, note, traceSummary, type RunTrace } from "./trace";
@@ -1623,7 +1624,10 @@ async function closeRun(
  * there would put a diagnostic column on every card's props. It is written and
  * then only ever read back by a query joining leads to the run that found them.
  */
-type LeadRow = Omit<Lead, "id" | "created_at" | "updated_at"> & { search_id: string | null };
+type LeadRow = Omit<Lead, "id" | "created_at" | "updated_at"> & {
+  search_id: string | null;
+  entity_key: string;
+};
 
 function buildLeadRow(
   raw: RawLead,
@@ -1726,6 +1730,12 @@ function buildLeadRow(
     mode: ctx.mode,
     created_by_name: ctx.userName,
     search_id: ctx.searchId,
+    // The company's identity, stored so dedupe can eventually stop being five
+    // separate guesses at it. Nothing reads this for deduplication yet -- see
+    // the note in neon-setup.sql -- but a column that is only populated going
+    // forward is a column that cannot be used for another year, so it is
+    // written from now and backfilled by scripts/backfill-entities.ts.
+    entity_key: entityKey(company, row_location),
   } as LeadRow;
 }
 
@@ -1736,7 +1746,7 @@ const LEAD_COLUMNS = [
   "company", "website", "industry", "description", "contact_name", "contact_role",
   "contact_email", "location", "connection_type", "connection_note",
   "sponsorship_type", "fit_score", "board_order", "why_fit", "reasoning", "sources",
-  "status", "mode", "created_by_name", "search_id",
+  "status", "mode", "created_by_name", "search_id", "entity_key",
 ] as const;
 const LEAD_CASTS: Record<string, string> = { sponsorship_type: "::text[]", sources: "::jsonb" };
 
