@@ -146,6 +146,29 @@ export function exaContentsCostUsd(pages: number): number {
   return Math.max(0, pages) * EXA_CONTENTS_PAGE_USD;
 }
 
+// Firecrawl bills in credits, and what a credit costs depends on the plan this
+// account is on -- which this file cannot know and must not guess. Set
+// FIRECRAWL_CREDIT_USD to price contact lookups into the cap; leave it unset
+// and they are counted but not priced, which the run says out loud rather than
+// letting the cap quietly under-report. A cap enforced against a number that
+// excludes a whole provider is worse than one that admits the gap.
+export function firecrawlCreditUsd(env: string | undefined): number | null {
+  // Number("") is 0, and an unset variable read as "priced at zero" is exactly
+  // the silent under-reporting this function exists to avoid.
+  const raw = (env ?? "").trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+/** One lookup is two /map calls and up to three /scrape calls. See firecrawl.ts. */
+export const FIRECRAWL_CREDITS_PER_LOOKUP = 5;
+
+export function firecrawlLookupCostUsd(lookups: number, creditUsd: number | null): number {
+  if (creditUsd === null) return 0;
+  return Math.max(0, lookups) * FIRECRAWL_CREDITS_PER_LOOKUP * creditUsd;
+}
+
 // OpenRouter reports real usage on every response, so an estimate is only ever
 // a fallback for a stream that ended before its usage chunk arrived. Four
 // characters per token is the usual rule of thumb for this tokenizer family.

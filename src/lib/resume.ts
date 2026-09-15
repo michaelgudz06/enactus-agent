@@ -37,7 +37,7 @@
 // `node --experimental-strip-types`.
 
 /** Bump when the stored shape changes; a mismatched state is discarded, not guessed at. */
-export const RESUME_VERSION = 2;
+export const RESUME_VERSION = 3;
 
 /**
  * What is written to the run row at a handoff.
@@ -48,8 +48,19 @@ export const RESUME_VERSION = 2;
  * round trip through jsonb, which is the reason phase two's input is plain data
  * in the first place.
  */
+/**
+ * Which half of the run is parked.
+ *
+ * "analysis" is reasoning and structuring over a settled candidate pool.
+ * "contacts" is finding a human being at the companies that pool became --
+ * separate because a contact lookup is several seconds of scraping per lead and
+ * there is never room for it behind a reasoning pass.
+ */
+export type ResumePhase = "analysis" | "contacts";
+
 export interface ResumeState<TInput = unknown, TTrace = unknown> {
   v: number;
+  phase: ResumePhase;
   input: TInput;
   trace: TTrace;
   /** Spend already charged to this run, so the resumed half does not restart the total. */
@@ -69,7 +80,12 @@ export function isResumable<TInput, TTrace>(
 ): state is ResumeState<TInput, TTrace> {
   if (!state || typeof state !== "object") return false;
   const s = state as ResumeState;
-  return s.v === RESUME_VERSION && Boolean(s.input) && typeof s.input === "object";
+  return (
+    s.v === RESUME_VERSION &&
+    (s.phase === "analysis" || s.phase === "contacts") &&
+    Boolean(s.input) &&
+    typeof s.input === "object"
+  );
 }
 
 /**

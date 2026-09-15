@@ -44,6 +44,7 @@ import { reasoningFor } from "../src/lib/reasoning.ts";
 import { interleave, partition } from "../src/lib/funnel.ts";
 import { costPerLead, newTrace, note, traceSummary } from "../src/lib/trace.ts";
 import { RESUME_VERSION, isResumable, shouldHandOff } from "../src/lib/resume.ts";
+import { FIRECRAWL_CREDITS_PER_LOOKUP, firecrawlCreditUsd, firecrawlLookupCostUsd } from "../src/lib/budget.ts";
 import { applyEvent as applyRunEvent } from "../src/lib/run-events.ts";
 import {
   HARD_EXCLUSIONS,
@@ -1496,13 +1497,16 @@ ok(!shouldHandOff(30_000, 30_000), "exactly enough is enough");
 // A state written by a different build is discarded, never half-read: the cost
 // of refusing a resume is a repeated search, the cost of guessing at one is a
 // run that reasons over the wrong candidates.
-const goodState = { v: RESUME_VERSION, input: { candidates: [{}] }, trace: {}, costUsd: 0.1 };
+const goodState = { v: RESUME_VERSION, phase: "analysis", input: { candidates: [{}] }, trace: {}, costUsd: 0.1 };
 ok(isResumable(goodState), "a state from this build resumes");
 ok(!isResumable({ ...goodState, v: RESUME_VERSION + 1 }), "a newer state is refused");
 ok(!isResumable({ ...goodState, v: RESUME_VERSION - 1 }), "an older state is refused");
 ok(!isResumable({ ...goodState, input: null }), "a state with no input is refused");
 ok(!isResumable(null), "no state at all is refused");
 ok(!isResumable("{}"), "a string is not a state");
+ok(isResumable({ ...goodState, phase: "contacts" }), "the contacts phase resumes too");
+ok(!isResumable({ ...goodState, phase: "reasoning" }), "an unknown phase is refused");
+ok(!isResumable({ ...goodState, phase: undefined }), "a state with no phase is refused");
 
 // A handoff must not close the transcript: the run is still going, in the
 // invocation the client is about to start. Marking it done here would end the
@@ -1515,5 +1519,39 @@ const midRun = applyRunEvent([newTurn<string>("cafes in burnaby")], {
 eq(midRun[0].done, false, "a handoff does not end the turn");
 eq(midRun[0].steps.at(-1)?.step, "continue", "a handoff shows as a step in the transcript");
 eq(midRun[0].error, "", "a handoff is not an error");
+
+// ── contact phase ───────────────────────────────────────────────────────────
+// Firecrawl bills in credits and what a credit costs depends on the plan, which
+// this code cannot know. Unpriced is counted, never guessed at: a cap enforced
+// against a total that silently excludes a provider is worse than one that
+// admits the gap, and the run says so out loud when it happens.
+eq(firecrawlCreditUsd(undefined), null, "an unset price is unknown, not zero");
+eq(firecrawlCreditUsd(""), null, "an empty price is unknown");
+eq(firecrawlCreditUsd("not a number"), null, "an unparseable price is unknown");
+eq(firecrawlCreditUsd("-1"), null, "a negative price is unknown");
+eq(firecrawlCreditUsd("0.002"), 0.002, "a set price is used");
+eq(firecrawlCreditUsd("0"), 0, "an explicit zero is a price, not an absence");
+
+eq(firecrawlLookupCostUsd(5, null), 0, "an unpriced provider adds nothing to the cap");
+eq(firecrawlLookupCostUsd(5, 0.002), 5 * FIRECRAWL_CREDITS_PER_LOOKUP * 0.002, "lookups are priced per credit");
+eq(firecrawlLookupCostUsd(0, 0.002), 0, "no lookups cost nothing");
+
+// The transcript must show what the board shows once a contact is found.
+type CardForUpdate = { id: string; contact_name: string | null };
+const beforeContact = applyRunEvent([newTurn<CardForUpdate>("cafes")], {
+  type: "lead",
+  lead: { id: "L1", contact_name: null },
+});
+const afterContact = applyRunEvent(beforeContact, {
+  type: "lead_update",
+  lead: { id: "L1", contact_name: "Dana Okafor" },
+});
+eq(afterContact[0].leads.length, 1, "an update replaces the card rather than adding a second one");
+eq(afterContact[0].leads[0].contact_name, "Dana Okafor", "and carries the contact that was found");
+const unknownUpdate = applyRunEvent(beforeContact, {
+  type: "lead_update",
+  lead: { id: "L2", contact_name: "Sam Rivera" },
+});
+eq(unknownUpdate[0].leads.length, 2, "a lead the turn never saw is shown rather than dropped");
 
 console.log(`selfcheck: ${checks} assertions passed`);

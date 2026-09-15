@@ -78,6 +78,10 @@ nothing is posted.
    right region. Chambers of commerce, trade associations, and anything Enactus
    would have to *pay* to join are dropped here.
 5. **Persist** — survivors are written to Neon and appear on the board mid-run.
+6. **Find someone** — the top few leads get a contact lookup, and each is
+   re-scored the moment a real person is found. The three strongest signals the
+   club has are contact-level, so a board ordered before this step is ordered
+   by the weaker half of the rubric.
 
 One invocation is a 60-second serverless function, so a run tops out at 25
 leads. Asking for more says so and tells you to run it again.
@@ -120,6 +124,10 @@ GOOGLE_CLIENT_SECRET=    #
 GOOGLE_REDIRECT_URI=     # <APP_URL>/api/gmail/callback
 APP_URL=                 # where the app is served from
 SLACK_WEBHOOK_URL=       # in-kind win announcements (optional)
+FIRECRAWL_CREDIT_USD=    # what one Firecrawl credit costs on your plan, so
+                         # contact lookups count against the $20 cap. Unset
+                         # means they are counted but not priced, and the run
+                         # says so rather than under-reporting the total.
 SESSION_SECRET=          # any long random string
 APP_TEAM_PASSWORD=       # shared team login
 ```

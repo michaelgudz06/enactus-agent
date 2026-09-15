@@ -34,6 +34,9 @@ export interface RunTrace {
   placesEnriched: number;
   structured: number;
   delivered: number;
+  /** How many delivered leads got a contact lookup, and how many yielded a person. */
+  contactsAttempted: number;
+  contactsFound: number;
   /** Wall-clock milliseconds from the start of the run, per stage. */
   timings: Record<string, number>;
   /** Which models did the work, so a trace stays readable after a model swap. */
@@ -59,6 +62,8 @@ export function newTrace(input: { targetCount: number; askedFor: number | null }
     placesEnriched: 0,
     structured: 0,
     delivered: 0,
+    contactsAttempted: 0,
+    contactsFound: 0,
     timings: {},
     models: {},
     truncated: false,
@@ -104,6 +109,7 @@ export function traceSummary(trace: RunTrace, costUsd: number): string {
     `${trace.found} found`,
     `${trace.candidates.length} candidates`,
     trace.alreadyKnown ? `${trace.alreadyKnown} already known` : "",
+    trace.contactsAttempted ? `${trace.contactsFound}/${trace.contactsAttempted} contacts` : "",
     `$${costUsd.toFixed(4)}`,
     perLead === null ? "" : `$${perLead.toFixed(4)}/lead`,
     trace.truncated ? "truncated" : "",

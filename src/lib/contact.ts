@@ -137,3 +137,54 @@ export async function findContactFor(
 
   return found;
 }
+
+/**
+ * Find contacts for several leads at once, inside a deadline.
+ *
+ * WHY THIS RUNS IN THE PIPELINE NOW
+ *
+ * The weights in score.ts say plainly that the strongest signals the club has
+ * are contact-level: a named human replies at 15.7% against 5.5%, a personal
+ * address at 21.9% against 6.9%, a generic inbox at 2.8% against 10.7%. And
+ * none of them could fire at run time, because Exa returns pages about
+ * companies rather than staff directories and grounded() correctly refuses to
+ * invent a person.
+ *
+ * So every lead landed scored by companyPoints() alone -- storefront, headcount,
+ * SFU tie -- and board_order, the order a volunteer works top-down, was built
+ * from the weakest half of the rubric. The strongest half only arrived when
+ * somebody clicked, which is after they have already chosen which card to click.
+ *
+ * The reason it was out of the run was the clock: a scrape is 2-5s per URL and
+ * the run spent its whole 60s budget. Now that a run can hand a phase its own
+ * invocation, that reason is gone. Credits are still real, so this is capped
+ * and it stops the moment the deadline says so.
+ *
+ * Never throws. Each lead is independent: one site that hangs costs that lead
+ * its contact and nothing else.
+ */
+export async function enrichContacts(
+  leadIds: string[],
+  actorName: string,
+  opts: { deadline: number; perLeadMs?: number }
+): Promise<{ found: number; attempted: number }> {
+  const remaining = opts.deadline - Date.now();
+  if (!leadIds.length || remaining <= 0) return { found: 0, attempted: 0 };
+  // Concurrent, and bounded by the phase deadline rather than by a per-lead
+  // budget alone: the lookups are almost entirely waiting on someone else's
+  // web server, so running them one at a time would spend the whole phase on
+  // the first two leads.
+  const perLead = Math.max(4000, Math.min(opts.perLeadMs ?? 15_000, remaining));
+  const results = await Promise.allSettled(
+    leadIds.map((id) =>
+      findContactFor(id, actorName, { signal: AbortSignal.timeout(perLead) })
+    )
+  );
+  let found = 0;
+  for (const r of results) {
+    if (r.status !== "fulfilled") continue;
+    const v = r.value as ContactFind & { error?: string };
+    if (v.email || v.name) found++;
+  }
+  return { found, attempted: leadIds.length };
+}

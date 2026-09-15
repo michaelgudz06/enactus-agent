@@ -28,7 +28,7 @@ import { exaSearch, hasExaKey } from "./exa.ts";
 
 const BASE = "https://api.firecrawl.dev/v2";
 
-function hasFirecrawlKey(): boolean {
+export function hasFirecrawlKey(): boolean {
   const k = process.env.FIRECRAWL_API_KEY;
   return Boolean(k && !k.startsWith("REPLACE"));
 }
