@@ -33,6 +33,7 @@ import { looksConversational } from "./intent";
 import { reasoningFor } from "./reasoning";
 import { interleave, partition } from "./funnel";
 import { enrichContacts } from "./contact";
+import { hasFirecrawlKey } from "./firecrawl";
 import { newTrace, note, traceSummary, type RunTrace } from "./trace";
 import { RESUME_VERSION, isResumable, shouldHandOff, type ResumePhase, type ResumeState } from "./resume";
 // Every rule about who the club targets -- in prose for the prompts and as
@@ -869,6 +870,22 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
 }
 
 /**
+ * Why the contact phase cannot run right now, or null when it can.
+ *
+ * Two reasons, and both have to be checked before the handoff rather than
+ * inside the work: a missing key makes every lookup fail, and the budget cap is
+ * the whole reason this stage is bounded at all. Reported as a sentence because
+ * it is shown to a volunteer, who should be told the leads are fine and only
+ * the contact lookup was skipped.
+ */
+async function contactPhaseBlocker(): Promise<string | null> {
+  if (!hasFirecrawlKey()) return "FIRECRAWL_API_KEY is not set";
+  const state = await budgetState();
+  if (overBudget(state)) return budgetStopMessage(state);
+  return null;
+}
+
+/**
  * Phase three: find a named human at each lead this run just created.
  *
  * Runs last on purpose. Everything before it produces companies; this is the
@@ -888,6 +905,16 @@ async function runContacts(
   trace: RunTrace,
   deadline: number
 ): Promise<void> {
+  // Re-checked here as well as at the call site: the resumed path reaches this
+  // function directly from resumeAgent(), and a run can sit parked long enough
+  // for the month's budget to be spent by something else.
+  const blocker = await contactPhaseBlocker();
+  if (blocker) {
+    note(trace, `contact lookup skipped: ${blocker}`);
+    emit({ type: "status", step: "contacts", message: `Skipping the contact lookup -- ${blocker}.` });
+    return;
+  }
+
   emit({
     type: "status",
     step: "contacts",
@@ -991,7 +1018,7 @@ export async function resumeAgent(runId: string, emit: Emit): Promise<void> {
       emit({ type: "error", message: `Could not read the run to resume: ${(e as Error).message}` });
       return;
     }
-    // Anything but 'analysing' means this run was already finished, or never
+    // Anything but 'parked' means this run was already finished, or never
     // handed off. Resuming it twice would reason over the same candidates again
     // and pay for it again.
     if (!row || row.status !== "parked") {
@@ -1501,7 +1528,20 @@ ${mode === "sales" ? "" : STRUCTURE_EXCLUSION_RULE}`;
     .filter((l) => l.website && !l.contact_name && !l.contact_email)
     .slice(0, CONTACT_ENRICH_MAX)
     .map((l) => l.id);
-  if (needContacts.length) {
+  // Checked BEFORE the handoff, not just before the work. Without a key every
+  // lookup returns "FIRECRAWL_API_KEY is not set" -- but the run would already
+  // have parked itself and spent a whole extra invocation to find that out. And
+  // this is the one stage that spends money without a model having decided it
+  // was worth it, so it is also the one stage that must not run past the cap.
+  const contactsBlocker = needContacts.length ? await contactPhaseBlocker() : null;
+  if (needContacts.length && contactsBlocker) {
+    note(trace, `contact lookup skipped: ${contactsBlocker}`);
+    emit({
+      type: "status",
+      step: "contacts",
+      message: `Skipping the contact lookup -- ${contactsBlocker}. The leads are on the board; use Find contact on a card when you want one.`,
+    });
+  } else if (needContacts.length) {
     const contactsInput: ContactsInput = { leadIds: needContacts, userName, targetCount };
     if (state.searchId && hasDatabaseUrl() && shouldHandOff(msLeft(), CONTACTS_MIN_MS)) {
       if (await saveResumeState(state.searchId, "contacts", contactsInput, trace, state.costUsd)) {
