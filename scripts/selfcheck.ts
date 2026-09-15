@@ -43,6 +43,8 @@ import { looksConversational } from "../src/lib/intent.ts";
 import { reasoningFor } from "../src/lib/reasoning.ts";
 import { interleave, partition } from "../src/lib/funnel.ts";
 import { costPerLead, newTrace, note, traceSummary } from "../src/lib/trace.ts";
+import { RESUME_VERSION, isResumable, shouldHandOff } from "../src/lib/resume.ts";
+import { applyEvent as applyRunEvent } from "../src/lib/run-events.ts";
 import {
   HARD_EXCLUSIONS,
   PROMO_SUPPLIER,
@@ -1482,5 +1484,36 @@ ok(summary.includes("truncated"), "the summary says when structuring was cut sho
 ok(summary.includes("Apollo unreachable"), "the summary carries the degradations");
 ok(!traceSummary(newTrace({ targetCount: 5, askedFor: null }), 0.1).includes("/lead"),
    "a run with no leads reports no per-lead figure");
+
+// ── resumable runs ──────────────────────────────────────────────────────────
+// Biased towards continuing inline: a handoff costs a round trip and a cold
+// start, so it has to buy the analysis a budget worth spending.
+ok(!shouldHandOff(45_000, 30_000), "plenty of clock left means run straight on");
+ok(shouldHandOff(9_000, 30_000), "nine seconds is not enough to reason in");
+ok(shouldHandOff(0, 30_000), "a spent budget always hands off");
+ok(!shouldHandOff(30_000, 30_000), "exactly enough is enough");
+
+// A state written by a different build is discarded, never half-read: the cost
+// of refusing a resume is a repeated search, the cost of guessing at one is a
+// run that reasons over the wrong candidates.
+const goodState = { v: RESUME_VERSION, input: { candidates: [{}] }, trace: {}, costUsd: 0.1 };
+ok(isResumable(goodState), "a state from this build resumes");
+ok(!isResumable({ ...goodState, v: RESUME_VERSION + 1 }), "a newer state is refused");
+ok(!isResumable({ ...goodState, v: RESUME_VERSION - 1 }), "an older state is refused");
+ok(!isResumable({ ...goodState, input: null }), "a state with no input is refused");
+ok(!isResumable(null), "no state at all is refused");
+ok(!isResumable("{}"), "a string is not a state");
+
+// A handoff must not close the transcript: the run is still going, in the
+// invocation the client is about to start. Marking it done here would end the
+// turn over a run that has produced no leads yet.
+const midRun = applyRunEvent([newTurn<string>("cafes in burnaby")], {
+  type: "continue",
+  runId: "r1",
+  message: "picking up with a fresh budget",
+});
+eq(midRun[0].done, false, "a handoff does not end the turn");
+eq(midRun[0].steps.at(-1)?.step, "continue", "a handoff shows as a step in the transcript");
+eq(midRun[0].error, "", "a handoff is not an error");
 
 console.log(`selfcheck: ${checks} assertions passed`);

@@ -274,3 +274,15 @@ create index if not exists enactus_spend_search_idx on enactus_spend (search_id)
 -- The similar-search check reads this; it must not start matching answer turns
 -- against lead searches now that both are logged here.
 create index if not exists enactus_searches_kind_idx on enactus_searches (mode, kind, created_at desc);
+
+-- A handed-off run's settled candidate pool, parked between invocations.
+--
+-- A run is one 60s function, and discovery, reasoning and structuring shared
+-- that one budget -- so a slow search was paid for by the stage that actually
+-- produces the leads. When discovery leaves too little to reason properly, the
+-- pool is written here and a second invocation picks it up with a clock of its
+-- own. Cleared the moment it is claimed, so a run cannot be resumed twice.
+--
+-- status carries 'analysing' while a run is parked. The column already existed
+-- with 'running' / 'done' / 'error'; this is a fourth value, not a new column.
+alter table enactus_searches add column if not exists resume_state jsonb;

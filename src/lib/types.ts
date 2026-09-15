@@ -86,5 +86,10 @@ export type AgentEvent =
   | { type: "similar"; message: string; suggestion: string; pastPrompt: string }
   | { type: "clarify"; questions: string[] }
   | { type: "lead"; lead: Lead }
+  // The run got its candidates but not enough of the clock to reason over them
+  // properly, so it parked them and closed the response. The client POSTs the
+  // runId straight back to finish it with a fresh budget. Not an error and not
+  // a completion: a run that emits this is still running.
+  | { type: "continue"; runId: string; message: string }
   | { type: "done"; count: number; searchId: string | null }
   | { type: "error"; message: string };

@@ -33,6 +33,7 @@ import { looksConversational } from "./intent";
 import { reasoningFor } from "./reasoning";
 import { interleave, partition } from "./funnel";
 import { newTrace, note, traceSummary, type RunTrace } from "./trace";
+import { RESUME_VERSION, isResumable, shouldHandOff, type ResumeState } from "./resume";
 // Every rule about who the club targets -- in prose for the prompts and as
 // patterns for the code -- lives in one file. See its header for why.
 import {
@@ -55,6 +56,15 @@ import {
 import { budgetState, flushSpend, ledgerWriteProblem, recordSpend } from "./spend";
 
 type Emit = (e: AgentEvent) => void;
+
+// One invocation's working budget. Vercel Hobby kills the function at 60s (see
+// maxDuration in the route); stopping at 52 leaves room to persist and flush.
+const RUN_BUDGET_MS = 52_000;
+
+// What the analysis phase wants in order to reason properly rather than merely
+// finish: R1's cap plus structuring's reserve plus room to persist. Below this,
+// the run hands off rather than squeezing both stages into what discovery left.
+const ANALYSIS_MIN_MS = 30_000;
 
 // Planner retry. See the loop in runPipeline().
 const PLAN_ATTEMPTS = 2;
@@ -124,6 +134,25 @@ interface Candidate {
   result: ExaResult;
   domain: string;
   org: ApolloOrg | null;
+}
+
+/**
+ * Everything phase two needs from phase one.
+ *
+ * Plain data, all of it: this is exactly what crosses a handoff, so a field
+ * that cannot survive JSON cannot be added here by accident.
+ */
+interface AnalysisInput {
+  fullPrompt: string;
+  mode: Mode;
+  userName: string;
+  targetCount: number;
+  askedFor: number | null;
+  criteria: string;
+  candidates: Candidate[];
+  foundCount: number;
+  alreadyKnown: number;
+  dropped: Record<string, number>;
 }
 
 
@@ -264,7 +293,6 @@ async function runPipeline(
   const capNote = overCap
     ? ` (you asked for ${askedFor}; ${MAX_COUNT} is the most one run can do -- run it again to keep going)`
     : "";
-  const capTail = overCap ? ` ${MAX_COUNT} is the most one run can do, so run it again to keep going.` : "";
 
   // Everything this run did, written to enactus_searches when it ends. See
   // src/lib/trace.ts: without it, an outcome on the board cannot be traced back
@@ -284,7 +312,7 @@ async function runPipeline(
   // Vercel Hobby kills the function at 60s (see maxDuration in the route).
   // Stop our own work at 52s so there is room to persist the leads and flush
   // the stream. Overrunning it loses the whole run.
-  const RUN_DEADLINE = Date.now() + 52_000;
+  const RUN_DEADLINE = Date.now() + RUN_BUDGET_MS;
 
   // The $20 CAD monthly cap. Checked before any paid call and again before the
   // structuring stage, so a run that crosses the line mid-flight stops instead
@@ -314,16 +342,6 @@ async function runPipeline(
     addCost(costUsd);
     void recordSpend({ provider: "exa", detail, costUsd, searchId: state.searchId });
   };
-  // Do NOT tune this from a one-off measurement. The same structuring call has
-  // been measured at 1.0s and at over 20s within the same hour, on the same
-  // model and provider -- two separate sessions have now sized this budget from
-  // a lucky reading and starved the stage that actually produces the leads.
-  // The reserve is deliberately generous, and structuring streams so that
-  // overrunning it costs a few leads rather than all of them.
-  const STRUCTURE_RESERVE_MS = 20_000;
-  // R1 is verbose and never returns early, so this cap trades reasoning depth
-  // for headroom rather than risking the run.
-  const R1_CAP_MS = 16_000;
   const t0 = Date.now();
   const mark = (label: string) => {
     const at = Date.now() - t0;
@@ -787,6 +805,218 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
     message: `${notes.join(", ")} → analyzing ${candidates.length} candidates for ${targetCount} leads`,
   });
 
+  const analysisInput: AnalysisInput = {
+    fullPrompt,
+    mode,
+    userName,
+    targetCount,
+    askedFor,
+    criteria: plan.criteria,
+    candidates,
+    foundCount,
+    alreadyKnown,
+    dropped,
+  };
+
+  // Hand the analysis a clock of its own, but only when running on would mean
+  // giving it one too small to be worth spending. Discovery usually leaves
+  // plenty, and then this is exactly the pipeline that was here before.
+  if (state.searchId && hasDatabaseUrl() && shouldHandOff(RUN_DEADLINE - Date.now(), ANALYSIS_MIN_MS)) {
+    const handedOff = await saveResumeState(state.searchId, analysisInput, trace, state.costUsd);
+    if (handedOff) {
+      mark("handing off to a fresh invocation for analysis");
+      note(trace, "analysis ran in a second invocation");
+      emit({
+        type: "continue",
+        runId: state.searchId,
+        message: `Found ${candidates.length} candidates with ${Math.round(
+          (RUN_DEADLINE - Date.now()) / 1000
+        )}s left -- picking up the analysis with a fresh budget.`,
+      });
+      // Deliberately NOT closing the run: it is still running, in the
+      // invocation that is about to pick it up.
+      state.trace = null;
+      return;
+    }
+    // Could not store the state, so there is nothing to resume from. Running on
+    // with a short budget is worse than a full one and better than nothing.
+    note(trace, "handoff unavailable, analysed on a short budget");
+  }
+
+  await runAnalysis(analysisInput, emit, state, trace, RUN_DEADLINE);
+}
+
+/**
+ * Park a run's settled candidate pool on its row so another invocation can
+ * finish it.
+ *
+ * Returns false rather than throwing when the state could not be stored: the
+ * caller's fallback is to run the analysis here and now on whatever budget is
+ * left, which is worse than a fresh one and far better than losing the
+ * discovery that was already paid for.
+ */
+async function saveResumeState(
+  searchId: string,
+  input: AnalysisInput,
+  trace: RunTrace,
+  costUsd: number
+): Promise<boolean> {
+  const stored: ResumeState<AnalysisInput, RunTrace> = { v: RESUME_VERSION, input, trace, costUsd };
+  try {
+    await db()`
+      update enactus_searches
+         set resume_state = ${JSON.stringify(stored)}::jsonb, status = 'analysing'
+       where id = ${searchId}`;
+    return true;
+  } catch (e) {
+    console.error("could not store resume state:", (e as Error).message);
+    return false;
+  }
+}
+
+/**
+ * Finish a run that was handed off.
+ *
+ * The resumed half gets a whole invocation for the reasoning and structuring
+ * that used to share a budget with discovery. Everything it needs was settled
+ * and paid for by the first half; nothing here searches again.
+ */
+export async function resumeAgent(runId: string, emit: Emit): Promise<void> {
+  const state: RunState = { searchId: runId, trace: null, costUsd: 0, error: null };
+  try {
+    if (!hasDatabaseUrl()) {
+      emit({ type: "error", message: "DATABASE_URL missing, so a handed-off run cannot be resumed." });
+      return;
+    }
+    let row: { resume_state: unknown; status: string } | undefined;
+    try {
+      [row] = (await db()`
+        select resume_state, status from enactus_searches where id = ${runId}`) as {
+        resume_state: unknown;
+        status: string;
+      }[];
+    } catch (e) {
+      emit({ type: "error", message: `Could not read the run to resume: ${(e as Error).message}` });
+      return;
+    }
+    // Anything but 'analysing' means this run was already finished, or never
+    // handed off. Resuming it twice would reason over the same candidates again
+    // and pay for it again.
+    if (!row || row.status !== "analysing") {
+      emit({ type: "error", message: "That run is not waiting to be resumed." });
+      return;
+    }
+    if (!isResumable<AnalysisInput, RunTrace>(row.resume_state)) {
+      emit({
+        type: "error",
+        message: "The stored candidates were written by a different version and cannot be resumed. Run the search again.",
+      });
+      return;
+    }
+    const stored = row.resume_state;
+    state.costUsd = stored.costUsd ?? 0;
+    state.trace = stored.trace;
+    // Claimed before any work, so two clients racing the same handoff cannot
+    // both spend a reasoning pass on it.
+    await db()`update enactus_searches set status = 'running', resume_state = null where id = ${runId}`;
+    emit({
+      type: "status",
+      step: "research",
+      message: `Analysing ${stored.input.candidates.length} candidates for ${stored.input.targetCount} leads`,
+    });
+    await runAnalysis(stored.input, emit, state, stored.trace, Date.now() + RUN_BUDGET_MS);
+  } catch (e) {
+    state.error = (e as Error).message;
+    throw e;
+  } finally {
+    if (state.trace) {
+      await closeRun(state.searchId, state.trace, state.costUsd, state.error ? "error" : "done", state.error);
+    }
+    await flushSpend();
+  }
+}
+
+/**
+ * Phase two: reason over a settled candidate pool and turn it into leads.
+ *
+ * Split out so it can run either inline -- which is what happens whenever
+ * discovery left enough of the budget, and is byte-for-byte what the pipeline
+ * did before -- or in a fresh invocation with a clock of its own. See
+ * src/lib/resume.ts for why that matters: the reasoning stage used to be
+ * squeezed by however long discovery happened to take, so the slow days, which
+ * are the days that most need the reasoning, were the days it got least.
+ *
+ * `deadline` is an absolute timestamp rather than a duration because the two
+ * callers mean different things by it: running on, the caller's remaining
+ * budget; resumed, a full fresh one.
+ */
+async function runAnalysis(
+  input: AnalysisInput,
+  emit: Emit,
+  state: RunState,
+  trace: RunTrace,
+  deadline: number
+): Promise<void> {
+  const { fullPrompt, mode, userName, targetCount, askedFor, candidates } = input;
+  const dropped = input.dropped;
+  let alreadyKnown = input.alreadyKnown;
+  const capTail =
+    askedFor !== null && askedFor > MAX_COUNT
+      ? ` ${MAX_COUNT} is the most one run can do, so run it again to keep going.`
+      : "";
+  const RUN_DEADLINE = deadline;
+  const msLeft = () => RUN_DEADLINE - Date.now();
+  const t0 = Date.now();
+  const mark = (label: string) => {
+    const at = Date.now() - t0;
+    trace.timings[label] = at;
+    console.log(`[agent] ${label} @${at}ms`);
+  };
+  const charge = (u: Usage) => {
+    const inputTokens = u.inputTokens ?? tokensFromChars(u.inputChars);
+    const outputTokens = u.outputTokens ?? tokensFromChars(u.outputChars);
+    const costUsd = openRouterCostUsd(u.model, inputTokens, outputTokens);
+    state.costUsd += costUsd;
+    void recordSpend({ provider: "openrouter", detail: u.model, costUsd, searchId: state.searchId });
+  };
+  const budgetBlocked = async (): Promise<boolean> => {
+    const s = await budgetState();
+    if (!overBudget(s)) return false;
+    emit({ type: "error", message: budgetStopMessage(s) });
+    return true;
+  };
+  // Do NOT tune these from a one-off measurement. The same structuring call has
+  // been measured at 1.0s and at over 20s within the same hour, on the same
+  // model and provider -- two separate sessions have now sized this budget from
+  // a lucky reading and starved the stage that actually produces the leads.
+  // The reserve is deliberately generous, and structuring streams so that
+  // overrunning it costs a few leads rather than all of them.
+  //
+  // What HAS changed is what these are a share of. They used to divide whatever
+  // discovery left behind, so a slow search shrank them both; now the caller
+  // hands this phase a fresh invocation rather than let that happen, and R1's
+  // cap is a cap rather than a symptom.
+  const STRUCTURE_RESERVE_MS = 20_000;
+  // R1 is verbose and never returns early, so this cap trades reasoning depth
+  // for headroom rather than risking the run.
+  const R1_CAP_MS = 16_000;
+  const REASONING_CHARS_PER_CHUNK = 3000;
+
+  // The board names to dedupe the model's output against. Re-read rather than
+  // carried across the handoff: it is one query, it can be several hundred rows,
+  // and a resumed run wants the board as it is now rather than as it was when
+  // discovery ran.
+  const boardNames = new Set<string>();
+  if (hasDatabaseUrl()) {
+    try {
+      const rows = (await db()`
+        select company from enactus_leads where mode = ${mode}`) as { company: string | null }[];
+      for (const r of rows ?? []) if (r.company) boardNames.add(companyKey(r.company));
+    } catch {
+      // Non-fatal: the in-run dedupe and the unique index both still apply.
+    }
+  }
+
   // ── 4. Reason + score with R1 (visible reasoning) ───────────────────────
   // Apollo's facts go in as a labelled line so the model states real employee
   // counts, industries and locations instead of inventing them. Anything it
@@ -820,7 +1050,7 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
 
   // Stage A — R1 reasons out loud (visible), no JSON. Capped so it stays snappy.
   const reasoningUser = `User request: ${fullPrompt}
-Ideal lead: ${plan.criteria}
+Ideal lead: ${input.criteria}
 
 Candidates:
 ${context}
@@ -836,7 +1066,6 @@ Reason candidate by candidate: how would each be approached and why might they s
   // still has to run after this. Both LLM stages share ONE deadline instead, so
   // whatever planning overran comes out of R1's slice rather than out of
   // structuring, which is the stage that actually produces the leads.
-  const msLeft = () => RUN_DEADLINE - Date.now();
   const R1_BUDGET_MS = Math.max(5000, Math.min(R1_CAP_MS, msLeft() - STRUCTURE_RESERVE_MS));
   const controller = new AbortController();
   const budget = setTimeout(() => controller.abort(), R1_BUDGET_MS);
@@ -878,7 +1107,6 @@ Reason candidate by candidate: how would each be approached and why might they s
   // the FRONT and handed to every chunk alike, so the last chunk read an
   // argument about the first chunk's candidates and R1's conclusions -- which
   // land at the end -- were discarded outright. See src/lib/reasoning.ts.
-  const REASONING_CHARS_PER_CHUNK = 3000;
 
   // Measured on a real 10-lead run: v3.2 emits ~400 output tokens per lead and
   // the provider was managing ~90 tok/s, so ten leads is ~45s of generation --
@@ -901,7 +1129,7 @@ Reason candidate by candidate: how would each be approached and why might they s
   const wantPerChunk = Math.ceil(targetCount / nChunks);
 
   const structureUserFor = (slice: Candidate[], startIdx: number, want: number) => `User request: ${fullPrompt}
-Ideal lead: ${plan.criteria}
+Ideal lead: ${input.criteria}
 Mode: ${mode}
 
 Candidates:
