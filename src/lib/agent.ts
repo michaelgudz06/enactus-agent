@@ -30,6 +30,7 @@ import { db, hasDatabaseUrl } from "./db";
 import { MAX_COUNT, parsedCount, requestedCount } from "./count";
 import { ENACTUS_ORG, ENACTUS_PROJECTS, ENACTUS_VENTURES } from "./enactus";
 import { looksConversational } from "./intent";
+import { reasoningFor } from "./reasoning";
 // Every rule about who the club targets -- in prose for the prompts and as
 // patterns for the code -- lives in one file. See its header for why.
 import {
@@ -627,6 +628,11 @@ intent is "leads" for EVERYTHING else, including a bare noun phrase naming a kin
       })
       .join("\n\n");
   const context = renderContext(candidates, 0);
+  // The labels the prompt gives each candidate, in the same order, so the
+  // reasoning slicer can attribute a block to "[7]" or to the company named in
+  // it. Built from the same expression renderContext uses, so the two cannot
+  // disagree about what candidate [7] is called.
+  const candidateNames = candidates.map((c) => c.org?.name || c.result.title || c.domain);
 
   const scoreSystem = analystSystemPrompt(mode);
 
@@ -686,6 +692,12 @@ Reason candidate by candidate: how would each be approached and why might they s
   // Stage B — V3 turns the analysis into reliable structured JSON.
   emit({ type: "status", step: "structure", message: "Structuring the shortlisted leads" });
 
+  // Per chunk, not per run. The whole trace used to be cut at 3000 chars from
+  // the FRONT and handed to every chunk alike, so the last chunk read an
+  // argument about the first chunk's candidates and R1's conclusions -- which
+  // land at the end -- were discarded outright. See src/lib/reasoning.ts.
+  const REASONING_CHARS_PER_CHUNK = 3000;
+
   // Measured on a real 10-lead run: v3.2 emits ~400 output tokens per lead and
   // the provider was managing ~90 tok/s, so ten leads is ~45s of generation --
   // more than the entire function budget, and no reshuffling of the time
@@ -714,7 +726,12 @@ Candidates:
 ${renderContext(slice, startIdx)}
 
 Analyst reasoning to base your selection on:
-${reasoningText.slice(0, 3000)}
+${reasoningFor(reasoningText, {
+    names: candidateNames,
+    first: startIdx,
+    count: slice.length,
+    maxChars: REASONING_CHARS_PER_CHUNK,
+  })}
 
 Output ONLY JSON. Return EXACTLY ${want} leads if the candidates allow it, best first. There are ${slice.length} candidates above, so returning fewer than ${want} means leaving usable prospects unsent. Include every candidate that is a plausible ${mode === "sales" ? "customer" : "sponsor"} worth one email, not only the ideal ones. Only return fewer than ${want} if the remaining candidates are genuinely unsuitable.
 {"leads":[{"company","website","industry","location","description","contact_name","contact_role","contact_email","connection_type","connection_note","sponsorship_type","why_fit","reasoning","source_index"}]}
